@@ -132,16 +132,51 @@ function requireHeaderAuth(req, res, next) {
 // A fresh McpServer per session. connect() binds a server to exactly one transport;
 // sharing a single global server across sessions causes responses to cross-route.
 function buildMcpServer() {
-  const server = new McpServer({ name: "secure-web-brain", version: "2.2.0" });
+  const server = new McpServer(
+    { name: "secure-web-brain", version: "2.2.0" },
+    {
+      instructions:
+        "This server is the user's personal, long-term memory. Proactively call store_memory whenever the " +
+        "user shares a durable fact, preference, decision, or event worth remembering. Call search_memories " +
+        "before answering questions about the user, their history, or prior context, and ground your answer " +
+        "in what you recall. Memories persist across sessions and across every tool that connects here.",
+    }
+  );
 
-  server.tool("store_memory", { content: ContentSchema }, async ({ content }) => {
-    const id = await executeStore(content);
-    return { content: [{ type: "text", text: `Memory logged successfully under local ID: ${id}` }] };
-  });
+  server.registerTool(
+    "store_memory",
+    {
+      title: "Store a memory",
+      description:
+        "Save a single durable fact to the user's long-term memory for recall in future sessions. Use for " +
+        "preferences, relationships, decisions, and events — not for transient conversational filler.",
+      inputSchema: {
+        content: ContentSchema.describe(
+          "One self-contained fact to remember, phrased so it stands alone without surrounding context " +
+          "(e.g. \"User's sister Sarah lives in Austin and is a pediatric nurse.\")."
+        ),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ content }) => {
+      const id = await executeStore(content);
+      return { content: [{ type: "text", text: `Memory logged successfully under local ID: ${id}` }] };
+    }
+  );
 
-  server.tool(
+  server.registerTool(
     "search_memories",
-    { query: z.string().min(1), limit: LimitSchema.optional() },
+    {
+      title: "Search memories",
+      description:
+        "Semantic search over the user's stored memories. Call before answering questions about the user or " +
+        "referencing past context; returns the closest memories ranked by similarity (lower score = closer).",
+      inputSchema: {
+        query: z.string().min(1).describe("Natural-language description of what to recall, e.g. \"where does my sister live\"."),
+        limit: LimitSchema.optional().describe("Maximum number of memories to return (1-50, default 3)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
     async ({ query, limit = 3 }) => {
       const matches = await executeRecall(query, limit);
       if (matches.length === 0) {
