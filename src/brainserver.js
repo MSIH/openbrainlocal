@@ -248,7 +248,7 @@ app.use((err, req, res, next) => {
 });
 
 const serverInstance = app.listen(PORT, () => {
-  console.log(`🔒 OpenRouter-Powered Streamable HTTP Brain operating on port ${PORT}`);
+  console.log(`🔒 Local Ollama-Powered Streamable HTTP Brain operating on port ${PORT}`);
 });
 
 // --- GRACEFUL SHUTDOWN ---
