@@ -29,8 +29,8 @@ dotenv.config();
 
 // --- CONFIGURATION CONSTANTS ---
 const PORT = process.env.PORT || 3000;
-const EMBEDDING_MODEL = "openai/text-embedding-3-small"; // OpenRouter slug format
-const VECTOR_DIMENSION = 1536;
+const EMBEDDING_MODEL = "qwen3-embedding:0.6b"; // local Ollama embedding model
+const VECTOR_DIMENSION = 1024;                  // was 1536 (OpenAI); Qwen3 embeddings are 1024-dim
 
 // Fail closed instantly if the secret is unset or still the placeholder
 const BRAIN_SECRET_KEY = process.env.BRAIN_SECRET_KEY;
@@ -56,14 +56,10 @@ db.exec(`
   );
 `);
 
-// --- OPENROUTER RE-ROUTING GATEWAY ---
+// --- LOCAL EMBEDDING GATEWAY (Ollama; was OpenRouter) ---
 const openrouter = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY,
-  defaultHeaders: {
-    "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
-    "X-Title": "Local Unlimited Shared Brain (OB1 Mod)",
-  }
+  baseURL: "http://localhost:11434/v1",
+  apiKey: "ollama", // Ollama ignores it, but the OpenAI SDK requires a non-empty string
 });
 
 // Prepared statements, compiled once
