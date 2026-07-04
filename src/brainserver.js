@@ -77,7 +77,8 @@ const recallStmt = db.prepare(`
 const storeTxn = db.transaction((content, float32Vector) => {
   const info = insertRawStmt.run(content);
   const memoryId = info.lastInsertRowid;
-  insertVecStmt.run(memoryId, float32Vector);
+  // sqlite-vec's vec0 requires the PK bound as a BigInt (a plain Number is rejected); memoryId stays a Number for the JSON response.
+  insertVecStmt.run(BigInt(memoryId), float32Vector);
   return memoryId;
 });
 
