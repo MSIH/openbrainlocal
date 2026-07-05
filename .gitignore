@@ -4,4 +4,8 @@ node_modules/
 *.db-wal
 *.db-shm
 logs/
+.worktrees/
 .claude/settings.local.json
+.claude/.draft-issue-done
+.claude/.pre-pr-review-done
+.claude/.draft-issue-skip

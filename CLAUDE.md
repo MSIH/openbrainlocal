@@ -54,9 +54,12 @@ Smoke test (`$KEY` = `BRAIN_SECRET_KEY`): `POST /api/remember` then `/api/recall
 5. **Memory is append-only — never hard-delete or overwrite** stored memories/artifacts. Preserve originals (`raw_path`, `content_hash`). See `.claude/rules/design-philosophy.md`.
 6. **Providers pluggable, config-driven.** Embedding/LLM backends are swappable via env (local Ollama by default); don't couple logic to a specific provider.
 
-## Every Change
-- A GitHub issue, then a branch, then a PR whose body starts with `Closes #<n>`, then merge to `main`. Sync `main` after merge.
-- Run the store→recall smoke test (server must boot, 0 errors) before committing server changes.
+## Every Change (mandatory workflow — no exceptions)
+Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI agents concurrently, so branches must be isolated in their own working dirs:
+1. **`/draft-issue`** — file a GitHub issue and get explicit approval on the Implementation Plan first. (Gate denies `gh issue create` without a fresh marker.)
+2. **worktree** — create the branch with `git worktree add`, NEVER a plain `git checkout -b` / `git switch -c`.
+3. **`/pre-pr-review`** — run the multi-persona review, then open the PR (body starts with `Closes #<n>`). (Gate denies `gh pr create` without an APPROVE marker.) The repo ruleset requires a PR to `main`; merge, then sync `main`.
+- Run the store→recall smoke test (server boots, 0 errors) before committing server changes.
 - Update the relevant `docs/**` when behavior changes; keep the README Quickstart accurate.
 - Commit messages: imperative, ≤2 sentences. Reference issues/PRs as `#<n> "<title>"`.
 
@@ -70,7 +73,8 @@ Smoke test (`$KEY` = `BRAIN_SECRET_KEY`): `POST /api/remember` then `/api/recall
 - `PORT` (default 3000)
 - Optional/for later cloud enrichment: provider keys — keep out of git.
 
-## Local settings
-Personal Claude Code settings (model, permissions, hooks) go in **`.claude/settings.local.json`** (gitignored) — do NOT commit them to this public repo.
+## Workflow tooling & local settings
+The mandatory-workflow tooling is committed in `.claude/` so it travels with the repo — cloud/remote agents get only the git checkout, never `~/.claude`: skills `/draft-issue` + `/pre-pr-review` (`.claude/commands/`), the gate hooks (`.claude/hooks/`), and their wiring + an `rm` deny (`.claude/settings.json`).
+Personal Claude Code settings (model, permission mode, extra hooks) go in **`.claude/settings.local.json`** (gitignored) — never commit those to this public repo.
 
 </rules>
