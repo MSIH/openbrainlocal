@@ -14,6 +14,39 @@ This project is **not affiliated with, endorsed by, or officially connected to**
 
 Every AI tool keeps its own siloed memory, so each new chat or tool starts from zero. Open Brain flips that around: **you** own one memory store, and every AI plugs into it. Open Brain Local pursues the same goal without any cloud service — your data and the gateway stay on your machine.
 
+## Quickstart
+
+Runs fully local — no cloud. Requires [Node.js](https://nodejs.org) 18+ and [Ollama](https://ollama.com/download).
+
+```bash
+# 1. Install dependencies
+npm install
+npm rebuild better-sqlite3        # only if npm skipped its native build
+
+# 2. Pull the embedding model (1024-dim — matches VECTOR_DIMENSION)
+ollama pull qwen3-embedding:0.6b
+
+# 3. Configure the secret
+cp .env.example .env              # then set BRAIN_SECRET_KEY to a random value
+
+# 4. Run
+npm start                         # REST + MCP on http://localhost:3000
+```
+
+Smoke test (`$KEY` = your `BRAIN_SECRET_KEY`):
+
+```bash
+curl -s -X POST localhost:3000/api/remember -H "x-api-key: $KEY" -H "Content-Type: application/json" -d '{"content":"My sister Sarah lives in Austin."}'
+curl -s -X POST localhost:3000/api/recall   -H "x-api-key: $KEY" -H "Content-Type: application/json" -d '{"query":"where does my sister live"}'
+```
+
+Recall returns the stored memory with a similarity score. For AI clients, point an MCP-capable tool (Claude Desktop, Cursor, …) at `http://<host>:3000/mcp` with an `x-api-key` header to get the `store_memory` / `search_memories` tools.
+
+### Interfaces
+
+- **REST** — `POST /api/remember`, `POST /api/recall` (header `x-api-key`)
+- **MCP** (Streamable HTTP) — `/mcp`, tools `store_memory` and `search_memories`
+
 ## Status
 
-Early scaffold — repository initialized. Implementation to follow.
+Working: local store → embed (Ollama) → semantic recall, over both REST and MCP. See [`docs/03-ob2-design.md`](docs/03-ob2-design.md) for the Open Brain 2 roadmap (multimodal ingestion, entity graph, query planner).
