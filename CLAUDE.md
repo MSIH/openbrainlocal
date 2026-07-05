@@ -58,7 +58,9 @@ Smoke test (`$KEY` = `BRAIN_SECRET_KEY`): `POST /api/remember` then `/api/recall
 Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI agents concurrently, so branches must be isolated in their own working dirs:
 1. **`/draft-issue`** — file a GitHub issue and get explicit approval on the Implementation Plan first. (Gate denies `gh issue create` without a fresh marker.)
 2. **worktree** — create the branch with `git worktree add`, NEVER a plain `git checkout -b` / `git switch -c`.
-3. **`/pre-pr-review`** — run the multi-persona review, then open the PR (body starts with `Closes #<n>`). (Gate denies `gh pr create` without an APPROVE marker.) The repo ruleset requires a PR to `main`; merge, then sync `main`.
+3. **`/pre-pr-review`** — run the multi-persona review (or **`/pre-doc-review`** for doc-only PRs), then open the PR (body starts with `Closes #<n>`). (Gate denies `gh pr create` without an APPROVE marker.) The repo ruleset requires a PR to `main`; merge, then sync `main`.
+
+`/planning` (Opus) can perform steps 1–2 (issue + plan + worktree) in one shot. The `worktree-edit-gate` hook **denies editing `.js` source outside a `.worktrees/` dir** — step 2 is not optional.
 - Run the store→recall smoke test (server boots, 0 errors) before committing server changes.
 - Update the relevant `docs/**` when behavior changes; keep the README Quickstart accurate.
 - Commit messages: imperative, ≤2 sentences. Reference issues/PRs as `#<n> "<title>"`.
@@ -74,7 +76,9 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 - Optional/for later cloud enrichment: provider keys — keep out of git.
 
 ## Workflow tooling & local settings
-The mandatory-workflow tooling is committed in `.claude/` so it travels with the repo — cloud/remote agents get only the git checkout, never `~/.claude`: skills `/draft-issue` + `/pre-pr-review` (`.claude/commands/`), the gate hooks (`.claude/hooks/`), and their wiring + an `rm` deny (`.claude/settings.json`).
+The mandatory-workflow tooling is committed in `.claude/` so it travels with the repo — cloud/remote agents get only the git checkout, never `~/.claude`:
+- **Skills** (`.claude/commands/`): `/draft-issue`, `/pre-pr-review`, `/pre-doc-review`. **Agent** (`.claude/agents/`): `/planning` (Opus — issue + plan + worktree).
+- **Hooks** (`.claude/hooks/`): `draft-issue-gate` + `pre-pr-review-gate` (deny), `worktree-gate` (advisory), `worktree-edit-gate` (deny `.js` edits outside a worktree), `session-start` (bootstrap Node deps on cloud/remote). Wired + an `rm` deny in `.claude/settings.json`.
 Personal Claude Code settings (model, permission mode, extra hooks) go in **`.claude/settings.local.json`** (gitignored) — never commit those to this public repo.
 
 </rules>
