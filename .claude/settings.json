@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm:*)",
+      "Bash(rm -rf:*)",
+      "Bash(del:*)",
+      "Bash(rmdir:*)",
+      "Bash(Remove-Item:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash(gh issue create*)",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/draft-issue-gate.sh", "shell": "bash", "statusMessage": "Draft-issue gate..." }
+        ]
+      },
+      {
+        "matcher": "mcp__github__create_issue",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/draft-issue-gate.sh", "shell": "bash", "statusMessage": "Draft-issue gate..." }
+        ]
+      },
+      {
+        "matcher": "Bash(git worktree add*)",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-gate.sh", "shell": "bash", "statusMessage": "Worktree confirmation gate..." }
+        ]
+      },
+      {
+        "matcher": "Bash(gh pr create*)",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre-pr-review-gate.sh", "shell": "bash", "statusMessage": "Pre-PR review gate..." }
+        ]
+      },
+      {
+        "matcher": "mcp__github__create_pull_request",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre-pr-review-gate.sh", "shell": "bash", "statusMessage": "Pre-PR review gate..." }
+        ]
+      }
+    ]
+  }
+}
