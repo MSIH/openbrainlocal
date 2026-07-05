@@ -4,3 +4,4 @@ node_modules/
 *.db-wal
 *.db-shm
 logs/
+.claude/settings.local.json
