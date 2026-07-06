@@ -115,7 +115,7 @@ CREATE TABLE entity_links (
 -- Semantic (existing OB1 pattern, now keyed to artifacts)
 CREATE VIRTUAL TABLE vec_artifacts USING vec0(
   artifact_id INTEGER PRIMARY KEY,
-  embedding float[1536]
+  embedding float[1024]        -- MUST match the embedding model; qwen3-embedding:0.6b -> 1024
 );
 
 -- Keyword/exact match — vectors are bad at names, IDs, exact phrases
@@ -123,6 +123,11 @@ CREATE VIRTUAL TABLE artifacts_fts USING fts5(
   text_repr, content='artifacts', content_rowid='id'
 );
 ```
+
+> **Implemented at dim 1024**, not the 1536 this doc first sketched — the live embedding model is
+> local `qwen3-embedding:0.6b` (1024-dim), driven by `VECTOR_DIMENSION`. External-content FTS is
+> kept in sync by a single `AFTER INSERT` trigger; because the store is append-only, no
+> delete/update shadow triggers or `('rebuild')` are needed.
 
 Hybrid (vector + FTS5, fused with reciprocal rank fusion) is the current best practice — semantic search alone whiffs on proper nouns and exact strings, which your footprint is full of.
 
@@ -205,6 +210,13 @@ WHERE a.type = 'photo'
 
 Then vector-rank only within those candidates (sqlite-vec supports `partition key` columns and metadata filtering as of v0.1.6 — or do the filter-then-KNN join in SQL). Fuse with FTS5 results via reciprocal rank fusion.
 
+> **v2.0 implementation note.** vec0 metadata filtering can't span the `entity_links` join or a
+> `place_label LIKE`, so the planner runs the SQL prefilter to a candidate id set, over-fetches a
+> KNN (`k = limit * KNN_OVERFETCH`, clamped), intersects it with the candidates in JS, does the same
+> for FTS `bm25()`, then fuses with RRF (`RRF_K`). The query parse is one small-LLM call
+> (`QUERY_MODEL`) validated with zod; if the model or the embedder is unreachable, search degrades
+> gracefully (pure-semantic plan / FTS-only) rather than failing.
+
 **Graph expansion for relationship queries:** "what's going on with my sister" → resolve relationship attr → Sarah entity → walk `entity_links` → recent artifacts of any type, sorted by `occurred_at`. No embedding needed at all.
 
 ### 4.1 MCP tool surface (v2)
@@ -235,7 +247,7 @@ Cheap (one small-model call per day), and it's the feature that makes the system
 
 | Phase | Scope | Why this order |
 |---|---|---|
-| **2.0** | Artifact schema + entity graph + FTS5; migrate OB1 memories to `type='note'`; contacts import; query planner v1 | Foundation; contacts seed the entity spine; everything is text-native (no new AI deps) |
+| **2.0** ✅ | Artifact schema + entity graph + FTS5; migrate OB1 memories to `type='note'`; contacts import; query planner v1 | Foundation; contacts seed the entity spine; everything is text-native (no new AI deps) — **shipped** (`src/db.js`, `search.js`, `migrate.js`, `connectors/contacts.js`) |
 | **2.1** | Email (Takeout mbox first, IMAP later) | Highest-density relationship data; deterministic entity links prove the graph |
 | **2.2** | Documents + filesystem watcher | Easy win on existing pipeline |
 | **2.3** | Photos: EXIF pass first (instantly queryable), VLM caption backlog second | Biggest emotional/recall payoff |
