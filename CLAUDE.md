@@ -21,17 +21,23 @@ Independent, local-first implementation of the "Open Brain" concept by Nate B. J
 
 ## Layout
 ```
-src/brainserver.js   — the server: REST + MCP, DB setup, embedding gateway, auth
-docs/                — design + setup docs (03-ob2-design.md is the roadmap)
-.env.example         — required env template (copy to .env; never commit .env)
-.claude/rules/       — coding standards, data-model, design-philosophy (read before editing)
+src/config.js            — single config source (dotenv loads here, before any env read)
+src/db.js                — the store: schema (artifacts + entity graph + vec/FTS), prepared stmts, storeArtifactTxn, ingest_log
+src/embeddings.js        — shared Ollama client + getEmbedding (used by server + scripts)
+src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS, RRF fusion, timeline/about_entity
+src/brainserver.js       — the server: REST + MCP tools, auth, transport (imports the modules above)
+src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
+src/connectors/contacts.js — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
+docs/                    — design + setup docs (03-ob2-design.md is the roadmap)
+.env.example             — required env template (copy to .env; never commit .env)
+.claude/rules/           — coding standards, data-model, design-philosophy (read before editing)
 ```
 
 ## Two Interfaces (same DB behind both)
 | Interface | Endpoints / tools | Auth |
 |-----------|-------------------|------|
-| REST | `POST /api/remember`, `POST /api/recall` | `x-api-key` header |
-| MCP (Streamable HTTP) | `/mcp` — tools `store_memory`, `search_memories` | `x-api-key` header |
+| REST | `POST /api/{remember,recall,search,timeline,about_entity}`, `GET /api/artifact/:id` | `x-api-key` header |
+| MCP (Streamable HTTP) | `/mcp` — tools `store_memory`, `search_memories`, `search`, `timeline`, `about_entity`, `get_artifact` | `x-api-key` header |
 
 ## Run & Test
 ```bash

@@ -1,11 +1,13 @@
 {
   "name": "openbrainlocal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first, self-owned AI memory layer — an independent implementation of the Open Brain concept.",
   "type": "module",
   "main": "src/brainserver.js",
   "scripts": {
-    "start": "node src/brainserver.js"
+    "start": "node src/brainserver.js",
+    "migrate": "node src/migrate.js",
+    "import:contacts": "node src/connectors/contacts.js"
   },
   "license": "MIT",
   "author": "Barry Schneider",
