@@ -14,6 +14,7 @@
  * plus RFC line-unfolding is simpler than a dependency.
  */
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import {
   db, storeArtifactTxn, sha256, logEvent,
   insertEntityStmt, insertAliasStmt, resolveEntityIds, normalizeName, normalizePhone,
@@ -23,7 +24,9 @@ import { embedToFloat32 } from '../embeddings.js';
 const findBySource = db.prepare('SELECT id FROM artifacts WHERE source = ? AND source_id = ?');
 const findByHash = db.prepare('SELECT id FROM artifacts WHERE content_hash = ? LIMIT 1');
 
-const unescape = (v) => v.replace(/\\n/gi, '\n').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\');
+// Single-pass unescape: decode each escape once so a literal escaped backslash (\\n) isn't
+// re-interpreted by a later pass.
+const unescape = (v) => v.replace(/\\([nN,;\\])/g, (_, ch) => (ch === 'n' || ch === 'N' ? '\n' : ch));
 
 /**
  * Parse vCard text into structured contact objects. Exported for unit testing.
@@ -145,7 +148,8 @@ async function main() {
   db.close();
 }
 
-// Run only as a CLI, not when imported for tests.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run only as a CLI, not when imported for tests. pathToFileURL handles spaces, non-ASCII,
+// and Windows paths that a hand-built file:// string would mismatch.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => { console.error('Contacts import failed:', err); process.exit(1); });
 }

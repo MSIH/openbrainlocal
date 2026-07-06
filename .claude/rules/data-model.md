@@ -13,7 +13,7 @@ Writes go through `storeArtifactTxn(artifact, float32Vector, links)` — enrich 
 
 ## Hard rules (learned the hard way)
 1. **`sqlite-vec` vec0 primary keys bind as `BigInt`.** `better-sqlite3` returns `lastInsertRowid` as a JS Number; passing a Number to a vec0 PK throws `SqliteError: Only integers are allowed for primary key values`. Cast: `insertVecStmt.run(BigInt(memoryId), vec)`. Keep the non-BigInt `id` for JSON responses (BigInt breaks `JSON.stringify`).
-2. **`VECTOR_DIMENSION` must equal the embedding model's output length** (`qwen3-embedding:0.6b` → 1024). `CREATE VIRTUAL TABLE IF NOT EXISTS` will NOT resize an existing vec table — changing models requires dropping `vec_memories` and re-embedding; vectors from different models are not comparable.
+2. **`VECTOR_DIMENSION` must equal the embedding model's output length** (`qwen3-embedding:0.6b` → 1024). `CREATE VIRTUAL TABLE IF NOT EXISTS` will NOT resize an existing vec table — changing models requires dropping `vec_artifacts` and re-embedding; vectors from different models are not comparable.
 3. **Embeddings are `Float32Array`** bound directly to the `embedding` column.
 4. **Enrich-then-commit atomically.** Fetch the embedding (network) before opening the transaction; the write of raw row + vector row is one `db.transaction` (`storeTxn`) so a failed API call never leaves an orphan.
 5. **WAL mode** (`journal_mode = WAL`) — set at startup; enables concurrent readers.

@@ -11,7 +11,11 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const int = (v, dflt) => (v === undefined ? dflt : parseInt(v, 10));
+const int = (v, dflt) => {
+  if (v === undefined) return dflt;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? dflt : n; // malformed env → default, never NaN into SQL/search math
+};
 
 export const PORT = process.env.PORT || 3000;
 
@@ -27,6 +31,8 @@ export const VECTOR_DIMENSION = int(process.env.VECTOR_DIMENSION, 1024);
 // Chat model used only by the query planner to parse a query into filters. Optional at
 // runtime: if it's unreachable, search degrades gracefully to pure semantic (see search.js).
 export const QUERY_MODEL = process.env.QUERY_MODEL || 'qwen2.5:3b';
+// Request timeout (ms) for the embedding/LLM gateway — a hung Ollama shouldn't block for the SDK's 10-min default.
+export const EMBED_TIMEOUT_MS = int(process.env.EMBED_TIMEOUT_MS, 60000);
 
 // --- Hybrid search tuning ---
 export const RRF_K = int(process.env.RRF_K, 60);          // reciprocal-rank-fusion constant

@@ -35,7 +35,9 @@ npm start                         # REST + MCP on http://localhost:3000
 ```
 
 Upgrading from an earlier version? Migrate your existing memories into the OB2 artifact
-store once (back up `unlimited_shared_brain.db` first — it's idempotent and safe to re-run):
+store once (back up `unlimited_shared_brain.db` first — it's idempotent and safe to re-run).
+It reuses the stored vectors as-is, so it's only valid when the embedding model and
+`VECTOR_DIMENSION` are unchanged — a model swap requires re-embedding, not this migration:
 
 ```bash
 npm run migrate                   # copies memories -> artifacts (type='note'), reusing vectors

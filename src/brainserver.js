@@ -184,7 +184,7 @@ function buildMcpServer() {
         start: z.string().min(1).describe("ISO start date/datetime (inclusive)."),
         end: z.string().min(1).describe("ISO end date/datetime (inclusive)."),
         types: z.array(TypeEnum).optional().describe(`Restrict to these types: ${ARTIFACT_TYPES.join(", ")}.`),
-        limit: LimitSchema.optional().describe("Max results (1-50, default 3)."),
+        limit: LimitSchema.optional().describe("Max results (1-50, default 50)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -202,7 +202,7 @@ function buildMcpServer() {
       description: "Resolve a person/place/org by name, email, or phone and return their profile plus recent linked artifacts.",
       inputSchema: {
         name: z.string().min(1).describe("Name, email, or phone of the entity, e.g. \"Sarah Jones\" or \"sarah.j@gmail.com\"."),
-        limit: LimitSchema.optional().describe("Max linked artifacts per entity (1-50, default 3)."),
+        limit: LimitSchema.optional().describe("Max linked artifacts per entity (1-50, default 10)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },

@@ -82,8 +82,8 @@ const candidateStmt = db.prepare(`
   LEFT JOIN entity_links el ON el.artifact_id = a.id
   WHERE (@types_json IS NULL OR a.type IN (SELECT value FROM json_each(@types_json)))
     AND (@ents_json  IS NULL OR el.entity_id IN (SELECT value FROM json_each(@ents_json)))
-    AND (@t0 IS NULL OR a.occurred_at >= @t0)
-    AND (@t1 IS NULL OR a.occurred_at <= @t1)
+    AND (@t0 IS NULL OR date(a.occurred_at) >= date(@t0))
+    AND (@t1 IS NULL OR date(a.occurred_at) <= date(@t1))
     AND (@place IS NULL OR a.place_label LIKE @place)
 `);
 const knnStmt = db.prepare(
@@ -113,8 +113,8 @@ const ftsInStmt = db.prepare(`
 const placeExistsStmt = db.prepare('SELECT 1 FROM artifacts WHERE place_label LIKE ? LIMIT 1');
 const timelineStmt = db.prepare(`
   SELECT * FROM artifacts
-  WHERE (@start IS NULL OR occurred_at >= @start)
-    AND (@end   IS NULL OR occurred_at <= @end)
+  WHERE (@start IS NULL OR date(occurred_at) >= date(@start))
+    AND (@end   IS NULL OR date(occurred_at) <= date(@end))
     AND (@types_json IS NULL OR type IN (SELECT value FROM json_each(@types_json)))
   ORDER BY occurred_at ASC
   LIMIT @limit
@@ -218,7 +218,14 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
 
   const fusedIds = rrf([vec.map((r) => r.artifact_id), fts.map((r) => r.artifact_id)]).slice(0, limit);
   const distById = new Map(vec.map((r) => [r.artifact_id, r.distance]));
-  return fusedIds.map((id) => ({ ...getArtifactById(id), distance: distById.get(id) ?? null }));
+  // Skip any id an index returns that no longer hydrates (orphaned after partial/corrupt state)
+  // rather than emitting a malformed row.
+  return fusedIds
+    .map((id) => {
+      const a = getArtifactById(id);
+      return a ? { ...a, distance: distById.get(id) ?? null } : null;
+    })
+    .filter(Boolean);
 }
 
 export function timeline(start, end, types, limit = 50) {
