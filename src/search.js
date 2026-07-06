@@ -84,8 +84,31 @@ const candidateStmt = db.prepare(`
     AND (@t1 IS NULL OR a.occurred_at <= @t1)
     AND (@place IS NULL OR a.place_label LIKE @place)
 `);
-const knnStmt = db.prepare('SELECT artifact_id, distance FROM vec_artifacts WHERE embedding MATCH ? AND k = ? ORDER BY distance');
-const ftsStmt = db.prepare('SELECT rowid AS artifact_id, bm25(artifacts_fts) AS score FROM artifacts_fts WHERE artifacts_fts MATCH ? ORDER BY score LIMIT ?');
+const knnStmt = db.prepare(
+  'SELECT artifact_id, distance FROM vec_artifacts WHERE embedding MATCH ? AND k = ? ORDER BY distance'
+);
+// Filter-then-rank: KNN constrained to the prefiltered candidate set. sqlite-vec (>= 0.1.6)
+// supports IN constraints on the vec0 primary key in KNN queries — this ranks *within* the
+// candidates instead of hoping a global top-k happens to intersect a tight filter. Compiled
+// at startup, so an sqlite-vec too old to support it fails loudly at boot rather than
+// silently degrading (verified against 0.1.9).
+const knnInStmt = db.prepare(`
+  SELECT artifact_id, distance FROM vec_artifacts
+  WHERE embedding MATCH ? AND k = ?
+    AND artifact_id IN (SELECT value FROM json_each(?))
+  ORDER BY distance
+`);
+const ftsStmt = db.prepare(
+  'SELECT rowid AS artifact_id, bm25(artifacts_fts) AS score FROM artifacts_fts WHERE artifacts_fts MATCH ? ORDER BY score LIMIT ?'
+);
+const ftsInStmt = db.prepare(`
+  SELECT rowid AS artifact_id, bm25(artifacts_fts) AS score
+  FROM artifacts_fts
+  WHERE artifacts_fts MATCH ? AND rowid IN (SELECT value FROM json_each(?))
+  ORDER BY score LIMIT ?
+`);
+// Cheap existence probe: is this place string a usable filter at all?
+const placeExistsStmt = db.prepare('SELECT 1 FROM artifacts WHERE place_label LIKE ? LIMIT 1');
 const timelineStmt = db.prepare(`
   SELECT * FROM artifacts
   WHERE (@start IS NULL OR occurred_at >= @start)
@@ -118,7 +141,8 @@ function rrf(lists, k = RRF_K) {
 /**
  * Hybrid search. Explicit args (types/timeRange/entities) win over the parsed plan;
  * the LLM fills whatever the caller didn't specify. Returns hydrated artifacts, with
- * `distance` from the vector arm when available (null for FTS-only hits).
+ * `distance` from the vector arm when available (null for FTS-only hits). Ranking is
+ * constrained to the prefiltered candidate set.
  */
 export async function hybridSearch(query, { limit = 3, types, timeRange, entities } = {}) {
   const plan = await parseQuery(query);
@@ -127,12 +151,31 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   const t0 = emptyish(timeRange?.start) || emptyish(plan.time_start);
   const t1 = emptyish(timeRange?.end) || emptyish(plan.time_end);
   const entTerms = entities?.length ? entities : plan.entities;
-  const place = emptyish(plan.place);
 
-  const entityIds = entTerms.flatMap((t) => resolveEntityIds(t));
+  // Resolve entity terms. Terms that don't resolve can't filter — but they must not
+  // vanish either, so they're folded back into the ranked-search text below.
+  const entityIds = [];
+  const unresolvedTerms = [];
+  for (const term of entTerms) {
+    const ids = resolveEntityIds(term);
+    if (ids.length) entityIds.push(...ids);
+    else unresolvedTerms.push(term);
+  }
+
+  // Place is only a filter if it can match at least one place_label; otherwise it's a keyword.
+  let place = emptyish(plan.place);
+  if (place && !placeExistsStmt.get(`%${place}%`)) {
+    unresolvedTerms.push(place);
+    place = null;
+  }
+
+  // What both ranking arms actually search: semantic core + everything the filters
+  // couldn't absorb.
+  const searchText = [plan.semantic || query, ...unresolvedTerms].join(' ');
 
   // SQL prefilter -> candidate id set (skip entirely when there are no structured filters).
   let candidates = null;
+  let candidatesJson = null;
   if (effTypes.length || entityIds.length || t0 || t1 || place) {
     const rows = candidateStmt.all({
       types_json: effTypes.length ? JSON.stringify(effTypes) : null,
@@ -142,25 +185,33 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
       place: place ? `%${place}%` : null,
     });
     candidates = new Set(rows.map((r) => r.id));
+    // TODO(planner-overfilter): empty here conflates "caller's explicit filters matched
+    // nothing" (honest) with "the LLM invented a filter" (silent planner failure). Retry
+    // with only the caller's explicit args, folding plan-derived terms into searchText.
     if (candidates.size === 0) return []; // filters matched nothing — semantic can't rescue it
+    candidatesJson = JSON.stringify([...candidates]);
   }
 
   const k = clamp(limit * KNN_OVERFETCH, KNN_MIN, KNN_MAX);
 
-  // Vector arm — best-effort; FTS still works if the embedding model is offline.
+  // Vector arm — ranked *within* the candidate set when one exists (filter-then-rank).
+  // Best-effort; FTS still works if the embedding model is offline.
   let vec = [];
   try {
-    const qvec = await embedToFloat32(plan.semantic || query);
-    vec = knnStmt.all(qvec, k);
-    if (candidates) vec = vec.filter((r) => candidates.has(r.artifact_id));
+    const qvec = await embedToFloat32(searchText);
+    vec = candidates
+      ? knnInStmt.all(qvec, Math.min(k, candidates.size), candidatesJson)
+      : knnStmt.all(qvec, k);
   } catch (err) {
     console.error('search: embedding unavailable, FTS-only:', err.message);
   }
 
-  // Keyword arm.
-  const ftsQuery = toFtsQuery(plan.semantic || query);
-  let fts = ftsQuery ? ftsStmt.all(ftsQuery, k) : [];
-  if (candidates) fts = fts.filter((r) => candidates.has(r.artifact_id));
+  // Keyword arm — same constraint.
+  const ftsQuery = toFtsQuery(searchText);
+  let fts = [];
+  if (ftsQuery) {
+    fts = candidates ? ftsInStmt.all(ftsQuery, candidatesJson, k) : ftsStmt.all(ftsQuery, k);
+  }
 
   const fusedIds = rrf([vec.map((r) => r.artifact_id), fts.map((r) => r.artifact_id)]).slice(0, limit);
   const distById = new Map(vec.map((r) => [r.artifact_id, r.distance]));

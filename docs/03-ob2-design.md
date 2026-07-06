@@ -211,11 +211,13 @@ WHERE a.type = 'photo'
 Then vector-rank only within those candidates (sqlite-vec supports `partition key` columns and metadata filtering as of v0.1.6 — or do the filter-then-KNN join in SQL). Fuse with FTS5 results via reciprocal rank fusion.
 
 > **v2.0 implementation note.** vec0 metadata filtering can't span the `entity_links` join or a
-> `place_label LIKE`, so the planner runs the SQL prefilter to a candidate id set, over-fetches a
-> KNN (`k = limit * KNN_OVERFETCH`, clamped), intersects it with the candidates in JS, does the same
-> for FTS `bm25()`, then fuses with RRF (`RRF_K`). The query parse is one small-LLM call
-> (`QUERY_MODEL`) validated with zod; if the model or the embedder is unreachable, search degrades
-> gracefully (pure-semantic plan / FTS-only) rather than failing.
+> `place_label LIKE`, so the planner runs the SQL prefilter to a candidate id set first, then ranks
+> *within* it (filter-then-rank): the candidate ids are pushed into both arms — the KNN via a
+> `artifact_id IN (…)` constraint (sqlite-vec ≥ 0.1.6) and FTS `bm25()` via `rowid IN (…)` — before
+> fusing with RRF (`RRF_K`). A filter term that can't actually filter (an unresolved entity name, a
+> `place` matching no `place_label`) is folded back into the ranked search text so it can't silently
+> vanish. The query parse is one small-LLM call (`QUERY_MODEL`) validated with zod; if the model or
+> the embedder is unreachable, search degrades gracefully (pure-semantic plan / FTS-only).
 
 **Graph expansion for relationship queries:** "what's going on with my sister" → resolve relationship attr → Sarah entity → walk `entity_links` → recent artifacts of any type, sorted by `occurred_at`. No embedding needed at all.
 
