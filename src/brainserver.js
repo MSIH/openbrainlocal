@@ -5,12 +5,16 @@
  * Adapted from Nate B. Jones's OB1 (Open Brain) framework.
  * https://github.com/NateBJones-Projects/OB1
  *
- * v2.2 changes (this pass):
- *  - Per-session McpServer factory (fixes cross-session response routing)
- *  - transport.onclose set as a property, not a constructor option (fixes session-map leak)
- *  - New sessions gated on isInitializeRequest (stray POSTs no longer spawn transports)
- *  - GET and DELETE handlers added for /mcp (notification stream + explicit termination)
- *  - Shutdown closes active transports before closing the HTTP server, with a force-exit timer
+ * OB2 Phase 2.0 (this pass): the store moves from a single `memories` table to the unified
+ * artifact + entity-graph + hybrid-search model (see docs/03-ob2-design.md and src/db.js).
+ *  - Persistence, embeddings, and search are extracted to db.js / embeddings.js / search.js
+ *    so the headless connectors (migrate, contacts) share one store and one embedding path.
+ *  - store_memory / search_memories and /api/remember / /api/recall are unchanged on the
+ *    wire — they now write type='note' artifacts and recall via hybrid search.
+ *  - New tools/routes: search, timeline, about_entity, get_artifact.
+ *
+ * Retained from v2.2: per-session McpServer factory, transport.onclose as a property,
+ * initialize-gated session creation, GET/DELETE /mcp handlers, graceful shutdown.
  */
 
 import express from 'express';
@@ -18,99 +22,57 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
-import OpenAI from 'openai';
-import dotenv from 'dotenv';
-import { timingSafeEqual, createHash, randomUUID } from 'crypto';
+import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 
-dotenv.config();
+import { PORT, BRAIN_SECRET_KEY, BRAIN_SECRET_PLACEHOLDER } from './config.js';
+import { db, storeArtifactTxn, sha256 } from './db.js';
+import { embedToFloat32 } from './embeddings.js';
+import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES } from './search.js';
 
-// --- CONFIGURATION CONSTANTS ---
-const PORT = process.env.PORT || 3000;
-const EMBEDDING_MODEL = "qwen3-embedding:0.6b"; // local Ollama embedding model
-const VECTOR_DIMENSION = 1024;                  // was 1536 (OpenAI); Qwen3 embeddings are 1024-dim
-
-// Fail closed instantly if the secret is unset or still the placeholder
-const BRAIN_SECRET_KEY = process.env.BRAIN_SECRET_KEY;
-if (!BRAIN_SECRET_KEY || BRAIN_SECRET_KEY === "change-this-to-a-long-secure-token") {
+// Fail closed instantly if the secret is unset or still the placeholder.
+if (!BRAIN_SECRET_KEY || BRAIN_SECRET_KEY === BRAIN_SECRET_PLACEHOLDER) {
   console.error("❌ CRITICAL ERROR: BRAIN_SECRET_KEY is unset or insecure. System halting.");
   process.exit(1);
 }
 
-// --- DATABASE CORE SETUP (WAL MODE) ---
-const db = new Database('unlimited_shared_brain.db');
-sqliteVec.load(db);
-db.pragma('journal_mode = WAL');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    content TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
-    memory_id INTEGER PRIMARY KEY,
-    embedding float[${VECTOR_DIMENSION}]
-  );
-`);
-
-// --- LOCAL EMBEDDING GATEWAY (Ollama; was OpenRouter) ---
-const openrouter = new OpenAI({
-  baseURL: "http://localhost:11434/v1",
-  apiKey: "ollama", // Ollama ignores it, but the OpenAI SDK requires a non-empty string
-});
-
-// Prepared statements, compiled once
-const insertRawStmt = db.prepare('INSERT INTO memories (content) VALUES (?)');
-const insertVecStmt = db.prepare('INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)');
-const recallStmt = db.prepare(`
-  SELECT m.content, m.created_at, v.distance
-  FROM vec_memories v
-  JOIN memories m ON v.memory_id = m.id
-  WHERE v.embedding MATCH ? AND k = ?
-  ORDER BY v.distance ASC
-`);
-
-// Atomic store: both inserts succeed or neither does
-const storeTxn = db.transaction((content, float32Vector) => {
-  const info = insertRawStmt.run(content);
-  const memoryId = info.lastInsertRowid;
-  // sqlite-vec's vec0 requires the PK bound as a BigInt (a plain Number is rejected); memoryId stays a Number for the JSON response.
-  insertVecStmt.run(BigInt(memoryId), float32Vector);
-  return memoryId;
-});
-
-// --- CORE ASYNC UTILITIES ---
-async function getEmbedding(text) {
-  const response = await openrouter.embeddings.create({ input: [text], model: EMBEDDING_MODEL });
-  return response.data[0].embedding;
-}
-
+// --- CORE ASYNC UTILITIES (enrich-then-commit: embed BEFORE the transaction) ---
 async function executeStore(content) {
-  // Fetch the embedding BEFORE touching the DB, so a failed API call never orphans a row
-  const embeddingArray = await getEmbedding(content);
-  const float32Vector = new Float32Array(embeddingArray);
-  return storeTxn(content, float32Vector);
+  const vec = await embedToFloat32(content);
+  // A manual note: source='manual', no source_id (each note is a distinct row).
+  const { id } = storeArtifactTxn({ type: 'note', source: 'manual', content_hash: sha256(content), text_repr: content }, vec);
+  return id;
 }
 
+// Legacy recall shape: hybrid search over artifacts, mapped back to {content, created_at, distance}.
 async function executeRecall(query, limit) {
-  const embeddingArray = await getEmbedding(query);
-  const float32Vector = new Float32Array(embeddingArray);
-  const matches = recallStmt.all(float32Vector, limit);
-  return matches.map(row => ({
-    content: row.content,
-    created_at: row.created_at,
-    distance: row.distance
-  }));
+  const results = await hybridSearch(query, { limit });
+  return results.map((a) => ({ content: a.text_repr, created_at: a.occurred_at ?? a.ingested_at, distance: a.distance }));
 }
 
 // --- SHARED VALIDATION SCHEMAS (REST + MCP use the same bounds) ---
 const ContentSchema = z.string().min(1, "Content cannot be empty");
 const LimitSchema = z.number().int().min(1).max(50).default(3);
+const TypeEnum = z.enum(ARTIFACT_TYPES);
 const RememberSchema = z.object({ content: ContentSchema });
 const RecallSchema = z.object({ query: z.string().min(1, "Query cannot be empty"), limit: LimitSchema });
+const SearchSchema = z.object({
+  query: z.string().min(1, "Query cannot be empty"),
+  types: z.array(TypeEnum).optional(),
+  time_range: z.object({ start: z.string(), end: z.string() }).partial().optional(),
+  entities: z.array(z.string()).optional(),
+  limit: LimitSchema.optional(),
+});
+const TimelineSchema = z.object({
+  start: z.string().min(1), end: z.string().min(1),
+  types: z.array(TypeEnum).optional(), limit: LimitSchema.optional(),
+});
+const AboutEntitySchema = z.object({ name: z.string().min(1), limit: LimitSchema.optional() });
+const GetArtifactSchema = z.object({ id: z.coerce.number().int().positive() });
+
+// --- OUTPUT FORMATTERS (MCP tools return text) ---
+const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
+const artifactLine = (a) => `- [${a.type}${a.occurred_at ? ` · ${a.occurred_at}` : ""}${a.distance != null ? ` · ${a.distance.toFixed(3)}` : ""}] (#${a.id}) ${snippet(a.text_repr)}`;
 
 // --- AUTH ---
 function secureCompare(input, secret) {
@@ -133,13 +95,14 @@ function requireHeaderAuth(req, res, next) {
 // sharing a single global server across sessions causes responses to cross-route.
 function buildMcpServer() {
   const server = new McpServer(
-    { name: "secure-web-brain", version: "2.2.0" },
+    { name: "secure-web-brain", version: "2.3.0" },
     {
       instructions:
-        "This server is the user's personal, long-term memory. Proactively call store_memory whenever the " +
-        "user shares a durable fact, preference, decision, or event worth remembering. Call search_memories " +
-        "before answering questions about the user, their history, or prior context, and ground your answer " +
-        "in what you recall. Memories persist across sessions and across every tool that connects here.",
+        "This server is the user's personal, long-term memory over their whole digital footprint. " +
+        "Proactively call store_memory whenever the user shares a durable fact, preference, decision, or event. " +
+        "Call search before answering questions about the user or their history and ground your answer in the results. " +
+        "Use timeline for 'what was I doing' date-range questions, about_entity for 'everything about <person>', and " +
+        "get_artifact to expand one result. Memories persist across sessions and every tool that connects here.",
     }
   );
 
@@ -169,8 +132,8 @@ function buildMcpServer() {
     {
       title: "Search memories",
       description:
-        "Semantic search over the user's stored memories. Call before answering questions about the user or " +
-        "referencing past context; returns the closest memories ranked by similarity (lower score = closer).",
+        "Hybrid semantic + keyword search over the user's stored memories. Call before answering questions about " +
+        "the user or referencing past context; returns the closest memories (lower score = closer when shown).",
       inputSchema: {
         query: z.string().min(1).describe("Natural-language description of what to recall, e.g. \"where does my sister live\"."),
         limit: LimitSchema.optional().describe("Maximum number of memories to return (1-50, default 3)."),
@@ -182,8 +145,89 @@ function buildMcpServer() {
       if (matches.length === 0) {
         return { content: [{ type: "text", text: "No relevant long-term context found." }] };
       }
-      const txt = matches.map(r => `- [Score: ${r.distance.toFixed(3)}] ${r.content}`).join("\n");
+      const txt = matches.map((r) => `- [Score: ${r.distance != null ? r.distance.toFixed(3) : "n/a"}] ${r.content}`).join("\n");
       return { content: [{ type: "text", text: txt }] };
+    }
+  );
+
+  server.registerTool(
+    "search",
+    {
+      title: "Search memory (hybrid, filtered)",
+      description:
+        "Hybrid search across every artifact type with optional filters. The query is parsed for time/place/person/type " +
+        "and fused (vector + keyword) ranking. Prefer this for anything richer than a plain note lookup.",
+      inputSchema: {
+        query: z.string().min(1).describe("Natural-language query, e.g. \"emails from Sarah about the trip last spring\"."),
+        types: z.array(TypeEnum).optional().describe(`Restrict to these artifact types: ${ARTIFACT_TYPES.join(", ")}.`),
+        time_range: z.object({ start: z.string(), end: z.string() }).partial().optional().describe("ISO date bounds {start,end} to constrain occurred_at."),
+        entities: z.array(z.string()).optional().describe("People/places/orgs to require (resolved via the entity graph)."),
+        limit: LimitSchema.optional().describe("Max results (1-50, default 3)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ query, types, time_range, entities, limit = 3 }) => {
+      const results = await hybridSearch(query, { limit, types, timeRange: time_range, entities });
+      if (results.length === 0) return { content: [{ type: "text", text: "No matching artifacts found." }] };
+      return { content: [{ type: "text", text: results.map(artifactLine).join("\n") }] };
+    }
+  );
+
+  server.registerTool(
+    "timeline",
+    {
+      title: "Timeline (chronological recall)",
+      description: "Return artifacts in a date range, oldest first — for \"what was I doing\" questions. No semantic ranking.",
+      inputSchema: {
+        start: z.string().min(1).describe("ISO start date/datetime (inclusive)."),
+        end: z.string().min(1).describe("ISO end date/datetime (inclusive)."),
+        types: z.array(TypeEnum).optional().describe(`Restrict to these types: ${ARTIFACT_TYPES.join(", ")}.`),
+        limit: LimitSchema.optional().describe("Max results (1-50, default 3)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ start, end, types, limit = 50 }) => {
+      const rows = timeline(start, end, types, limit);
+      if (rows.length === 0) return { content: [{ type: "text", text: "No artifacts in that range." }] };
+      return { content: [{ type: "text", text: rows.map(artifactLine).join("\n") }] };
+    }
+  );
+
+  server.registerTool(
+    "about_entity",
+    {
+      title: "About an entity",
+      description: "Resolve a person/place/org by name, email, or phone and return their profile plus recent linked artifacts.",
+      inputSchema: {
+        name: z.string().min(1).describe("Name, email, or phone of the entity, e.g. \"Sarah Jones\" or \"sarah.j@gmail.com\"."),
+        limit: LimitSchema.optional().describe("Max linked artifacts per entity (1-50, default 3)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ name, limit = 10 }) => {
+      const res = aboutEntity(name, limit);
+      if (!res.resolved) return { content: [{ type: "text", text: `No entity found for "${name}".` }] };
+      const blocks = res.entities.map(({ entity, artifacts }) => {
+        const header = `${entity.canonical_name} (${entity.kind})${entity.attrs ? ` — ${JSON.stringify(entity.attrs)}` : ""}`;
+        const items = artifacts.map(artifactLine).join("\n");
+        return `${header}\n${items || "  (no linked artifacts yet)"}`;
+      });
+      return { content: [{ type: "text", text: blocks.join("\n\n") }] };
+    }
+  );
+
+  server.registerTool(
+    "get_artifact",
+    {
+      title: "Get an artifact",
+      description: "Fetch one artifact by id: full text, metadata, raw_path, and its entity links.",
+      inputSchema: { id: z.coerce.number().int().positive().describe("The numeric artifact id.") },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ id }) => {
+      const a = getArtifactById(id);
+      if (!a) return { content: [{ type: "text", text: `No artifact with id ${id}.` }] };
+      return { content: [{ type: "text", text: JSON.stringify(a, null, 2) }] };
     }
   );
 
@@ -218,6 +262,29 @@ app.post('/api/recall', requireHeaderAuth, wrap(async (req, res) => {
   const { query, limit } = RecallSchema.parse(req.body);
   const results = await executeRecall(query, limit);
   res.json({ results });
+}));
+
+app.post('/api/search', requireHeaderAuth, wrap(async (req, res) => {
+  const { query, types, time_range, entities, limit } = SearchSchema.parse(req.body);
+  const results = await hybridSearch(query, { limit: limit ?? 3, types, timeRange: time_range, entities });
+  res.json({ results });
+}));
+
+app.post('/api/timeline', requireHeaderAuth, wrap(async (req, res) => {
+  const { start, end, types, limit } = TimelineSchema.parse(req.body);
+  res.json({ results: timeline(start, end, types, limit ?? 50) });
+}));
+
+app.post('/api/about_entity', requireHeaderAuth, wrap(async (req, res) => {
+  const { name, limit } = AboutEntitySchema.parse(req.body);
+  res.json(aboutEntity(name, limit ?? 10));
+}));
+
+app.get('/api/artifact/:id', requireHeaderAuth, wrap(async (req, res) => {
+  const { id } = GetArtifactSchema.parse({ id: req.params.id });
+  const a = getArtifactById(id);
+  if (!a) return res.status(404).json({ error: "Not found" });
+  res.json(a);
 }));
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---
