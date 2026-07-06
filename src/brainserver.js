@@ -45,8 +45,10 @@ async function executeStore(content) {
 }
 
 // Legacy recall shape: hybrid search over artifacts, mapped back to {content, created_at, distance}.
+// usePlanner:false — the legacy path is a plain semantic+keyword lookup, so skip the LLM query
+// parse (avoids a per-recall model call and its fallback logging when QUERY_MODEL isn't pulled).
 async function executeRecall(query, limit) {
-  const results = await hybridSearch(query, { limit });
+  const results = await hybridSearch(query, { limit, usePlanner: false });
   return results.map((a) => ({ content: a.text_repr, created_at: a.occurred_at ?? a.ingested_at, distance: a.distance }));
 }
 

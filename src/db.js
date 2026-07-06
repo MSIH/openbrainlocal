@@ -134,9 +134,17 @@ export const storeArtifactTxn = db.transaction((artifact, float32Vector, links =
   const row = normalizeArtifact(artifact);
   const info = insertArtifactStmt.run(row);
   if (info.changes === 0) {
-    // (source, source_id) already present — dedup hit, don't duplicate vector/links.
-    const existing = selectIdBySourceStmt.get(row.source, row.source_id);
-    return { id: existing ? existing.id : null, deduped: true };
+    // INSERT OR IGNORE skipped the row. The ONLY expected reason is a (source, source_id)
+    // dedup hit — anything else (a NOT NULL / CHECK violation) must not be silently swallowed
+    // as a dedup, or we'd lose a write and report success (violates append-only + no-swallow).
+    const existing = row.source_id != null ? selectIdBySourceStmt.get(row.source, row.source_id) : null;
+    if (!existing) {
+      throw new Error(
+        `storeArtifactTxn: insert ignored with no (source, source_id) match — likely a constraint ` +
+        `violation (source=${row.source}, source_id=${row.source_id}, type=${row.type})`
+      );
+    }
+    return { id: existing.id, deduped: true }; // genuine dedup — don't duplicate vector/links
   }
   const id = info.lastInsertRowid; // Number — safe for JSON responses
   // sqlite-vec vec0 PKs MUST bind as BigInt; a plain Number throws (data-model.md rule 1).
@@ -157,10 +165,13 @@ export function logEvent(eventType, actor, details) {
 export const normalizeName = (s) => s.trim().toLowerCase();
 export const normalizePhone = (s) => s.replace(/\D/g, '');
 
-// Resolve a free-text name/email into entity ids via the alias table (lowercased match).
+// Resolve a free-text name/email/phone into entity ids via the alias table. Name/email
+// aliases are stored lowercased; phone aliases digits-only — so try both normalizations.
 export function resolveEntityIds(term) {
-  const rows = resolveAliasStmt.all(normalizeName(term));
-  return rows.map((r) => r.entity_id);
+  const ids = new Set(resolveAliasStmt.all(normalizeName(term)).map((r) => r.entity_id));
+  const digits = normalizePhone(term);
+  if (digits.length >= 7) for (const r of resolveAliasStmt.all(digits)) ids.add(r.entity_id);
+  return [...ids];
 }
 
 export function getEntity(id) {

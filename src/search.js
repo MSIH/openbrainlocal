@@ -20,7 +20,9 @@ const emptyish = (s) => (typeof s === 'string' && s.trim() ? s : null);
 
 // --- Query-plan schema (validates the LLM's JSON; coerces junk to safe defaults) ---
 const PlanSchema = z.object({
-  types: z.array(z.enum(ARTIFACT_TYPES)).catch([]).default([]),
+  // Drop only invalid type values, not the whole list — a single bad enum from the LLM
+  // (e.g. "reel") must not silently discard the caller's real type constraints.
+  types: z.array(z.string()).catch([]).transform((a) => a.filter((t) => ARTIFACT_TYPES.includes(t))),
   entities: z.array(z.string()).catch([]).default([]),
   place: z.string().nullable().catch(null).default(null),
   time_start: z.string().nullable().catch(null).default(null),
@@ -142,10 +144,11 @@ function rrf(lists, k = RRF_K) {
  * Hybrid search. Explicit args (types/timeRange/entities) win over the parsed plan;
  * the LLM fills whatever the caller didn't specify. Returns hydrated artifacts, with
  * `distance` from the vector arm when available (null for FTS-only hits). Ranking is
- * constrained to the prefiltered candidate set.
+ * constrained to the prefiltered candidate set. Pass `usePlanner: false` to skip the LLM
+ * parse entirely (the legacy recall path — a plain semantic+keyword lookup, no NL filters).
  */
-export async function hybridSearch(query, { limit = 3, types, timeRange, entities } = {}) {
-  const plan = await parseQuery(query);
+export async function hybridSearch(query, { limit = 3, types, timeRange, entities, usePlanner = true } = {}) {
+  const plan = usePlanner ? await parseQuery(query) : fallbackPlan(query);
 
   const effTypes = types?.length ? types : plan.types;
   const t0 = emptyish(timeRange?.start) || emptyish(plan.time_start);
