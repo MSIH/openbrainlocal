@@ -4,9 +4,12 @@
 
 Defines the stable boundary between the LifeContext core (artifact store, entity graph, hybrid retrieval, consolidation) and *connectors*: external processes that gather data from some corner of a digital life and submit it for ingestion. The contract is HTTP + JSON, not a plugin API. Publishing this document *is* shipping the framework.
 
-> **Status: design, not yet implemented.** The `/api/v1/ingest` endpoints below land at
-> [`05-roadmap.md`](05-roadmap.md) Milestone 0; the contract is declared v1-stable only after three
-> real connectors have used it (Milestone 5). This doc supersedes the ingestion-pipeline framing in
+> **Status: partially implemented.** `POST /api/v1/ingest` (single-artifact upsert on
+> `(source, source_id)`, §2–§4) and `GET /api/v1/ingest/types` (§6) are **live** in
+> `src/ingest.js` / `src/brainserver.js`. The batch (`/ingest/batch`), event (`/events`), and
+> per-connector state endpoints below remain design-only ([`05-roadmap.md`](05-roadmap.md)
+> Milestone 0+). The contract is declared v1-stable only after three real connectors have used
+> it (Milestone 5). This doc supersedes the ingestion-pipeline framing in
 > [`03-ob2-design.md`](03-ob2-design.md) §3 — see the naming note below for how the terms map.
 
 **Naming note.** Doc 03 §1.1 uses "senses" for the *transducers* — the core-side enrichers (VLM, Whisper, EXIF) that convert a modality into text. That usage stands. The external gatherers defined here are **connectors**, because one connector can emit many types (iMessage emits messages *and* photo attachments; a Takeout importer emits email, location, and browsing history). The decomposition is: **connector** (gathers) → **type** (classifies) → **transducer/sense** (enriches non-text into `text_repr`, core-side). The `artifacts` table already encodes the first two as its `source` and `type` columns.
@@ -118,6 +121,8 @@ Field-by-field rules:
 - **`occurred_at` vs `ingested_at`** — the 2019 photo imported today sorts into 2019. Connectors that can't determine occurrence time omit the field and accept the warning.
 - **`content_hash`** — lowercase hex SHA-256 digest of the raw bytes, no algorithm prefix (matches core's `sha256()` helper). Compared by exact string equality for cross-import dedup — a mismatched format silently breaks dedup instead of erroring.
 - **`raw_path`** — the API carries text + metadata only. Connectors that own binary artifacts (photos, audio) write them to disk themselves and submit the pointer. Keeps the DB small and the API fast, per doc 03 §2.1.
+
+**Upsert merge semantics (implemented).** A second POST with the same `(source, source_id)` **updates** the existing artifact (200; a first POST is 201). Fields **present** in the payload overwrite; fields **absent** are left unchanged — so the photo-exif → VLM caption wave can upsert only `text_repr` without wiping the GPS/`place_label` the EXIF pass stored (enrichment waves compose). This reconciles with append-only: only the *derived* representation is rewritten (`text_repr`, its embedding, its FTS row, and metadata) — the original bytes are never touched (`raw_path` files untouched, `content_hash` still tracks them), `ingested_at` stays at first ingestion, entity links are only ever added, and every update appends an `ingest_log` row carrying the prior value of each changed field, so the full evolution is reconstructable. Nothing can be **cleared** through this API: an explicit `null` on an optional field is a 422 (optional, not nullable). The embedding is recomputed only when `text_repr` actually changes — a metadata-only upsert (or an identical retry) never calls the embedder.
 
 ---
 

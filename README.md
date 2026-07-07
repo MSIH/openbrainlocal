@@ -70,7 +70,17 @@ Recall returns the stored memory with a similarity score. For AI clients, point 
 
 Every endpoint/tool requires the `x-api-key` header. REST and MCP share one store.
 
-- **REST** — `POST /api/remember`, `POST /api/recall`, `POST /api/search`, `POST /api/timeline`, `POST /api/about_entity`, `GET /api/artifact/:id`, `GET /api/v1/ingest/types` (connector contract type registry, see `docs/04-connector-contract.md` §6)
+- **REST** — `POST /api/remember`, `POST /api/recall`, `POST /api/search`, `POST /api/timeline`, `POST /api/about_entity`, `GET /api/artifact/:id`
+- **Connector ingest** (`/api/v1`, see [`docs/04-connector-contract.md`](docs/04-connector-contract.md)) — `POST /api/v1/ingest` (submit one artifact; upsert on `(source, source_id)` — 201 create / 200 update, non-destructive issues accepted with a `warnings` array, 256 KB body cap), `GET /api/v1/ingest/types` (the machine-readable type registry, §6):
+
+  ```bash
+  curl -s -X POST localhost:3000/api/v1/ingest -H "x-api-key: $KEY" -H "Content-Type: application/json" -d '{
+    "source":"imessage","source_id":"chat.db:msg:88213","type":"message",
+    "text_repr":"Text from Sarah Jones: Landed! See you at the gate.",
+    "occurred_at":"2026-07-04T18:22:09Z",
+    "latitude":30.2672,"longitude":-97.7431,"place_label":"Austin-Bergstrom Intl",
+    "entity_hints":[{"alias":"+15550142","alias_type":"phone","role":"sender"}]}'
+  ```
 - **MCP** (Streamable HTTP) — `/mcp`, tools:
   - `store_memory` / `search_memories` — the original note store + recall (unchanged on the wire)
   - `search` — hybrid semantic + keyword search with optional `types` / `time_range` / `entities` filters

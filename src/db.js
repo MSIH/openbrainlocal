@@ -88,11 +88,18 @@ db.exec(`
   CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
     text_repr, content='artifacts', content_rowid='id'
   );
-  -- Keep FTS in sync. The store is APPEND-ONLY (no UPDATE/DELETE of artifacts), so a
-  -- single AFTER INSERT trigger is complete — the delete/update shadow triggers that
-  -- external-content FTS normally needs don't apply. (Never run ('rebuild') — a double
-  -- run or an empty-table rebuild corrupts/duplicates the index.)
+  -- Keep FTS in sync with this external-content table. INSERT feeds the new row in. The
+  -- ingest upsert path (src/ingest.js) rewrites text_repr in place when an enrichment wave
+  -- arrives, so an AFTER UPDATE OF text_repr trigger does the external-content delete+reinsert
+  -- dance: 'delete' MUST carry the OLD text_repr so FTS removes the right terms, then the new
+  -- text is indexed. Artifacts are otherwise append-only — no row is ever DELETEd — so no
+  -- delete shadow trigger is needed. (Never run ('rebuild') — a double run or an empty-table
+  -- rebuild corrupts/duplicates the index.)
   CREATE TRIGGER IF NOT EXISTS artifacts_ai AFTER INSERT ON artifacts BEGIN
+    INSERT INTO artifacts_fts(rowid, text_repr) VALUES (new.id, new.text_repr);
+  END;
+  CREATE TRIGGER IF NOT EXISTS artifacts_au AFTER UPDATE OF text_repr ON artifacts BEGIN
+    INSERT INTO artifacts_fts(artifacts_fts, rowid, text_repr) VALUES('delete', old.id, old.text_repr);
     INSERT INTO artifacts_fts(rowid, text_repr) VALUES (new.id, new.text_repr);
   END;
 
@@ -100,7 +107,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS ingest_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip
+    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update
     actor       TEXT,
     details     TEXT                    -- JSON
   );
@@ -120,8 +127,28 @@ const insertUnresolvedStmt = db.prepare(`
   VALUES (?, ?, ?, ?, ?)
 `);
 const selectIdBySourceStmt = db.prepare('SELECT id FROM artifacts WHERE source = ? AND source_id = ?');
+const getArtifactBySourceStmt = db.prepare('SELECT * FROM artifacts WHERE source = ? AND source_id = ?');
 const selectIdByHashStmt = db.prepare('SELECT id FROM artifacts WHERE content_hash = ? LIMIT 1');
 const getArtifactStmt = db.prepare('SELECT * FROM artifacts WHERE id = ?');
+// Upsert update path. COALESCE(@field, field): a present field overwrites; an absent one
+// (bound null) keeps the current value — so a metadata-only wave never wipes what an earlier
+// wave stored, and nothing can be cleared through this path (schema rejects explicit null).
+// text_repr is always present (required), so its assignment always fires the artifacts_au
+// FTS trigger. source / source_id (the upsert key) and ingested_at (first-ingest time) are
+// never in the SET clause.
+const updateArtifactStmt = db.prepare(`
+  UPDATE artifacts SET
+    type        = COALESCE(@type, type),
+    occurred_at = COALESCE(@occurred_at, occurred_at),
+    latitude    = COALESCE(@latitude, latitude),
+    longitude   = COALESCE(@longitude, longitude),
+    place_label = COALESCE(@place_label, place_label),
+    text_repr   = COALESCE(@text_repr, text_repr),
+    extra_json  = COALESCE(@extra_json, extra_json)
+  WHERE id = @id
+`);
+// One vector per artifact, dimension unchanged — update in place; vec0 PK binds as BigInt.
+const updateVecArtifactStmt = db.prepare('UPDATE vec_artifacts SET embedding = ? WHERE artifact_id = ?');
 const getLinksStmt = db.prepare(`
   SELECT el.entity_id, el.role, el.confidence, e.canonical_name, e.kind
   FROM entity_links el JOIN entities e ON e.id = el.entity_id
@@ -140,6 +167,15 @@ const logStmt = db.prepare('INSERT INTO ingest_log (event_type, actor, details) 
 // The 11 artifact columns storeArtifactTxn writes; callers pass a partial and we fill nulls.
 const ARTIFACT_FIELDS = ['type', 'source', 'source_id', 'content_hash', 'occurred_at',
   'latitude', 'longitude', 'place_label', 'raw_path', 'text_repr', 'extra_json'];
+
+// The derived/metadata columns the upsert update path may rewrite. Deliberately EXCLUDES:
+// source/source_id (the upsert key); ingested_at (records FIRST ingestion — the update event
+// lives in ingest_log); and content_hash + raw_path, which are the append-only ORIGINALS
+// (CLAUDE.md rule 5: "Preserve originals (raw_path, content_hash)") — write-once at create,
+// never overwritten by a later enrichment wave, so the artifact row keeps pointing at the raw
+// bytes it was born from. Absent fields keep their prior value (COALESCE in updateArtifactStmt).
+const MUTABLE_FIELDS = ['type', 'occurred_at', 'latitude', 'longitude',
+  'place_label', 'text_repr', 'extra_json'];
 
 function normalizeArtifact(a) {
   const row = {};
@@ -176,6 +212,75 @@ export const storeArtifactTxn = db.transaction((artifact, float32Vector, links =
     insertLinkStmt.run(id, l.entity_id, l.role ?? null, l.confidence ?? 1.0);
   }
   return { id, deduped: false };
+});
+
+/**
+ * Upsert one artifact on (source, source_id), reconciling the connector contract's
+ * upsert-by-default (doc 04 §1.3/§3) with the store's append-only rule. Enrich-then-commit:
+ * the caller MUST fetch `float32Vector` BEFORE calling (CLAUDE.md rule 4); pass null when
+ * text_repr is unchanged so no re-embed happens (embedding is the expensive step).
+ *
+ *  - CREATE (no existing row): mirrors storeArtifactTxn — insert row + vector, resolve hints,
+ *    log ingest_create. Requires a non-null vector.
+ *  - UPDATE (row exists): rewrite ONLY the present derived/metadata fields (MUTABLE_FIELDS);
+ *    originals are never destroyed (raw_path files untouched, content_hash still tracks the
+ *    raw bytes, ingested_at frozen). The vec row is updated in place only when a new vector
+ *    is passed. Hints are re-resolved (idempotent). The ingest_update log row carries the
+ *    prior value of every changed field, so the full evolution of the derived record is
+ *    reconstructable from the log (design-philosophy §1/§3) — the log IS the history.
+ *
+ * Entity links are additive on update (resolveEntityHints is INSERT OR IGNORE). Returns
+ * { id, created, resolved, unresolved }.
+ */
+export const upsertArtifactTxn = db.transaction((artifact, float32Vector, hints = []) => {
+  const existing = artifact.source_id != null
+    ? getArtifactBySourceStmt.get(artifact.source, artifact.source_id)
+    : null;
+
+  if (!existing) {
+    const row = normalizeArtifact(artifact);
+    const info = insertArtifactStmt.run(row);
+    if (info.changes === 0) {
+      // No (source, source_id) row existed a statement ago, so an ignored insert here is a
+      // constraint violation, not a dedup — never swallow it as success (append-only + no-swallow).
+      throw new Error(
+        `upsertArtifactTxn: insert ignored with no dedup match — likely a constraint violation ` +
+        `(source=${row.source}, source_id=${row.source_id}, type=${row.type})`
+      );
+    }
+    const id = info.lastInsertRowid; // Number — safe for JSON responses
+    insertVecArtifactStmt.run(BigInt(id), float32Vector); // vec0 PK must bind as BigInt (rule 1)
+    const { resolved, unresolved } = resolveEntityHints(id, hints);
+    logEvent('ingest_create', row.source, { artifact_id: id, type: row.type });
+    return { id, created: true, resolved, unresolved };
+  }
+
+  // Guard the enrich-then-commit window: the caller decided whether to re-embed from a read
+  // taken BEFORE this transaction. If text_repr differs from what we're about to write but no
+  // new vector was supplied, a concurrent upsert of the same key changed the text underneath us
+  // — committing would leave text_repr and its embedding out of sync. Fail loudly so the
+  // connector retries (idempotent) rather than silently persisting a mismatch.
+  if (!float32Vector && artifact.text_repr != null && artifact.text_repr !== existing.text_repr) {
+    throw new Error(
+      `upsertArtifactTxn: text_repr changed under a concurrent upsert (source=${artifact.source}, ` +
+      `source_id=${artifact.source_id}) but no embedding was supplied — retry the ingest`
+    );
+  }
+
+  // Update path: build the bind from present fields, tracking what actually changed.
+  const changed = [];
+  const prior = {};
+  const bind = { id: existing.id };
+  for (const f of MUTABLE_FIELDS) {
+    const val = artifact[f] ?? null;
+    bind[f] = val; // null → COALESCE keeps the existing value
+    if (val !== null && val !== existing[f]) { changed.push(f); prior[f] = existing[f]; }
+  }
+  updateArtifactStmt.run(bind);
+  if (float32Vector) updateVecArtifactStmt.run(float32Vector, BigInt(existing.id));
+  const { resolved, unresolved } = resolveEntityHints(existing.id, hints);
+  logEvent('ingest_update', artifact.source, { artifact_id: existing.id, type: artifact.type, changed, prior });
+  return { id: existing.id, created: false, resolved, unresolved };
 });
 
 // --- Shared helpers ---
@@ -256,6 +361,10 @@ export function getArtifactById(id) {
   a.links = getLinksStmt.all(id);
   return a;
 }
+
+// Raw artifact row by its upsert key, or undefined. Used by the ingest orchestrator to decide
+// whether text_repr changed (and thus whether to re-embed) before opening upsertArtifactTxn.
+export const getArtifactBySource = (source, sourceId) => getArtifactBySourceStmt.get(source, sourceId);
 
 function safeJson(s) {
   try { return JSON.parse(s); } catch { return null; }

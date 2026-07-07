@@ -30,6 +30,7 @@ import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES } from './search.js';
 import { TYPE_REGISTRY } from './ingest-types.js';
+import { buildIngestRouter } from './ingest.js';
 
 // Fail closed instantly if the secret is unset or still the placeholder.
 if (!BRAIN_SECRET_KEY || BRAIN_SECRET_KEY === BRAIN_SECRET_PLACEHOLDER) {
@@ -239,7 +240,6 @@ function buildMcpServer() {
 
 // --- EXPRESS APP ---
 const app = express();
-app.use(express.json({ limit: '32kb' }));
 
 // If deployed behind a reverse proxy (nginx, Cloudflare), uncomment so rate limiting
 // and IP logging use the real client IP instead of the proxy's:
@@ -250,7 +250,14 @@ const apiLimiter = rateLimit({
   max: 100,
   message: { error: "Rate limit breached. Request rejected." }
 });
-app.use(apiLimiter);
+app.use(apiLimiter); // rate-limit every route first, before any body parsing
+
+// The /api/v1 connector router carries its OWN 256 KB JSON parser (contract §2). Mounting it
+// ahead of the global 32 KB parser lets ingest bodies exceed 32 KB while every legacy route
+// keeps the 32 KB cap — the global parser below no-ops on the ingest body it already parsed.
+app.use('/api/v1', buildIngestRouter({ requireAuth: requireHeaderAuth }));
+
+app.use(express.json({ limit: '32kb' }));
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -356,6 +363,14 @@ app.delete("/mcp", requireHeaderAuth, handleExistingSession);
 app.use((err, req, res, next) => {
   if (err instanceof z.ZodError) {
     return res.status(400).json({ error: "Validation Failed", details: err.issues });
+  }
+  // Body-parser (and other middleware) errors carry a numeric HTTP status: the 256 KB ingest
+  // cap surfaces as err.type='entity.too.large' / status 413, a malformed JSON body as 400.
+  // Honor a 4xx here so it doesn't fall into the generic 500 branch (this also fixes the latent
+  // bug where the legacy 32 KB cap 500'd). 5xx / unstatus'd errors → opaque 500 below.
+  const status = err.status ?? err.statusCode;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    return res.status(status).json({ error: err.type ?? err.message ?? "Bad Request" });
   }
   console.error("🔥 System Exception Blocked:", err);
   res.status(500).json({ error: "Internal server error" });
