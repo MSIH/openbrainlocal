@@ -7,6 +7,12 @@ Goal: run **Ollama** as your local AI engine, serving
 
 Written for **Windows 11** (PowerShell). Linux notes at the end.
 
+> **Reader/agent note.** Steps 1–5 (install Ollama, pull models, configure for 24/7) are current.
+> Steps 6–8 were written for the pre-2.0 single-file server (`brain-server.js`) and are
+> **superseded** — see the notes at each step: config is now env-driven (`.env` + `src/config.js`,
+> no code edits), the store is the `artifacts` schema (not `memories`), and WinSW is the
+> documented service wrapper ([`windows-service-winsw.md`](windows-service-winsw.md)).
+
 ---
 
 ## Step 1 — Install Ollama
@@ -102,6 +108,10 @@ The 780M is an iGPU (gfx1103) that AMD's ROCm does **not officially support**, s
 
 ## Step 6 — Point brain-server.js at Ollama
 
+> **Superseded (2.0).** No code edits anymore: set `OLLAMA_BASE_URL`, `EMBEDDING_MODEL`, and
+> `VECTOR_DIMENSION` in `.env` (defaults already match this guide) — `src/config.js` reads them
+> and `src/embeddings.js` owns the client. Kept for the pre-2.0 single-file server:
+
 Three changes near the top of the file:
 
 ```js
@@ -121,6 +131,11 @@ Everything else — the transaction pattern, MCP transport, auth — is untouche
 ---
 
 ## Step 7 — Migrate the existing database
+
+> **Superseded (2.0).** This re-embed targets the legacy `memories`/`vec_memories` tables from the
+> OB1-port era. On 2.0, memories live in `artifacts`/`vec_artifacts` (`npm run migrate` copies them
+> forward, reusing vectors) — a model/dimension swap there needs its own documented re-embed of
+> `vec_artifacts` (see `.claude/rules/data-model.md`). Kept for anyone still on the pre-2.0 server:
 
 `CREATE VIRTUAL TABLE IF NOT EXISTS` will **not** resize the old 1536-dim vec table, and old OpenAI vectors are incompatible with Qwen vectors anyway. Re-embed once:
 
@@ -173,6 +188,10 @@ Invoke-RestMethod -Uri "http://localhost:3000/api/recall" -Method Post -ContentT
 ---
 
 ## Step 8 — Run everything at boot
+
+> **Alternative (newer doc):** [`windows-service-winsw.md`](windows-service-winsw.md) documents the
+> same job with **WinSW** — a self-contained exe + committable XML config, and the leaner,
+> more auditable setup. NSSM below still works fine if you prefer it.
 
 Ollama already autostarts. For the brain server, install it as a **Windows service** using NSSM — it starts at boot (before anyone logs in), restarts on crash, and is managed like any other service.
 
