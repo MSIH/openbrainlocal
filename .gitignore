@@ -5,6 +5,7 @@ node_modules/
 *.db-shm
 logs/
 .worktrees/
+.claude/worktrees/
 .claude/settings.local.json
 .claude/.draft-issue-done
 .claude/.pre-pr-review-done
