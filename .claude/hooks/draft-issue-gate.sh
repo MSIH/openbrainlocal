@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 # Draft-issue gate.
-# PreToolUse on `mcp__github__create_issue` and `Bash(gh issue create*)`.
+# PreToolUse on `mcp__github__create_issue`, `mcp__github__issue_write`, and
+# `Bash(gh issue create*)`.
 # Denies issue creation unless /draft-issue ran within 600s (marker .claude/.draft-issue-done)
 # OR a single-use bypass token .claude/.draft-issue-skip exists (within 60s, deleted on read).
 # Requires GNU `date -d` (git-bash / Linux / cloud); BSD/macOS `date` is not supported.
 set -euo pipefail
+
+input=$(cat 2>/dev/null || true)
+
+# issue_write handles create AND update — only creation is gated. A non-create method
+# passes; a spurious "method":"create" match in body text merely falls through to the
+# marker check (fail-closed).
+if printf '%s' "$input" | grep -q '"tool_name"[[:space:]]*:[[:space:]]*"mcp__github__issue_write"'; then
+  if ! printf '%s' "$input" | grep -qE '"method"[[:space:]]*:[[:space:]]*"create"'; then
+    exit 0
+  fi
+fi
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 MARKER="$PROJECT_DIR/.claude/.draft-issue-done"

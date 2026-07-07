@@ -68,7 +68,7 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 
 `/planning` (Opus) can perform steps 1–2 (issue + plan + worktree) in one shot. The `worktree-edit-gate` hook **denies editing `.js` source outside a `.worktrees/` dir** — step 2 is not optional.
 
-**Cloud/remote sessions (claude.ai/code, GitHub tasks): the workflow still applies even though the gates can't fire.** These sessions have no `gh` CLI (the `gh`-based gate hooks never trigger) and GitHub access goes through MCP tools instead — so the issue-first rule is on the agent: **file the issue via the GitHub MCP tools (`issue_write`) and get the plan confirmed BEFORE editing**, or file it retroactively the moment the gap is noticed (see #12). The harness-assigned `claude/*` branch substitutes for the worktree (each cloud session is already an isolated clone); still run `/pre-pr-review` / `/pre-doc-review` before any PR, and the PR body still starts with `Closes #<n>`.
+**Cloud/remote sessions (claude.ai/code, GitHub tasks): the workflow is enforced by the `cloud-issue-gate` hook.** These sessions have no `gh` CLI (the `gh`-based gate hooks never trigger) and GitHub access goes through MCP tools instead — so the gate blocks **every Edit/Write under the repo (including `.claude/` tooling and `CLAUDE.md`)** until an issue exists: draft the plan per `/draft-issue`, get explicit approval, file it via the GitHub MCP tool `issue_write` (creation itself is gated by `draft-issue-gate`), then `echo <issue-number> > .claude/.cloud-issue-done` (gitignored; dies with the container, so each session re-earns it). See #13. The harness-assigned `claude/*` branch substitutes for the worktree (each cloud session is already an isolated clone); still run `/pre-pr-review` / `/pre-doc-review` before any PR, and the PR body still starts with `Closes #<n>`.
 - Run the store→recall smoke test (server boots, 0 errors) before committing server changes.
 - Update the relevant `docs/**` when behavior changes; keep the README Quickstart accurate.
 - Commit messages: imperative, ≤2 sentences. Reference issues/PRs as `#<n> "<title>"`.
@@ -86,7 +86,7 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 ## Workflow tooling & local settings
 The mandatory-workflow tooling is committed in `.claude/` so it travels with the repo — cloud/remote agents get only the git checkout, never `~/.claude`:
 - **Skills** (`.claude/commands/`): `/draft-issue`, `/pre-pr-review`, `/pre-doc-review`. **Agent** (`.claude/agents/`): `/planning` (Opus — issue + plan + worktree).
-- **Hooks** (`.claude/hooks/`): `draft-issue-gate` + `pre-pr-review-gate` (deny), `worktree-gate` (advisory), `worktree-edit-gate` (deny `.js` edits outside a worktree), `session-start` (bootstrap Node deps on cloud/remote). Wired + an `rm` deny in `.claude/settings.json`.
+- **Hooks** (`.claude/hooks/`): `draft-issue-gate` + `pre-pr-review-gate` (deny), `worktree-gate` (advisory), `worktree-edit-gate` (deny `.js` edits outside a worktree), `cloud-issue-gate` (deny ALL repo edits in cloud sessions until an issue number is in `.claude/.cloud-issue-done`), `session-start` (bootstrap Node deps on cloud/remote). Wired + an `rm` deny in `.claude/settings.json`; direct-invocation tests in `hooks/test-gates.sh`.
 Personal Claude Code settings (model, permission mode, extra hooks) go in **`.claude/settings.local.json`** (gitignored) — never commit those to this public repo.
 
 </rules>

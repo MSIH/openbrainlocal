@@ -10,3 +10,4 @@ logs/
 .claude/.pre-pr-review-done
 .claude/.pre-doc-review-done
 .claude/.draft-issue-skip
+.claude/.cloud-issue-done
