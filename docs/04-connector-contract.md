@@ -258,7 +258,17 @@ The core doesn't run connectors, but reference connectors follow these patterns 
 
 - The path is versioned: `/api/v1/…`. Within v1: **fields are only ever added, never removed or repurposed**; new registered types/streams may appear; warnings may appear on previously-silent payloads. Nothing that validates today will 422 tomorrow.
 - Breaking changes get `/api/v2/…` and v1 keeps working for a deprecation window of **no less than 12 months**.
-- The payload schema is published as JSON Schema in the repo (`schemas/ingest.v1.json`) — connectors can validate in CI without a live server.
+- **Live.** The payload schema is published as JSON Schema in the repo
+  ([`schemas/ingest.v1.json`](../schemas/ingest.v1.json)) — connectors can validate in CI
+  without a live server. It's generated from `IngestPayloadSchema`
+  (`src/ingest.js`, via zod v4's `z.toJSONSchema()`), not hand-written, so it cannot drift
+  from what the endpoint actually enforces; regenerate it with `npm run schema:ingest`
+  after any change to that schema (regeneration should produce zero diff otherwise — that's
+  the review check). One known gap: the `type` field's registry/`x-`-extension check
+  (§6) is a runtime `refine()` that JSON Schema can't express, so the generated schema
+  accepts any non-empty string for `type` — every other constraint (required fields,
+  `content_hash` format, strict rejection of unknown top-level keys) is enforced exactly
+  as the server enforces it.
 
 This promise is the whole reason a stranger can put a LifeContext URL in an iPhone Shortcut and trust it across upgrades.
 
