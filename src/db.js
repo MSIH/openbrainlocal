@@ -133,9 +133,10 @@ const getArtifactStmt = db.prepare('SELECT * FROM artifacts WHERE id = ?');
 // Upsert update path. COALESCE(@field, field): a present field overwrites; an absent one
 // (bound null) keeps the current value — so a metadata-only wave never wipes what an earlier
 // wave stored, and nothing can be cleared through this path (schema rejects explicit null).
-// text_repr is always present (required), so its assignment always fires the artifacts_au
-// FTS trigger. source / source_id (the upsert key) and ingested_at (first-ingest time) are
-// never in the SET clause.
+// source / source_id (the upsert key) and ingested_at (first-ingest time) are never in the
+// SET clause. Two variants so the caller only touches text_repr when it actually changed:
+// naming text_repr in SET fires `artifacts_au` (AFTER UPDATE OF text_repr) even when the value
+// is identical, so a metadata-only wave would otherwise churn the FTS index for nothing.
 const updateArtifactStmt = db.prepare(`
   UPDATE artifacts SET
     type        = COALESCE(@type, type),
@@ -144,6 +145,18 @@ const updateArtifactStmt = db.prepare(`
     longitude   = COALESCE(@longitude, longitude),
     place_label = COALESCE(@place_label, place_label),
     text_repr   = COALESCE(@text_repr, text_repr),
+    extra_json  = COALESCE(@extra_json, extra_json)
+  WHERE id = @id
+`);
+// Metadata-only variant: identical but omits text_repr, so the FTS update trigger does NOT
+// fire. Used when text_repr is unchanged (an enrichment wave that only touches place/geo/etc.).
+const updateArtifactMetaStmt = db.prepare(`
+  UPDATE artifacts SET
+    type        = COALESCE(@type, type),
+    occurred_at = COALESCE(@occurred_at, occurred_at),
+    latitude    = COALESCE(@latitude, latitude),
+    longitude   = COALESCE(@longitude, longitude),
+    place_label = COALESCE(@place_label, place_label),
     extra_json  = COALESCE(@extra_json, extra_json)
   WHERE id = @id
 `);
@@ -233,34 +246,53 @@ export const storeArtifactTxn = db.transaction((artifact, float32Vector, links =
  * { id, created, resolved, unresolved }.
  */
 export const upsertArtifactTxn = db.transaction((artifact, float32Vector, hints = []) => {
-  const existing = artifact.source_id != null
+  let existing = artifact.source_id != null
     ? getArtifactBySourceStmt.get(artifact.source, artifact.source_id)
     : null;
 
   if (!existing) {
+    // Create path requires a vector — a null here would insert a broken vec row or throw an
+    // opaque sqlite-vec error. Guard with a clear message (enrich-then-commit means the caller
+    // fetches the embedding before opening this transaction — CLAUDE.md rule 4).
+    if (!float32Vector) {
+      throw new Error(
+        `upsertArtifactTxn: create path requires an embedding vector ` +
+        `(source=${artifact.source}, source_id=${artifact.source_id})`
+      );
+    }
     const row = normalizeArtifact(artifact);
     const info = insertArtifactStmt.run(row);
     if (info.changes === 0) {
-      // No (source, source_id) row existed a statement ago, so an ignored insert here is a
-      // constraint violation, not a dedup — never swallow it as success (append-only + no-swallow).
-      throw new Error(
-        `upsertArtifactTxn: insert ignored with no dedup match — likely a constraint violation ` +
-        `(source=${row.source}, source_id=${row.source_id}, type=${row.type})`
-      );
+      // INSERT OR IGNORE skipped the row. WAL lets a separate process (migrate, a connector
+      // script) insert this (source, source_id) between our read above and this insert — a
+      // normal concurrent-upsert outcome, not a failure. Re-read: if the row now exists, fall
+      // through to the update path so the ingest stays idempotent (§1.3) instead of 500ing. If
+      // it's STILL absent, the ignore was a real constraint violation — never swallow that.
+      existing = getArtifactBySourceStmt.get(row.source, row.source_id);
+      if (!existing) {
+        throw new Error(
+          `upsertArtifactTxn: insert ignored with no dedup match — likely a constraint violation ` +
+          `(source=${row.source}, source_id=${row.source_id}, type=${row.type})`
+        );
+      }
+      // fall through to the update path below
+    } else {
+      const id = info.lastInsertRowid; // Number — safe for JSON responses
+      insertVecArtifactStmt.run(BigInt(id), float32Vector); // vec0 PK must bind as BigInt (rule 1)
+      const { resolved, unresolved } = resolveEntityHints(id, hints);
+      logEvent('ingest_create', row.source, { artifact_id: id, type: row.type });
+      return { id, created: true, resolved, unresolved };
     }
-    const id = info.lastInsertRowid; // Number — safe for JSON responses
-    insertVecArtifactStmt.run(BigInt(id), float32Vector); // vec0 PK must bind as BigInt (rule 1)
-    const { resolved, unresolved } = resolveEntityHints(id, hints);
-    logEvent('ingest_create', row.source, { artifact_id: id, type: row.type });
-    return { id, created: true, resolved, unresolved };
   }
 
+  const textChanged = artifact.text_repr != null && artifact.text_repr !== existing.text_repr;
+
   // Guard the enrich-then-commit window: the caller decided whether to re-embed from a read
-  // taken BEFORE this transaction. If text_repr differs from what we're about to write but no
-  // new vector was supplied, a concurrent upsert of the same key changed the text underneath us
-  // — committing would leave text_repr and its embedding out of sync. Fail loudly so the
-  // connector retries (idempotent) rather than silently persisting a mismatch.
-  if (!float32Vector && artifact.text_repr != null && artifact.text_repr !== existing.text_repr) {
+  // taken BEFORE this transaction. If text_repr changed but no new vector was supplied, a
+  // concurrent upsert of the same key changed the text underneath us — committing would leave
+  // text_repr and its embedding out of sync. Fail loudly so the connector retries (idempotent)
+  // rather than silently persisting a mismatch.
+  if (textChanged && !float32Vector) {
     throw new Error(
       `upsertArtifactTxn: text_repr changed under a concurrent upsert (source=${artifact.source}, ` +
       `source_id=${artifact.source_id}) but no embedding was supplied — retry the ingest`
@@ -276,7 +308,16 @@ export const upsertArtifactTxn = db.transaction((artifact, float32Vector, hints 
     bind[f] = val; // null → COALESCE keeps the existing value
     if (val !== null && val !== existing[f]) { changed.push(f); prior[f] = existing[f]; }
   }
-  updateArtifactStmt.run(bind);
+  // Only touch text_repr (and thus fire the FTS trigger) when it actually changed; a
+  // metadata-only wave uses the variant that omits it, so the FTS index isn't churned.
+  if (textChanged) {
+    updateArtifactStmt.run(bind);
+  } else {
+    const { text_repr, ...metaBind } = bind;
+    updateArtifactMetaStmt.run(metaBind);
+  }
+  // Update the vector whenever a new one was supplied (in the normal flow that's exactly when
+  // text_repr changed; a direct caller may also re-embed unchanged text).
   if (float32Vector) updateVecArtifactStmt.run(float32Vector, BigInt(existing.id));
   const { resolved, unresolved } = resolveEntityHints(existing.id, hints);
   logEvent('ingest_update', artifact.source, { artifact_id: existing.id, type: artifact.type, changed, prior });

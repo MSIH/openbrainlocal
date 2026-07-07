@@ -97,8 +97,9 @@ export async function executeIngest(payload) {
   const textChanged = !existing || payload.text_repr !== existing.text_repr;
   const vector = textChanged ? await embedToFloat32(payload.text_repr) : null;
 
-  // Present fields only (zod strips unknown keys and omits absent optionals); serialize
-  // `extra` into extra_json. The update path leaves any field not present here untouched.
+  // Present fields only (the schema is .strict(), so unknown keys are already rejected 422, and
+  // absent optionals are simply not on the object); serialize `extra` into extra_json. The
+  // update path leaves any field not present here untouched.
   const { extra, entity_hints, ...rest } = payload;
   const artifact = { ...rest };
   if (extra !== undefined) artifact.extra_json = JSON.stringify(extra);
