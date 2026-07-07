@@ -64,6 +64,21 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_links_entity ON entity_links(entity_id);
 
+  -- Staging for connector hints that miss entity_aliases (connector contract doc 04 §4).
+  -- UNIQUE is an additive deviation from the doc's DDL sketch: makes resolveEntityHints
+  -- idempotent by construction, matching entity_links' own PK + OR IGNORE discipline.
+  CREATE TABLE IF NOT EXISTS unresolved_aliases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id     INTEGER REFERENCES artifacts(id),
+    alias           TEXT NOT NULL,       -- normalized (lowercase; digits-only phones)
+    alias_type      TEXT,                -- email|phone|name|handle
+    role            TEXT,
+    hint_confidence REAL,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(artifact_id, alias, alias_type, role)
+  );
+  CREATE INDEX IF NOT EXISTS idx_unresolved_alias ON unresolved_aliases(alias, alias_type);
+
   -- Semantic index (dim MUST equal the embedding model's output).
   CREATE VIRTUAL TABLE IF NOT EXISTS vec_artifacts USING vec0(
     artifact_id INTEGER PRIMARY KEY,
@@ -100,6 +115,10 @@ const insertArtifactStmt = db.prepare(`
 `);
 const insertVecArtifactStmt = db.prepare('INSERT INTO vec_artifacts (artifact_id, embedding) VALUES (?, ?)');
 const insertLinkStmt = db.prepare('INSERT OR IGNORE INTO entity_links (artifact_id, entity_id, role, confidence) VALUES (?, ?, ?, ?)');
+const insertUnresolvedStmt = db.prepare(`
+  INSERT OR IGNORE INTO unresolved_aliases (artifact_id, alias, alias_type, role, hint_confidence)
+  VALUES (?, ?, ?, ?, ?)
+`);
 const selectIdBySourceStmt = db.prepare('SELECT id FROM artifacts WHERE source = ? AND source_id = ?');
 const selectIdByHashStmt = db.prepare('SELECT id FROM artifacts WHERE content_hash = ? LIMIT 1');
 const getArtifactStmt = db.prepare('SELECT * FROM artifacts WHERE id = ?');
@@ -172,6 +191,44 @@ export function resolveEntityIds(term) {
   const digits = normalizePhone(term);
   if (digits.length >= 7) for (const r of resolveAliasStmt.all(digits)) ids.add(r.entity_id);
   return [...ids];
+}
+
+// Deterministic alias types earn confidence 1.0 outright (connector-supplied value ignored);
+// name/handle earn only the connector-supplied confidence, capped (connector contract doc 04 §4).
+const DETERMINISTIC_ALIAS_TYPES = new Set(['email', 'phone']);
+const NAME_HANDLE_DEFAULT_CONFIDENCE = 0.7;
+const NAME_HANDLE_CONFIDENCE_CAP = 0.9;
+
+function hintConfidence(aliasType, supplied) {
+  if (DETERMINISTIC_ALIAS_TYPES.has(aliasType)) return 1.0;
+  return Math.min(supplied ?? NAME_HANDLE_DEFAULT_CONFIDENCE, NAME_HANDLE_CONFIDENCE_CAP);
+}
+
+/**
+ * Resolve connector-submitted alias hints against entity_aliases (connector contract doc 04
+ * §4). Hints, never IDs — resolution is wholly core-side, so a buggy connector can never
+ * corrupt the graph. An exact normalized match links every matching entity (ambiguity
+ * preserved, not guessed away, per resolveEntityIds' own multi-match behavior); a miss
+ * stages a row in unresolved_aliases for later retroactive resolution. Synchronous,
+ * prepared-statements-only, no network — composable inside the caller's own open
+ * transaction alongside the artifact write. Returns { resolved, unresolved } entity/alias
+ * counts (future contract response fields resolved_entities / unresolved_aliases).
+ */
+export function resolveEntityHints(artifactId, hints) {
+  let resolved = 0, unresolved = 0;
+  for (const hint of hints) {
+    const alias = hint.alias_type === 'phone' ? normalizePhone(hint.alias) : normalizeName(hint.alias);
+    const confidence = hintConfidence(hint.alias_type, hint.confidence);
+    const matches = resolveAliasStmt.all(alias);
+    if (matches.length) {
+      for (const m of matches) insertLinkStmt.run(artifactId, m.entity_id, hint.role ?? null, confidence);
+      resolved += matches.length;
+    } else {
+      insertUnresolvedStmt.run(artifactId, alias, hint.alias_type ?? null, hint.role ?? null, hint.confidence ?? null);
+      unresolved++;
+    }
+  }
+  return { resolved, unresolved };
 }
 
 export function getEntity(id) {

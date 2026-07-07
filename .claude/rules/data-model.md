@@ -6,6 +6,7 @@ globs: **/*.js — anything touching the SQLite / sqlite-vec store
 - `vec_artifacts USING vec0(artifact_id INTEGER PK, embedding float[1024])` — the vectors (dim = `VECTOR_DIMENSION`).
 - `artifacts_fts USING fts5(text_repr, content='artifacts', content_rowid='id')` — keyword/exact match, kept in sync by a single `AFTER INSERT` trigger (`artifacts_ai`). The store is append-only, so no delete/update shadow triggers and **never** run `('rebuild')`.
 - Entity graph: `entities` + `entity_aliases(UNIQUE(alias, alias_type))` + `entity_links(PK(artifact_id, entity_id, role), confidence)`.
+- `unresolved_aliases(id, artifact_id, alias, alias_type, role, hint_confidence, created_at, UNIQUE(artifact_id, alias, alias_type, role))` — staging for connector alias hints (doc 04 §4) that miss `entity_aliases`; the UNIQUE key makes `resolveEntityHints` idempotent the same way `entity_links`' PK + `OR IGNORE` does — re-submitting the same hints stages zero new rows.
 - `ingest_log(id, occurred_at, event_type, actor, details)` — append-only log of migrate/import/store events.
 - **Legacy:** the original `memories` / `vec_memories` tables are left untouched (append-only). `npm run migrate` copies them into `artifacts` as `type='note'`, reusing the raw 1024-dim vectors (no re-embed); it's idempotent, keyed by `(source='ob1-migration', source_id=<old id>)`.
 

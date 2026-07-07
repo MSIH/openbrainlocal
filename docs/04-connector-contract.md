@@ -140,7 +140,11 @@ Normalization (lowercase, digits-only phones) happens core-side; connectors subm
 **Never in the payload:** entity IDs, entity creation requests, relationship assertions ("this is my sister"). Durable facts enter the graph through contacts import and consolidation, not through connectors.
 
 ```sql
--- New staging table (core migration, not a payload concern)
+-- New staging table (core migration, not a payload concern). UNIQUE(artifact_id, alias,
+-- alias_type, role) is an additive deviation from an earlier sketch of this table: it makes
+-- resolveEntityHints idempotent by construction (paired with INSERT OR IGNORE), the same
+-- discipline entity_links already gets from its own PK — re-submitting identical hints for
+-- the same artifact stages zero new rows instead of piling up duplicates.
 CREATE TABLE unresolved_aliases (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   artifact_id INTEGER REFERENCES artifacts(id),
@@ -148,7 +152,8 @@ CREATE TABLE unresolved_aliases (
   alias_type  TEXT,
   role        TEXT,
   hint_confidence REAL,
-  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(artifact_id, alias, alias_type, role)
 );
 CREATE INDEX idx_unresolved_alias ON unresolved_aliases(alias, alias_type);
 ```
