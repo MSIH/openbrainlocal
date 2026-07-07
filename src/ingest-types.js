@@ -12,7 +12,7 @@
  * lands with a later milestone, but the flags ship now so the endpoint contract is
  * complete on day one (v1 only ever adds fields).
  */
-export const TYPE_REGISTRY = [
+export const TYPE_REGISTRY = Object.freeze([
   { type: 'note', default_searchable: true, digest_eligible: true },
   { type: 'message', default_searchable: true, digest_eligible: true },
   { type: 'email', default_searchable: true, digest_eligible: true },
@@ -26,9 +26,9 @@ export const TYPE_REGISTRY = [
   { type: 'listening_session', default_searchable: false, digest_eligible: true },
   { type: 'browsing_session', default_searchable: false, digest_eligible: true },
   { type: 'digest', default_searchable: true, digest_eligible: false },
-];
+].map(Object.freeze));
 
-export const ARTIFACT_TYPES = TYPE_REGISTRY.map((t) => t.type);
+export const ARTIFACT_TYPES = Object.freeze(TYPE_REGISTRY.map((t) => t.type));
 
 const EXTENSION_TYPE_RE = /^x-[a-z0-9-]+$/;
 
