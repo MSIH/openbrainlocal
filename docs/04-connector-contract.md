@@ -313,8 +313,8 @@ Near-term community-obvious connectors that need **zero core changes** once this
 
 ## 10. Distribution
 
-- Connectors live in **their own repos**, any language, any license. The LifeContext repo contains only the contract (this doc + JSON Schema) and the reference connectors.
-- Discovery via a curated **`awesome-lifecontext-connectors`** list: name, platform, pattern, data it reads, where the data goes (should always be "your LifeContext server, nothing else" — connectors that phone home don't get listed).
+- Connectors live together in one monorepo, **`life-context-connectors`** — one top-level folder per connector, any language/license per folder. The `life-context` repo contains only the contract (this doc + `schemas/ingest.v1.json`) and core server code; no connector code, reference or otherwise, lives there. This is a deliberate lazy-branching choice: while there's a single maintainer building the first reference connectors, one repo with shared HTTP-client/spool-file scaffolding and one CI is less overhead than a repo per connector. **Split a connector into its own standalone repo the moment it needs an independent release cadence or an external contributor wants to own just that one** — that's the trigger, not a timeline.
+- Discovery via a curated **`awesome-life-context-connectors`** list: name, platform (path in the monorepo, or its own repo post-split), pattern, data it reads, where the data goes (should always be "your LifeContext server, nothing else" — connectors that phone home don't get listed).
 - No certification, no review pipeline, no plugin store. The contract's structural guarantees (hints not IDs, upsert, event lane, payload validation) are the safety model; curation is just a README.
 
 ---
