@@ -100,7 +100,7 @@ CREATE TABLE entity_links (
   artifact_id INTEGER REFERENCES artifacts(id),
   entity_id   INTEGER REFERENCES entities(id),
   role        TEXT,                   -- sender | recipient | pictured |
-                                      -- mentioned | author | location_of
+                                      -- mentioned | author | self | location_of
   confidence  REAL DEFAULT 1.0,       -- 1.0 = deterministic (email header),
                                       -- <1.0 = inferred (NER, face match)
   PRIMARY KEY (artifact_id, entity_id, role)
@@ -237,7 +237,7 @@ Keep the per-session server factory and Streamable HTTP transport from v2.2 unch
 
 Humans don't keep raw sensory streams; they consolidate. A nightly batch job:
 
-1. **Daily digest** — LLM summarizes yesterday's artifacts into one `type='note'` artifact ("Emailed 3 donors for MSIH; brunch at Common Bond; shipped OB2 ingestion PR"). Digests are what make *"what was I doing last October"* answerable in one hit instead of 400.
+1. **Daily digest** — LLM summarizes yesterday's artifacts into one `type='digest'` artifact (originally specced as `type='note'`; superseded by the doc 04 §6 type registry) ("Emailed 3 donors for MSIH; brunch at Common Bond; shipped OB2 ingestion PR"). Digests are what make *"what was I doing last October"* answerable in one hit instead of 400.
 2. **Entity refresh** — new facts fold into `entities.attrs_json` ("Sarah changed jobs").
 3. **Rollups** — weekly/monthly digests built from daily ones, hierarchical.
 

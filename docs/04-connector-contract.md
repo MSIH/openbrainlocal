@@ -88,7 +88,7 @@ Design note: prefer **accept-with-warning** over rejection wherever data isn't d
 
   // ---- STRONGLY RECOMMENDED ----
   "occurred_at": "2026-07-04T18:22:09Z",  // when it HAPPENED; omit → warning, ingested_at used
-  "content_hash": "sha256:…",             // of the raw bytes, if a raw object exists
+  "content_hash": "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",  // bare sha256 hex of the raw bytes
 
   // ---- OPTIONAL ----
   "latitude": 30.2672,
@@ -111,6 +111,7 @@ Field-by-field rules:
 - **`source_id`** — must be reproducible from the source data itself (a provider ID, a file path + mtime, a hash), *never* a random UUID minted at runtime — random IDs defeat upsert.
 - **`text_repr`** — the normalized natural-language representation, per doc 03 §1.1. This is what gets embedded and FTS-indexed. Connectors do the describing; core does the embedding. Connectors **never** call Ollama or compute vectors — embedding model and dimensions are core's private business (this is what lets the embedding model change without touching a single connector).
 - **`occurred_at` vs `ingested_at`** — the 2019 photo imported today sorts into 2019. Connectors that can't determine occurrence time omit the field and accept the warning.
+- **`content_hash`** — lowercase hex SHA-256 digest of the raw bytes, no algorithm prefix (matches core's `sha256()` helper). Compared by exact string equality for cross-import dedup — a mismatched format silently breaks dedup instead of erroring.
 - **`raw_path`** — the API carries text + metadata only. Connectors that own binary artifacts (photos, audio) write them to disk themselves and submit the pointer. Keeps the DB small and the API fast, per doc 03 §2.1.
 
 ---
@@ -119,7 +120,7 @@ Field-by-field rules:
 
 The single most important boundary in the contract.
 
-**What connectors submit:** `{alias, alias_type, role, confidence?}` where `alias_type ∈ {email, phone, name, handle}` and `role` uses the `entity_links` vocabulary (`sender`, `recipient`, `pictured`, `mentioned`, `author`, `location_of`).
+**What connectors submit:** `{alias, alias_type, role, confidence?}` where `alias_type ∈ {email, phone, name, handle}` and `role` uses the `entity_links` vocabulary (`sender`, `recipient`, `pictured`, `mentioned`, `author`, `self`, `location_of`). `self` is connector-submittable, not core-inferred-only — a connector that already knows an artifact is the account owner's own (iMessage's `is_from_me`, a device's own GPS track) should hint `self` directly rather than relying on later resolution.
 
 **What core does with each hint:**
 
