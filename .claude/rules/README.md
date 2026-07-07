@@ -1,6 +1,6 @@
 # .claude/rules — Index
 
-Project conventions for Open Brain Local. Read these before editing code or schema. `CLAUDE.md` (repo root) links here and holds the absolute rules + run/test contract.
+Project conventions for LifeContext (formerly Open Brain Local). Read these before editing code or schema. `CLAUDE.md` (repo root) links here and holds the absolute rules + run/test contract.
 
 | File | Scope | Contents |
 |------|-------|----------|

@@ -7,7 +7,7 @@ Defines the stable boundary between the LifeContext core (artifact store, entity
 > **Status: design, not yet implemented.** The `/api/v1/ingest` endpoints below land at
 > [`05-roadmap.md`](05-roadmap.md) Milestone 0; the contract is declared v1-stable only after three
 > real connectors have used it (Milestone 5). This doc supersedes the ingestion-pipeline framing in
-> [`03-ob2-design.md`](03-ob2-design.md) §3 — see the naming note above for how the terms map.
+> [`03-ob2-design.md`](03-ob2-design.md) §3 — see the naming note below for how the terms map.
 
 **Naming note.** Doc 03 §1.1 uses "senses" for the *transducers* — the core-side enrichers (VLM, Whisper, EXIF) that convert a modality into text. That usage stands. The external gatherers defined here are **connectors**, because one connector can emit many types (iMessage emits messages *and* photo attachments; a Takeout importer emits email, location, and browsing history). The decomposition is: **connector** (gathers) → **type** (classifies) → **transducer/sense** (enriches non-text into `text_repr`, core-side). The `artifacts` table already encodes the first two as its `source` and `type` columns.
 
