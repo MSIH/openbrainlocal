@@ -67,6 +67,8 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 3. **`/pre-pr-review`** — run the multi-persona review (or **`/pre-doc-review`** for doc-only PRs), then open the PR (body starts with `Closes #<n>`). (Gate denies `gh pr create` without an APPROVE marker.) The repo ruleset requires a PR to `main`; merge, then sync `main`.
 
 `/planning` (Opus) can perform steps 1–2 (issue + plan + worktree) in one shot. The `worktree-edit-gate` hook **denies editing `.js` source outside a `.worktrees/` dir** — step 2 is not optional.
+
+**Cloud/remote sessions (claude.ai/code, GitHub tasks): the workflow still applies even though the gates can't fire.** These sessions have no `gh` CLI (the `gh`-based gate hooks never trigger) and GitHub access goes through MCP tools instead — so the issue-first rule is on the agent: **file the issue via the GitHub MCP tools (`issue_write`) and get the plan confirmed BEFORE editing**, or file it retroactively the moment the gap is noticed (see #12). The harness-assigned `claude/*` branch substitutes for the worktree (each cloud session is already an isolated clone); still run `/pre-pr-review` / `/pre-doc-review` before any PR, and the PR body still starts with `Closes #<n>`.
 - Run the store→recall smoke test (server boots, 0 errors) before committing server changes.
 - Update the relevant `docs/**` when behavior changes; keep the README Quickstart accurate.
 - Commit messages: imperative, ≤2 sentences. Reference issues/PRs as `#<n> "<title>"`.
