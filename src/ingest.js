@@ -69,9 +69,12 @@ export const IngestPayloadSchema = z.object({
 
 // Envelope shape only (doc 04 §2 batch rule): 1–100 items, each still `z.unknown()` — item
 // validation happens per-item in the route so one malformed item never 422s the whole batch.
+// Deliberately NOT .strict(): unlike IngestPayloadSchema (where an unknown key is a likely
+// typo that would silently lose data), an unrecognized envelope key is forward-compatible —
+// a future `meta` field shouldn't 422 against an older server. Only shape/count is enforced.
 export const BatchEnvelopeSchema = z.object({
   artifacts: z.array(z.unknown()).min(1).max(INGEST_BATCH_MAX),
-}).strict();
+});
 
 // Validate hints one at a time: good ones pass through, malformed ones are dropped and
 // reported as warnings (the artifact itself is never lost over a bad hint — doc 04 §2).
