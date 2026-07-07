@@ -71,7 +71,7 @@ Recall returns the stored memory with a similarity score. For AI clients, point 
 Every endpoint/tool requires the `x-api-key` header. REST and MCP share one store.
 
 - **REST** — `POST /api/remember`, `POST /api/recall`, `POST /api/search`, `POST /api/timeline`, `POST /api/about_entity`, `GET /api/artifact/:id`
-- **Connector ingest** (`/api/v1`, see [`docs/04-connector-contract.md`](docs/04-connector-contract.md)) — `POST /api/v1/ingest` (submit one artifact; upsert on `(source, source_id)` — 201 create / 200 update, non-destructive issues accepted with a `warnings` array, 256 KB body cap), `POST /api/v1/ingest/batch` (submit 1–100 artifacts in one call; 200 with index-aligned per-item results + a `summary`, per-item isolation — one bad item is reported at its index, never poisons the rest), `GET /api/v1/ingest/types` (the machine-readable type registry, §6):
+- **Connector ingest** (`/api/v1`, see [`docs/04-connector-contract.md`](docs/04-connector-contract.md)) — `POST /api/v1/ingest` (submit one artifact; upsert on `(source, source_id)` — 201 create / 200 update, non-destructive issues accepted with a `warnings` array, 256 KB body cap), `POST /api/v1/ingest/batch` (submit 1–100 artifacts in one call; 200 with index-aligned per-item results + a `summary`, per-item isolation — one bad item is reported at its index, never poisons the rest), `GET /api/v1/ingest/types` (the machine-readable type registry, §6). The payload's JSON Schema is published at [`schemas/ingest.v1.json`](schemas/ingest.v1.json) (generated from the zod schema via `npm run schema:ingest`) so connector authors can validate offline, without a live server:
 
   ```bash
   curl -s -X POST localhost:3000/api/v1/ingest -H "x-api-key: $KEY" -H "Content-Type: application/json" -d '{
