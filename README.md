@@ -70,7 +70,7 @@ Recall returns the stored memory with a similarity score. For AI clients, point 
 
 Every endpoint/tool requires the `x-api-key` header. REST and MCP share one store.
 
-- **REST** — `POST /api/remember`, `POST /api/recall`, `POST /api/search`, `POST /api/timeline`, `POST /api/about_entity`, `GET /api/artifact/:id`
+- **REST** — `POST /api/remember`, `POST /api/recall`, `POST /api/search`, `POST /api/timeline`, `POST /api/about_entity`, `GET /api/artifact/:id`, `GET /api/v1/ingest/types` (connector contract type registry, see `docs/04-connector-contract.md` §6)
 - **MCP** (Streamable HTTP) — `/mcp`, tools:
   - `store_memory` / `search_memories` — the original note store + recall (unchanged on the wire)
   - `search` — hybrid semantic + keyword search with optional `types` / `time_range` / `entities` filters

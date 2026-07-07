@@ -21,7 +21,7 @@ db.exec(`
   -- Unified artifact: every email/photo/doc/note is an event with time, place, text.
   CREATE TABLE IF NOT EXISTS artifacts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    type          TEXT NOT NULL,        -- email|document|photo|video|contact|post|location_ping|note
+    type          TEXT NOT NULL,        -- registered type (src/ingest-types.js) or an x- extension
     source        TEXT NOT NULL,        -- gmail|icloud|filesystem|vcard|ob1-migration|manual
     source_id     TEXT,                 -- provider's id (dedup key)
     content_hash  TEXT,                 -- sha256 of raw bytes (dedup + integrity)

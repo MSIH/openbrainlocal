@@ -60,8 +60,7 @@ Retrieval fuses all three: *"photos of Sarah from the New Orleans trip"* = entit
 ```sql
 CREATE TABLE artifacts (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  type          TEXT NOT NULL,        -- email | document | photo | video |
-                                      -- contact | post | location_ping | note
+  type          TEXT NOT NULL,        -- registered type — see doc 04 §6 for the current list
   source        TEXT NOT NULL,        -- gmail | icloud | filesystem | takeout | manual
   source_id     TEXT,                 -- provider's ID (dedup key)
   content_hash  TEXT,                 -- sha256 of raw bytes (dedup + integrity)
