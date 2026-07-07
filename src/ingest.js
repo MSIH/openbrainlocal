@@ -1,14 +1,22 @@
 /**
  * The single-artifact ingest endpoint (connector contract doc 04 §2–§4, roadmap M0
- * deliverable 1). Keeps brainserver.js a wiring file: the shared zod payload schema, warning
- * computation, the embed-then-upsert orchestration, and the router factory all live here so
- * the future batch endpoint (#19) and the JSON-schema generator (#20) reuse ONE definition.
+ * deliverable 1) plus the batch endpoint (#19, roadmap M0 deliverable 2). Keeps
+ * brainserver.js a wiring file: the shared zod payload schema, warning computation, the
+ * embed-then-upsert orchestration, and the router factory all live here so the JSON-schema
+ * generator (#20) reuses ONE definition.
  *
  * Contract shape (§2): 201 on create / 200 on update, body
  * { id, created, resolved_entities, unresolved_aliases } plus an optional `warnings` array
  * (present only when non-empty). Validation failures are 422 { error:'validation', issues:[…] }.
  * Design bias (§2): accept-with-warning wherever data isn't destructive; reject at the door
  * only what would silently lose data (a typo'd key, a missing upsert id, a bad hash format).
+ *
+ * Batch (§2): POST /ingest/batch loops `executeIngest` per item — one enrich+commit
+ * transaction per artifact (upsertArtifactTxn is itself a db.transaction), so item N's
+ * failure never touches items 1..N-1. The envelope schema (BatchEnvelopeSchema) validates
+ * only shape/count (1–100 items); each item is parsed individually so one malformed item
+ * yields `{error}` at its index, not a request-wide 422. Always 200 on a well-formed
+ * envelope — per-item outcomes live in the body (`summary` + index-aligned `results`).
  */
 import express from 'express';
 import { z } from 'zod';
@@ -18,6 +26,7 @@ import { embedToFloat32 } from './embeddings.js';
 import { isRegisteredType, isExtensionType } from './ingest-types.js';
 
 const JSON_BODY_LIMIT = '256kb'; // contract §2 per-request cap (raw media never travels here)
+const INGEST_BATCH_MAX = 100; // contract §2/§7 batch cap — named, not a magic number
 
 // alias_type / role vocabularies (doc 04 §4). A hint that violates these is dropped with a
 // warning rather than failing the whole artifact.
@@ -56,6 +65,12 @@ export const IngestPayloadSchema = z.object({
   raw_path: z.string().optional(),
   extra: z.record(z.string(), z.unknown()).optional(),
   entity_hints: z.array(z.unknown()).optional(),
+}).strict();
+
+// Envelope shape only (doc 04 §2 batch rule): 1–100 items, each still `z.unknown()` — item
+// validation happens per-item in the route so one malformed item never 422s the whole batch.
+export const BatchEnvelopeSchema = z.object({
+  artifacts: z.array(z.unknown()).min(1).max(INGEST_BATCH_MAX),
 }).strict();
 
 // Validate hints one at a time: good ones pass through, malformed ones are dropped and
@@ -108,9 +123,45 @@ export async function executeIngest(payload) {
   return { result, warnings };
 }
 
+// Shared response shape (§2) for a successful ingest, single or batch — one place to change
+// if the contract ever adds a field, instead of the single route and the batch loop drifting.
+function formatIngestResult(result, warnings) {
+  const body = {
+    id: result.id,
+    created: result.created,
+    resolved_entities: result.resolved,
+    unresolved_aliases: result.unresolved,
+  };
+  if (warnings.length) body.warnings = warnings;
+  return body;
+}
+
 // Route-local wrapper (mirrors brainserver.js): funnels async rejections into next(err) so the
 // router error middleware / the app error funnel handle them.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// One item of a batch: validate then run the exact same executeIngest path as single ingest —
+// UNCHANGED, so batch is a loop, not a second code path (#19 design decision). Never throws —
+// a validation failure or a runtime failure (embed, constraint) becomes `{error, issues?}` at
+// the caller's index instead of aborting the loop, so item N never poisons items 1..N-1
+// (roadmap M0 deliverable 2 — one transaction per artifact; upsertArtifactTxn is itself a
+// db.transaction, so a thrown error there rolls back only this item's own write).
+async function ingestBatchItem(rawItem, index) {
+  const parsed = IngestPayloadSchema.safeParse(rawItem);
+  if (!parsed.success) return { error: 'validation', issues: parsed.error.issues };
+  try {
+    const { result, warnings } = await executeIngest(parsed.data);
+    return formatIngestResult(result, warnings);
+  } catch (err) {
+    // Full detail logged server-side with the item index so a batch failure is attributable
+    // (design-philosophy §4); the item is skipped, the loop continues. The client-facing body
+    // stays generic — mirrors the app's own 500 posture (brainserver.js's error funnel masks
+    // internal errors behind "Internal server error"), so an embed/DB failure never leaks
+    // internal connection details (e.g. the Ollama URL) to an API-key holder.
+    console.error(`ingest batch item ${index} failed`, err);
+    return { error: 'ingest_failed' };
+  }
+}
 
 /**
  * Build the /api/v1 connector router. Mounted BEFORE the global 32 KB parser in brainserver.js
@@ -125,14 +176,26 @@ export function buildIngestRouter({ requireAuth }) {
   router.post('/ingest', requireAuth, express.json({ limit: JSON_BODY_LIMIT }), wrap(async (req, res) => {
     const payload = IngestPayloadSchema.parse(req.body); // ZodError → router error mw → 422
     const { result, warnings } = await executeIngest(payload);
-    const body = {
-      id: result.id,
-      created: result.created,
-      resolved_entities: result.resolved,
-      unresolved_aliases: result.unresolved,
-    };
-    if (warnings.length) body.warnings = warnings;
-    res.status(result.created ? 201 : 200).json(body);
+    res.status(result.created ? 201 : 200).json(formatIngestResult(result, warnings));
+  }));
+
+  // Batch (#19, doc 04 §2): envelope-level 422 only for shape/count problems (not an array, 0
+  // items, >100 items) — the same z.ZodError → 422 middleware below handles that. Item-level
+  // failures never reach that middleware; they're caught per item in ingestBatchItem and
+  // reported at their index. Always 200 on a well-formed envelope, per-item outcomes in the
+  // body, so a connector never re-sends 99 good items because 1 failed.
+  router.post('/ingest/batch', requireAuth, express.json({ limit: JSON_BODY_LIMIT }), wrap(async (req, res) => {
+    const { artifacts } = BatchEnvelopeSchema.parse(req.body); // ZodError → router error mw → 422
+    const summary = { created: 0, updated: 0, failed: 0 };
+    const results = [];
+    for (let i = 0; i < artifacts.length; i++) {
+      const entry = await ingestBatchItem(artifacts[i], i);
+      results.push(entry);
+      if (entry.error) summary.failed++;
+      else if (entry.created) summary.created++;
+      else summary.updated++;
+    }
+    res.status(200).json({ summary, results });
   }));
 
   // Contract §2 validation shape (422) lives here, not in the app funnel — the legacy routes

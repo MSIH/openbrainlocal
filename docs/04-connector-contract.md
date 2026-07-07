@@ -5,12 +5,13 @@
 Defines the stable boundary between the LifeContext core (artifact store, entity graph, hybrid retrieval, consolidation) and *connectors*: external processes that gather data from some corner of a digital life and submit it for ingestion. The contract is HTTP + JSON, not a plugin API. Publishing this document *is* shipping the framework.
 
 > **Status: partially implemented.** `POST /api/v1/ingest` (single-artifact upsert on
-> `(source, source_id)`, §2–§4) and `GET /api/v1/ingest/types` (§6) are **live** in
-> `src/ingest.js` / `src/brainserver.js`. The batch (`/ingest/batch`), event (`/events`), and
-> per-connector state endpoints below remain design-only ([`05-roadmap.md`](05-roadmap.md)
-> Milestone 0+). The contract is declared v1-stable only after three real connectors have used
-> it (Milestone 5). This doc supersedes the ingestion-pipeline framing in
-> [`03-ob2-design.md`](03-ob2-design.md) §3 — see the naming note below for how the terms map.
+> `(source, source_id)`, §2–§4), `POST /api/v1/ingest/batch` (up to 100 artifacts per call,
+> per-item isolation, §2), and `GET /api/v1/ingest/types` (§6) are **live** in `src/ingest.js`
+> / `src/brainserver.js`. The event (`/events`) and per-connector state endpoints below remain
+> design-only ([`05-roadmap.md`](05-roadmap.md) Milestone 0+). The contract is declared
+> v1-stable only after three real connectors have used it (Milestone 5). This doc supersedes
+> the ingestion-pipeline framing in [`03-ob2-design.md`](03-ob2-design.md) §3 — see the naming
+> note below for how the terms map.
 
 **Naming note.** Doc 03 §1.1 uses "senses" for the *transducers* — the core-side enrichers (VLM, Whisper, EXIF) that convert a modality into text. That usage stands. The external gatherers defined here are **connectors**, because one connector can emit many types (iMessage emits messages *and* photo attachments; a Takeout importer emits email, location, and browsing history). The decomposition is: **connector** (gathers) → **type** (classifies) → **transducer/sense** (enriches non-text into `text_repr`, core-side). The `artifacts` table already encodes the first two as its `source` and `type` columns.
 
@@ -81,6 +82,28 @@ All endpoints require the standard `x-api-key` header. All bodies are JSON. Size
 ```
 
 Design note: prefer **accept-with-warning** over rejection wherever data isn't destructive. A community connector that mostly works should mostly work.
+
+**Batch (implemented, `POST /api/v1/ingest/batch`).** Request body is `{ "artifacts": [ …1–100 payloads… ] }` — each item is the same shape as §3. Per-item isolation: each artifact gets its own enrich-then-commit transaction (it reuses `executeIngest` from single ingest, unchanged), so one bad item is skipped and reported at its index — it never rolls back or blocks the items around it.
+
+```jsonc
+// Request
+{ "artifacts": [ { …ingest payload per §3… }, … ] }   // 1–100 items
+
+// 200 — per-item results, index-aligned with the request (results[i] ↔ artifacts[i])
+{
+  "summary": { "created": 2, "updated": 0, "failed": 1 },
+  "results": [
+    { "id": 4821, "created": true, "resolved_entities": 1, "unresolved_aliases": 0 },
+    { "id": 4822, "created": true, "resolved_entities": 0, "unresolved_aliases": 0, "warnings": ["…"] },
+    { "error": "validation", "issues": [ … ] }
+  ]
+}
+
+// 422 — envelope invalid (body isn't {artifacts:[...]}, 0 items, or >100 items); nothing persisted
+{ "error": "validation", "issues": [ … ] }
+```
+
+The envelope schema validates only shape and count (1–100 items) — a malformed *item* is never an envelope-level 422; it becomes a `{error, issues?}` entry at its index instead, so 99 good artifacts in a batch of 100 are never held hostage by 1 bad one. The response is **always HTTP 200** once the envelope itself is well-formed, even when some items failed — the request succeeded; per-item status lives in the body (`summary` gives the quick read, so a connector doesn't have to count `results` itself). Batch is a backlog path (cron/one-shot backfills), processed sequentially, not a low-latency path — see doc `05-roadmap.md` Milestone 0.
 
 ---
 
