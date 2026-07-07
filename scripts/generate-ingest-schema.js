@@ -13,10 +13,12 @@
  * `z.string().refine(...)` against the live type registry (src/ingest-types.js) — a
  * runtime check against a table that can grow, plus the open-ended `x-` extension
  * prefix. z.toJSONSchema() cannot represent an arbitrary refine() predicate, so the
- * emitted schema accepts any non-empty string for `type`; connectors validating
- * offline get every other constraint (required fields, content_hash format, strict
- * unknown-key rejection) but not registry membership for `type`. That check still runs
- * server-side on every real POST.
+ * emitted schema (before the minLength patch below) would accept ANY string, including
+ * empty, for `type`. We patch in `minLength: 1` post-generation so the file at least
+ * matches the refine()'s de-facto non-empty requirement; connectors validating offline
+ * get every other constraint (required fields, content_hash format, strict unknown-key
+ * rejection, non-empty type) but not registry membership for `type` — that check still
+ * runs server-side on every real POST.
  */
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +36,12 @@ const OUT_PATH = join(__dirname, '..', 'schemas', 'ingest.v1.json');
 // file on the default branch (2.0) — names the versioned contract so the schema is
 // self-describing for anyone who finds it outside the repo (doc 04 §8 promise).
 const { $schema, ...body } = z.toJSONSchema(IngestPayloadSchema);
+// z.toJSONSchema() drops the refine() predicate on `type`, so the emitted property is bare
+// `{type:"string"}` — that would let an offline validator accept `type:""`, which the real
+// server rejects (isRegisteredType/isExtensionType both reject empty). Patch minLength: 1 in
+// so the committed file matches that de-facto constraint (registry membership itself still
+// can't be expressed here — see the Known gap note above).
+if (body.properties?.type) body.properties.type = { ...body.properties.type, minLength: 1 };
 const schema = {
   $schema,
   $id: 'https://raw.githubusercontent.com/MSIH/lifecontext/2.0/schemas/ingest.v1.json',
