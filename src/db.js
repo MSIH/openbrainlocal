@@ -130,6 +130,10 @@ const getLinksStmt = db.prepare(`
 const insertEntityStmt = db.prepare('INSERT INTO entities (kind, canonical_name, attrs_json) VALUES (?, ?, ?)');
 const insertAliasStmt = db.prepare('INSERT OR IGNORE INTO entity_aliases (entity_id, alias, alias_type) VALUES (?, ?, ?)');
 const resolveAliasStmt = db.prepare('SELECT DISTINCT entity_id FROM entity_aliases WHERE alias = ?');
+// entity_aliases is UNIQUE(alias, alias_type) — a hint's declared type must be part of the
+// match, or a name/handle alias could collide with an unrelated entity's differently-typed
+// alias (and a phone/email hint could earn undeserved 1.0 confidence off that collision).
+const resolveAliasByTypeStmt = db.prepare('SELECT DISTINCT entity_id FROM entity_aliases WHERE alias = ? AND alias_type = ?');
 const getEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const logStmt = db.prepare('INSERT INTO ingest_log (event_type, actor, details) VALUES (?, ?, ?)');
 
@@ -201,7 +205,10 @@ const NAME_HANDLE_CONFIDENCE_CAP = 0.9;
 
 function hintConfidence(aliasType, supplied) {
   if (DETERMINISTIC_ALIAS_TYPES.has(aliasType)) return 1.0;
-  return Math.min(supplied ?? NAME_HANDLE_DEFAULT_CONFIDENCE, NAME_HANDLE_CONFIDENCE_CAP);
+  // Garbage supplied values (NaN, Infinity, negative, non-number) are treated as absent
+  // rather than persisted into entity_links.confidence, where they'd corrupt ranking.
+  const isValidSupplied = typeof supplied === 'number' && Number.isFinite(supplied) && supplied >= 0;
+  return Math.min(isValidSupplied ? supplied : NAME_HANDLE_DEFAULT_CONFIDENCE, NAME_HANDLE_CONFIDENCE_CAP);
 }
 
 /**
@@ -217,14 +224,19 @@ function hintConfidence(aliasType, supplied) {
 export function resolveEntityHints(artifactId, hints) {
   let resolved = 0, unresolved = 0;
   for (const hint of hints) {
-    const alias = hint.alias_type === 'phone' ? normalizePhone(hint.alias) : normalizeName(hint.alias);
-    const confidence = hintConfidence(hint.alias_type, hint.confidence);
-    const matches = resolveAliasStmt.all(alias);
+    const aliasType = hint.alias_type ?? null;
+    // '' rather than null: SQLite UNIQUE indexes don't treat NULL as equal to NULL, so a
+    // role-less/type-less hint retried with the same input would otherwise insert a
+    // duplicate row instead of hitting the UNIQUE constraint (breaks idempotency).
+    const role = hint.role ?? '';
+    const alias = aliasType === 'phone' ? normalizePhone(hint.alias) : normalizeName(hint.alias);
+    const confidence = hintConfidence(aliasType, hint.confidence);
+    const matches = resolveAliasByTypeStmt.all(alias, aliasType);
     if (matches.length) {
-      for (const m of matches) insertLinkStmt.run(artifactId, m.entity_id, hint.role ?? null, confidence);
+      for (const m of matches) insertLinkStmt.run(artifactId, m.entity_id, role, confidence);
       resolved += matches.length;
     } else {
-      insertUnresolvedStmt.run(artifactId, alias, hint.alias_type ?? null, hint.role ?? null, hint.confidence ?? null);
+      insertUnresolvedStmt.run(artifactId, alias, aliasType ?? '', role, hint.confidence ?? null);
       unresolved++;
     }
   }
