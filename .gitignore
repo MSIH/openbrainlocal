@@ -5,3 +5,12 @@ node_modules/
 
 # per-connector runtime spool/state files, if ever created inside a connector folder
 *-spool.jsonl
+
+# workflow gate markers/worktrees (session-scoped state, not repo content)
+.claude/worktrees/
+.claude/settings.local.json
+.claude/.draft-issue-done
+.claude/.pre-pr-review-done
+.claude/.pre-doc-review-done
+.claude/.draft-issue-skip
+.claude/.cloud-issue-done
