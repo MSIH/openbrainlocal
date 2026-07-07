@@ -9,11 +9,16 @@ set -euo pipefail
 
 input=$(cat 2>/dev/null || true)
 
-# issue_write handles create AND update — only creation is gated. A non-create method
-# passes; a spurious "method":"create" match in body text merely falls through to the
-# marker check (fail-closed).
+# issue_write handles create AND update — only creation is gated. Parse tool_input.method
+# (jq when available; first-match regex fallback) and pass ONLY an explicit non-create
+# method; a missing or unparseable method falls through to the marker checks (fail-closed).
 if printf '%s' "$input" | grep -q '"tool_name"[[:space:]]*:[[:space:]]*"mcp__github__issue_write"'; then
-  if ! printf '%s' "$input" | grep -qE '"method"[[:space:]]*:[[:space:]]*"create"'; then
+  if command -v jq >/dev/null 2>&1; then
+    method=$(printf '%s' "$input" | jq -r '.tool_input.method // ""' 2>/dev/null || true)
+  else
+    method=$(printf '%s' "$input" | grep -oE '"method"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*"//; s/"$//' || true)
+  fi
+  if [[ -n "$method" && "$method" != "create" ]]; then
     exit 0
   fi
 fi

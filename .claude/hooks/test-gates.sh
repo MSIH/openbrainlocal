@@ -4,6 +4,7 @@ set -u
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GATE=$REPO/.claude/hooks/cloud-issue-gate.sh
 DIG=$REPO/.claude/hooks/draft-issue-gate.sh
+WTG=$REPO/.claude/hooks/worktree-edit-gate.sh
 FAKE=$(mktemp -d)            # fake project dir with NO marker
 mkdir -p "$FAKE/.claude"
 PASS=0; FAIL=0
@@ -42,9 +43,21 @@ check "cloud, relative path, no marker -> deny" deny "$out" $?
 out=$(CLAUDE_CODE_REMOTE=true CLAUDE_PROJECT_DIR=$FAKE bash "$GATE" <<<'{"tool_name":"Edit","tool_input":{}}')
 check "cloud, no file_path in input -> allow (no-op)" allow "$out" $?
 
+# --- worktree-edit-gate cloud awareness ---
+out=$(CLAUDE_CODE_REMOTE=true bash "$WTG" <<<'{"tool_name":"Edit","tool_input":{"file_path":"/x/src/db.js"}}')
+check "worktree-gate: cloud .js edit -> allow (stands down)" allow "$out" $?
+out=$(CLAUDE_CODE_REMOTE=false bash "$WTG" <<<'{"tool_name":"Edit","tool_input":{"file_path":"/x/src/db.js"}}')
+check "worktree-gate: local .js outside worktree -> deny (regression)" deny "$out" $?
+
 # --- draft-issue-gate (run against FAKE dir: no draft-issue marker) ---
 out=$(CLAUDE_PROJECT_DIR=$FAKE bash "$DIG" <<<'{"tool_name":"mcp__github__issue_write","tool_input":{"method":"update","issue_number":12}}')
 check "issue_write method=update, no marker -> allow" allow "$out" $?
+out=$(CLAUDE_PROJECT_DIR=$FAKE bash "$DIG" <<<'{"tool_name":"mcp__github__issue_write","tool_input":{"title":"x"}}')
+check "issue_write method missing, no marker -> deny (fail-closed)" deny "$out" $?
+if command -v jq >/dev/null 2>&1; then
+  out=$(CLAUDE_PROJECT_DIR=$FAKE bash "$DIG" <<<'{"tool_name":"mcp__github__issue_write","tool_input":{"body":"text saying \"method\":\"create\" inline","method":"update","issue_number":12}}')
+  check "issue_write update w/ create-lookalike body -> allow (jq parse)" allow "$out" $?
+fi
 out=$(CLAUDE_PROJECT_DIR=$FAKE bash "$DIG" <<<'{"tool_name":"mcp__github__issue_write","tool_input":{"method":"create","title":"x"}}')
 check "issue_write method=create, no marker -> deny" deny "$out" $?
 out=$(CLAUDE_PROJECT_DIR=$FAKE bash "$DIG" <<<'{"tool_name":"Bash","tool_input":{"command":"gh issue create -t x"}}')

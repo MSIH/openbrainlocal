@@ -6,6 +6,12 @@
 # Docs, JSON/config, SQL, and .claude/ files are NOT gated.
 set -euo pipefail
 
+# Cloud/web sessions have no worktrees — the whole checkout is an isolated clone on a
+# harness-assigned claude/* branch, and cloud-issue-gate enforces the workflow there.
+if [[ "${CLAUDE_CODE_REMOTE:-}" == "true" ]]; then
+  exit 0
+fi
+
 input=$(cat)
 
 # Extract file_path WITHOUT requiring jq (file paths carry no escaped quotes), so the gate
