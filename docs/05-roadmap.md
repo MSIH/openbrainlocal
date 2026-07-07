@@ -2,6 +2,11 @@
 
 **Sequence-ordered. No dates.** Each milestone has deliverables and an exit test — the milestone isn't done until the test passes against the real server. Ordering follows value-per-inference and the prove-then-formalize rule: three real connectors before the contract is declared v1-stable.
 
+> **This roadmap supersedes the phase table in [`03-ob2-design.md`](03-ob2-design.md) §6.**
+> Doc 03 remains the architecture reference (schema, retrieval, consolidation design);
+> [`04-connector-contract.md`](04-connector-contract.md) defines the ingest API these milestones
+> build against. Phases from doc 03 not scheduled below live in the Backlog at the end.
+
 ---
 
 ## Milestone 0 — Contract Foundations (core-side prerequisites)
@@ -131,6 +136,20 @@ The reputation sequence, gated on working software — everything above is the p
 6. One external adoption target for the ingest schema (any other memory project using it = the standard exists)
 
 **Exit test:** one connector in the awesome-list written by someone you've never spoken to.
+
+---
+
+## Backlog — Beyond Milestone 7 (carried forward from doc 03 §6)
+
+Unscheduled, roughly in doc 03's original value order. Each is "just another connector" (or an
+additive core index) against the frozen contract — sequence them by the same value-per-inference
+rule when their turn comes:
+
+- **Email** (Takeout mbox first, IMAP later) — highest-density relationship data; deterministic entity links at volume (doc 03 §3.1)
+- **Documents + filesystem watcher** — pdf-parse/mammoth extraction, NER-inferred links
+- **Location visits** — Google Timeline / Owntracks pings segmented into visits via the event lane (doc 04 §5)
+- **Video/audio** — Whisper transcripts + keyframe captions; **social-media exports** (Takeout, X archive)
+- **Face clustering** (local-only, `insightface`), **CLIP visual-similarity second index** (doc 03 §3.3), **`merge_entities` admin endpoint** (doc 03 §7), cross-device sync, temporal knowledge graph
 
 ---
 

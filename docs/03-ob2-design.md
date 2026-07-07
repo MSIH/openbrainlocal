@@ -4,6 +4,18 @@
 
 Evolves the OB1 text-memory server (Node.js + SQLite + sqlite-vec) into a system that ingests emails, documents, contacts, photos, videos, social posts, and location/time data — and can recall across all of them the way human memory does: by meaning, by person, by place, and by time.
 
+> **Reader/agent note (July 2026).** The project this doc describes was renamed **LifeContext**
+> (formerly Open Brain Local); "Open Brain 2 / OB2" here names this design generation, not the
+> product. Two sections have been **superseded by newer docs** — this doc remains the canonical
+> reference for the core architecture (data model §2, retrieval §4, consolidation §5), but read
+> the newer docs first for anything they cover:
+>
+> - **Ingestion (§3) →** [`04-connector-contract.md`](04-connector-contract.md). Connectors are now
+>   *external processes* speaking a versioned HTTP + JSON ingest API, not in-core scripts; core-side
+>   enrichers ("senses"/transducers) stay as described here. See doc 04's naming note.
+> - **Build phases (§6) →** [`05-roadmap.md`](05-roadmap.md). The milestone order changed:
+>   connector-first (dev sessions, iMessage, photo-EXIF), consolidation pulled forward.
+
 ---
 
 ## 1. Core Philosophy
@@ -135,6 +147,12 @@ Hybrid (vector + FTS5, fused with reciprocal rank fusion) is the current best pr
 
 ## 3. Ingestion Pipeline
 
+> **Superseded by [`04-connector-contract.md`](04-connector-contract.md)** for how data *reaches* the
+> core: connectors are isolated external processes that POST artifacts (with entity *hints*, never
+> IDs) to a versioned ingest API. The per-type normalization/enrichment guidance below still stands —
+> it now describes what a connector (gathering + `text_repr`) and the core-side transducers
+> (VLM/Whisper/EXIF enrichment) each do.
+
 ```
 Source connector → Normalizer → Enricher(s) → Store (transaction)
 ```
@@ -160,6 +178,11 @@ Notes:
 - **Videos are photos + audio.** Keyframe extraction (ffmpeg, 1 frame per scene change) + Whisper covers 90% of recall value at low cost.
 
 ### 3.2 Enrichment tech choices (current, practical)
+
+> **Embeddings row superseded by the implementation:** the live stack is local
+> `qwen3-embedding:0.6b` via Ollama (1024-dim, `VECTOR_DIMENSION`), not `text-embedding-3-small`
+> or `nomic-embed-text` — see [`local-llm-setup-guide.md`](local-llm-setup-guide.md). The rest of
+> the table is still the working plan for future enrichers.
 
 | Job | Cloud (via your OpenRouter gateway) | Local (privacy-max) |
 |---|---|---|
@@ -247,6 +270,12 @@ Cheap (one small-model call per day), and it's the feature that makes the system
 
 ## 6. Build Phases
 
+> **Superseded by [`05-roadmap.md`](05-roadmap.md).** After Phase 2.0 shipped, the sequencing
+> changed to connector-first milestones (contract foundations → `devsession` → `imessage` →
+> `photo-exif` → contract freeze → consolidation → distribution); email/documents/location/video
+> moved to the roadmap's backlog. This table is kept for the original rationale only — do not
+> plan work from it.
+
 | Phase | Scope | Why this order |
 |---|---|---|
 | **2.0** ✅ | Artifact schema + entity graph + FTS5; migrate OB1 memories to `type='note'`; contacts import; query planner v1 | Foundation; contacts seed the entity spine; everything is text-native (no new AI deps) — **shipped** (`src/db.js`, `search.js`, `migrate.js`, `connectors/contacts.js`) |
@@ -289,6 +318,6 @@ The senses (VLM, Whisper, EXIF) are pluggable and improve over time. The mind �
 - **Perkeep** — unified personal data storage; weak on relationships/recall
 - **Rewind/Limitless, Microsoft Recall** — lifelogging via screen/audio capture; continuous but shallow, no historical footprint
 - **mem0, Letta** — LLM memory layers (text-only, like OB1)
-- **Upstream OB1 itself** — community importers for Takeout/Twitter/Instagram/Gmail exist, and entity extraction + knowledge-graph work is emerging (see doc 01 §4); worth monitoring for reusable pieces
+- **Upstream OB1 itself** — community importers for Takeout/Twitter/Instagram/Gmail exist, and entity extraction + knowledge-graph work is emerging in that community; worth monitoring for reusable pieces. (An earlier reference here to a "doc 01" pointed at pre-repo research notes that were never committed — there are no docs 01/02 in this repo; the numbering starts at 03.)
 
 No existing project combines local-first multimodal ingestion, an entity graph, and an MCP retrieval brain — that combination is OB2's niche.

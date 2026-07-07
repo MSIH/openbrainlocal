@@ -24,7 +24,7 @@ The whole point of this project is a durable, self-owned memory. These tenets fl
 
 ## 5. Keep Design Docs Up To Date
 - Any change that alters documented behavior updates the relevant `docs/**` and the README Quickstart in the same change.
-- A doc that contradicts the code is worse than none — it makes agents diverge. `docs/03-ob2-design.md` is the roadmap; keep it honest.
+- A doc that contradicts the code is worse than none — it makes agents diverge. `docs/05-roadmap.md` is the roadmap (`03` is the core design, `04` the connector contract); keep them honest. A doc overtaken by a newer one gets a "superseded by" note, not a silent contradiction.
 
 ## 6. Docs Live Close to Code
 - Runtime/setup docs in `docs/`; the run contract in `README.md`; agent conventions in `.claude/rules/`.

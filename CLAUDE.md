@@ -1,4 +1,4 @@
-# Open Brain Local — Agent Guide
+# LifeContext (formerly Open Brain Local) — Agent Guide
 
 <context>
 
@@ -28,7 +28,7 @@ src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS,
 src/brainserver.js       — the server: REST + MCP tools, auth, transport (imports the modules above)
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
 src/connectors/contacts.js — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
-docs/                    — design + setup docs (03-ob2-design.md is the roadmap)
+docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap)
 .env.example             — required env template (copy to .env; never commit .env)
 .claude/rules/           — coding standards, data-model, design-philosophy (read before editing)
 ```
@@ -64,9 +64,11 @@ Smoke test (`$KEY` = `BRAIN_SECRET_KEY`): `POST /api/remember` then `/api/recall
 Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI agents concurrently, so branches must be isolated in their own working dirs:
 1. **`/draft-issue`** — file a GitHub issue and get explicit approval on the Implementation Plan first. (Gate denies `gh issue create` without a fresh marker.)
 2. **worktree** — create the branch with `git worktree add`, NEVER a plain `git checkout -b` / `git switch -c`.
-3. **`/pre-pr-review`** — run the multi-persona review (or **`/pre-doc-review`** for doc-only PRs), then open the PR (body starts with `Closes #<n>`). (Gate denies `gh pr create` without an APPROVE marker.) The repo ruleset requires a PR to `main`; merge, then sync `main`.
+3. **`/pre-pr-review`** — run the multi-persona review (or **`/pre-doc-review`** for doc-only PRs), then open the PR (body starts with `Closes #<n>`). (Gate denies `gh pr create` without an APPROVE marker.) The repo ruleset requires a PR to the default branch (`2.0` today); merge, then sync it.
 
 `/planning` (Opus) can perform steps 1–2 (issue + plan + worktree) in one shot. The `worktree-edit-gate` hook **denies editing `.js` source outside a `.worktrees/` dir** — step 2 is not optional.
+
+**Cloud/remote sessions (claude.ai/code, GitHub tasks): the workflow is enforced by the `cloud-issue-gate` hook.** These sessions have no `gh` CLI (the `gh`-based gate hooks never trigger) and GitHub access goes through MCP tools instead — so the gate blocks **every Edit/Write under the repo (including `.claude/` tooling and `CLAUDE.md`)** until an issue exists: draft the plan per `/draft-issue`, get explicit approval, file it via the GitHub MCP tool `issue_write` (creation itself is gated by `draft-issue-gate`), then `echo <issue-number> > .claude/.cloud-issue-done` (gitignored; dies with the container, so each session re-earns it). See #13. The harness-assigned `claude/*` branch substitutes for the worktree (each cloud session is already an isolated clone, and `worktree-edit-gate` stands down when `CLAUDE_CODE_REMOTE=true`); still run `/pre-pr-review` / `/pre-doc-review` before any PR, and the PR body still starts with `Closes #<n>`.
 - Run the store→recall smoke test (server boots, 0 errors) before committing server changes.
 - Update the relevant `docs/**` when behavior changes; keep the README Quickstart accurate.
 - Commit messages: imperative, ≤2 sentences. Reference issues/PRs as `#<n> "<title>"`.
@@ -84,7 +86,7 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 ## Workflow tooling & local settings
 The mandatory-workflow tooling is committed in `.claude/` so it travels with the repo — cloud/remote agents get only the git checkout, never `~/.claude`:
 - **Skills** (`.claude/commands/`): `/draft-issue`, `/pre-pr-review`, `/pre-doc-review`. **Agent** (`.claude/agents/`): `/planning` (Opus — issue + plan + worktree).
-- **Hooks** (`.claude/hooks/`): `draft-issue-gate` + `pre-pr-review-gate` (deny), `worktree-gate` (advisory), `worktree-edit-gate` (deny `.js` edits outside a worktree), `session-start` (bootstrap Node deps on cloud/remote). Wired + an `rm` deny in `.claude/settings.json`.
+- **Hooks** (`.claude/hooks/`): `draft-issue-gate` + `pre-pr-review-gate` (deny), `worktree-gate` (advisory), `worktree-edit-gate` (deny `.js` edits outside a worktree; stands down in cloud sessions), `cloud-issue-gate` (deny ALL repo edits in cloud sessions until an issue number is in `.claude/.cloud-issue-done`), `session-start` (bootstrap Node deps on cloud/remote). Wired + an `rm` deny in `.claude/settings.json`; direct-invocation tests in `hooks/test-gates.sh`.
 Personal Claude Code settings (model, permission mode, extra hooks) go in **`.claude/settings.local.json`** (gitignored) — never commit those to this public repo.
 
 </rules>

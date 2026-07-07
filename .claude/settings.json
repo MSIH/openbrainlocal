@@ -30,6 +30,12 @@
         ]
       },
       {
+        "matcher": "mcp__github__issue_write",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/draft-issue-gate.sh", "shell": "bash", "statusMessage": "Draft-issue gate..." }
+        ]
+      },
+      {
         "matcher": "Bash(git worktree add*)",
         "hooks": [
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-gate.sh", "shell": "bash", "statusMessage": "Worktree confirmation gate..." }
@@ -50,13 +56,15 @@
       {
         "matcher": "Edit",
         "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-edit-gate.sh", "shell": "bash", "statusMessage": "Worktree edit gate..." }
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-edit-gate.sh", "shell": "bash", "statusMessage": "Worktree edit gate..." },
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/cloud-issue-gate.sh", "shell": "bash", "statusMessage": "Cloud issue gate..." }
         ]
       },
       {
         "matcher": "Write",
         "hooks": [
-          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-edit-gate.sh", "shell": "bash", "statusMessage": "Worktree edit gate..." }
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-edit-gate.sh", "shell": "bash", "statusMessage": "Worktree edit gate..." },
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/cloud-issue-gate.sh", "shell": "bash", "statusMessage": "Cloud issue gate..." }
         ]
       }
     ]
