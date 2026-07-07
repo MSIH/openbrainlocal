@@ -11,8 +11,12 @@ import { z } from 'zod';
 import { db, resolveEntityIds, getEntity, getArtifactById } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX } from './config.js';
+import { ARTIFACT_TYPES } from './ingest-types.js';
 
-export const ARTIFACT_TYPES = ['email', 'document', 'photo', 'video', 'contact', 'post', 'location_ping', 'note'];
+// Re-exported so the planner prompt below, the plan-schema filter, and every existing
+// importer of ARTIFACT_TYPES from search.js pick up the registry (docs/04-connector-contract.md
+// §6) without a second definition — src/ingest-types.js is the one source of truth.
+export { ARTIFACT_TYPES };
 
 const PLAN_TIMEOUT_MS = 8000;
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));

@@ -188,13 +188,45 @@ Session artifacts get `type` from the registry (`listening_session`, `browsing_s
 
 ## 6. Type & Stream Registry
 
-Registered artifact types (v1): `note`, `message`, `email`, `document`, `photo`, `video`, `contact`, `post`, `dev_session`, `visit`, `listening_session`, `browsing_session`, `digest`.
+> **Live.** The registry is implemented as static config in `src/ingest-types.js`
+> (`TYPE_REGISTRY`) and served machine-readably at `GET /api/v1/ingest/types` — connectors can
+> self-check at startup instead of trusting a copy of this table. `src/search.js`'s planner
+> prompt and the `types` filter zod enum both derive from the same module, so they cannot
+> diverge from what the endpoint advertises. `location_ping` (mentioned in earlier drafts of
+> this doc) never shipped as a registered type — location is an event-lane stream (§5), not an
+> artifact type. Streams (below) remain design-only; the event lane and `POST /api/v1/events`
+> are still deferred (§1.4, roadmap Milestone 0).
+
+Registered artifact types (v1), each with planner policy `{default_searchable, digest_eligible}`:
+
+| type | default_searchable | digest_eligible |
+|---|---|---|
+| `note` | true | true |
+| `message` | true | true |
+| `email` | true | true |
+| `document` | true | true |
+| `photo` | true | true |
+| `video` | true | true |
+| `contact` | true | false |
+| `post` | true | true |
+| `dev_session` | true | true |
+| `visit` | false | true |
+| `listening_session` | false | true |
+| `browsing_session` | false | true |
+| `digest` | true | false |
+
+Ambient session types (`visit`, `listening_session`, `browsing_session`) default out of search per
+the §5 retrieval policy but are digest-eligible — they're exactly what a daily digest
+summarizes. `contact` is reference data, not a daily event, so it's not digest-eligible;
+`digest` itself is excluded from digest-eligibility to avoid recursive summarization. Planner
+*enforcement* of these flags (actually excluding non-searchable types from default search)
+lands with a later milestone — today the flags are data only.
 
 Registered event streams (v1): `music`, `browsing`, `location`, `terminal`.
 
 Rules:
 
-- Unregistered types must be prefixed `x-` (e.g., `x-dream-journal`). Accepted with a warning; the planner treats `x-` types as searchable-but-generic. If an `x-` type proves broadly useful, it gets promoted into the registry in a minor version — the `x-` name remains accepted as an alias forever.
+- Unregistered types must be prefixed `x-` (e.g., `x-dream-journal`). Accepted with a warning; the planner treats `x-` types as searchable-but-generic. If an `x-` type proves broadly useful, it gets promoted into the registry in a minor version — the `x-` name remains accepted as an alias forever. `src/ingest-types.js` exports `isRegisteredType()` / `isExtensionType()` for this check; accept-with-warning handling at ingest is a later issue.
 - The registry is machine-readable at `GET /api/v1/ingest/types` so connectors can self-check at startup.
 - Types carry planner policy (default-searchable: yes/no; digest-eligible: yes/no) — one more reason the vocabulary is governed rather than free-form.
 

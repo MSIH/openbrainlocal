@@ -29,6 +29,7 @@ import { PORT, BRAIN_SECRET_KEY, BRAIN_SECRET_PLACEHOLDER } from './config.js';
 import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES } from './search.js';
+import { TYPE_REGISTRY } from './ingest-types.js';
 
 // Fail closed instantly if the secret is unset or still the placeholder.
 if (!BRAIN_SECRET_KEY || BRAIN_SECRET_KEY === BRAIN_SECRET_PLACEHOLDER) {
@@ -287,6 +288,14 @@ app.get('/api/artifact/:id', requireHeaderAuth, wrap(async (req, res) => {
   const a = getArtifactById(id);
   if (!a) return res.status(404).json({ error: "Not found" });
   res.json(a);
+}));
+
+// First /api/v1 route (docs/04-connector-contract.md §6, roadmap M0 deliverable 4): the
+// registry connectors self-check against at startup. No streams array — the event lane
+// is deferred, and advertising streams with no POST /api/v1/events behind them would
+// mislead connector authors.
+app.get('/api/v1/ingest/types', requireHeaderAuth, wrap(async (req, res) => {
+  res.json({ version: 'v1', types: TYPE_REGISTRY });
 }));
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---
