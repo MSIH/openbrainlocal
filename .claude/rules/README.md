@@ -6,6 +6,7 @@ Project conventions for LifeContext (formerly Open Brain Local). Read these befo
 |------|-------|----------|
 | `coding-standards.md` | `**/*.js` | ESM/Node style, naming, prepared statements, prohibited patterns (no hardcoded secrets, no committed `.env`/`*.db`) |
 | `data-model.md` | SQLite / sqlite-vec | Store shape (current + OB2 roadmap), the BigInt vec0-PK rule, `VECTOR_DIMENSION` matching, enrich-then-commit, append-only preservation, metadata + dedup keys |
+| `connector-conventions.md` | `connectors/**/*.js` | The connector-side half of doc 04: payload shape, `source_id` discipline, spool/failure posture, entity hints, never-import-`src/` (enforced by `npm run check:boundary`) |
 | `design-philosophy.md` | all work | 8 tenets: data preservation, metadata capture, log tables, log every step, docs-up-to-date, docs-close-to-code, baseline method, AI-artifact capture |
 
 ## Workflow tooling (present)

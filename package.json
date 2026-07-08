@@ -10,8 +10,17 @@
     "migrate": "node src/migrate.js",
     "import:contacts": "node src/contacts.js",
     "consolidate": "node src/consolidate.js",
-    "schema:ingest": "node scripts/generate-ingest-schema.js"
+    "schema:ingest": "node scripts/generate-ingest-schema.js",
+    "check:boundary": "node scripts/check-boundary.js"
   },
+  "files": [
+    "src/",
+    "scripts/",
+    "schemas/",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
   "author": "Barry Schneider",
   "dependencies": {

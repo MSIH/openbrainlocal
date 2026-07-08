@@ -37,7 +37,7 @@ The ~40-line Claude Code `SessionEnd` hook. First live consumer of the contract;
 1. Hook script (Node): reads hook JSON from stdin → reads transcript → calls local LM Studio/Ollama chat model for a structured summary (what/decisions/why/next-steps) → `POST /api/v1/ingest` with `type='dev_session'`, `source='devsession'`, `source_id` = session UUID, `extra` = {project, cwd}
 2. `settings.json` hook registration snippet, documented
 3. Fallback behavior: server unreachable → write payload to a local spool file; next hook run flushes the spool (doc 04 §7 failure posture)
-4. Path: `life-context-connectors/devsession/` (monorepo — see doc 04 §10)
+4. Path: `connectors/devsession-claude/` (see doc 04 §10)
 
 **Exit test:** end a real coding session; next morning, `search("where did I leave off")` over MCP returns yesterday's session artifact with correct project context.
 
@@ -69,7 +69,7 @@ The relationship-data connector; proves deterministic entity links at volume and
 4. Attachment handling: photos emitted as `type='photo'` artifacts with `raw_path` pointers (the many-types-per-connector case)
 5. Backfill mode (full history, batched) + tail mode (watch for new rows); same script, one flag
 6. Runs against the Windows server LAN IP; documented as the reference for remote connectors
-7. Path: `life-context-connectors/imessage/`
+7. Path: `connectors/imessage/`
 
 **Exit test:** "what did Sarah text me about the trip" returns real messages; `about_entity("Sarah")` shows message artifacts interleaved with notes; full backfill re-run produces zero duplicates.
 
@@ -85,7 +85,7 @@ Makes the photo library time/place-queryable with zero inference; proves upsert-
 2. Offline reverse-geocode pass for `place_label` (local dataset, per doc 03 privacy tiering)
 3. VLM caption worker (separate process, NSSM service, low priority): queue = `type='photo'` artifacts with minimal `text_repr`; captions one, upserts same `(source, source_id)` with enriched `text_repr`, repeats; kill-safe at any point
 4. Nightly window scheduling for the worker (config, not code)
-5. Path: `life-context-connectors/photo-exif/` (worker lives with core or alongside — decide here, it's core enrichment per doc 04's transducer split)
+5. Path: `connectors/photo-exif/` (worker lives with core or alongside — decide here, it's core enrichment per doc 04's transducer split)
 
 **Exit test:** "photos from Austin in 2019" works from EXIF alone before any caption exists; a captioned photo answers a content query ("photos of us cooking") without creating a duplicate artifact.
 
@@ -156,6 +156,6 @@ rule when their turn comes:
 ## Standing Rules (apply to every milestone)
 
 - No milestone starts until the previous exit test passes against the real server — no "done pending testing"
-- Connectors share one monorepo, `life-context-connectors`, for now — one folder per connector; core repo (`life-context`) stays contract + core only. Split a connector into its own repo the moment it needs an independent release cadence or an external owner (lazy-branching, doc 04 §10)
+- Connectors live in `connectors/` in this repo — one self-contained folder per connector, never importing `src/` (`npm run check:boundary`). *(Supersedes the standalone `life-context-connectors` monorepo — folded back in by issue #49.)* Split a connector into its own repo the moment it needs an independent release cadence or an external owner (lazy-branching, doc 04 §10)
 - Any design decision invalidated by real retrieval behavior gets changed and doc 04 updated in the same commit — the doc tracks reality, not intent
 - Backup `life-context.db` before every migration; migrations stay idempotent
