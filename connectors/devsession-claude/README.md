@@ -27,7 +27,7 @@ A Claude Code `SessionEnd` (and, optionally, `PreCompact`) hook that turns every
         "hooks": [
           {
             "type": "command",
-            "command": "node /absolute/path/to/life-context-connectors/devsession-claude/index.js",
+            "command": "node /absolute/path/to/life-context/connectors/devsession-claude/index.js",
             "timeout": 120
           }
         ]
@@ -38,7 +38,7 @@ A Claude Code `SessionEnd` (and, optionally, `PreCompact`) hook that turns every
         "hooks": [
           {
             "type": "command",
-            "command": "node /absolute/path/to/life-context-connectors/devsession-claude/index.js",
+            "command": "node /absolute/path/to/life-context/connectors/devsession-claude/index.js",
             "timeout": 120
           }
         ]

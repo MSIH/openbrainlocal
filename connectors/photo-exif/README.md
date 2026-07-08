@@ -41,7 +41,7 @@ The roadmap flags this as an open question ("worker lives with core or alongside
 
 ```cron
 # Run nightly between 1am and 5am; a `timeout` bounds the window in case the library is huge
-0 1 * * * cd /path/to/life-context-connectors/photo-exif && timeout 4h node caption-worker.js >> ~/.life-context/photo-exif-captions.log 2>&1
+0 1 * * * cd /path/to/life-context/connectors/photo-exif && timeout 4h node caption-worker.js >> ~/.life-context/photo-exif-captions.log 2>&1
 ```
 
 On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node caption-worker.js`, and a second trigger at 5:00 AM that kills the `node.exe` process if it's still running — see [`../../docs/windows-service-winsw.md`](https://github.com/msih/life-context/blob/2.0/docs/windows-service-winsw.md) in the core repo for the general Windows-service pattern this project uses.
