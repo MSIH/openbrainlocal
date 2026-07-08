@@ -9,6 +9,7 @@
     "start": "node src/server.js",
     "migrate": "node src/migrate.js",
     "import:contacts": "node src/contacts.js",
+    "consolidate": "node src/consolidate.js",
     "schema:ingest": "node scripts/generate-ingest-schema.js"
   },
   "license": "MIT",

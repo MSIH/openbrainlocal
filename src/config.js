@@ -40,6 +40,14 @@ export const KNN_OVERFETCH = int(process.env.KNN_OVERFETCH, 5); // fetch limit*t
 export const KNN_MIN = int(process.env.KNN_MIN, 50);      // floor on k so fusion has depth
 export const KNN_MAX = int(process.env.KNN_MAX, 500);     // ceiling on k (perf guard)
 
+// --- Consolidation (nightly daily digests — docs/06-consolidation.md) ---
+// Chat model that writes the digest. Roadmap M6 default; any Ollama chat model works.
+export const DIGEST_MODEL = process.env.DIGEST_MODEL || 'qwen3:8b';
+export const DIGEST_TIMEOUT_MS = int(process.env.DIGEST_TIMEOUT_MS, 120000); // digest is a bigger call than a query parse
+export const DIGEST_MAX_ARTIFACTS = int(process.env.DIGEST_MAX_ARTIFACTS, 200); // cap per day so a heavy day can't blow the context
+export const DIGEST_TEXT_CLIP = int(process.env.DIGEST_TEXT_CLIP, 500);     // chars of text_repr fed to the model per artifact
+export const DIGEST_TIMELINE_DAYS = int(process.env.DIGEST_TIMELINE_DAYS, 14); // timeline spans >= this prefer digests over raw rows
+
 // --- Auth --- (raw value; the server validates it — scripts don't need it)
 export const LIFECONTEXT_API_KEY = process.env.LIFECONTEXT_API_KEY;
 export const LIFECONTEXT_API_KEY_PLACEHOLDER = 'change-this-to-a-long-secure-token';
