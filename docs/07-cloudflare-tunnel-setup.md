@@ -54,13 +54,27 @@ You need three things:
 
 ### Step 1: Install the helper program
 
-On the server, open PowerShell and paste:
+On the server, open PowerShell **as Administrator** (right-click PowerShell → *Run as
+administrator*) and paste this to download and install Cloudflare's official installer:
 
 ```powershell
-winget install --id Cloudflare.cloudflared
+$msi = "$env:TEMP\cloudflared.msi"
+Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.msi" -OutFile $msi
+Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet" -Wait
 ```
 
-Close and reopen PowerShell afterward so it can find the new program.
+Then **close and reopen** PowerShell (as Administrator again) so it picks up the newly
+installed program. Confirm it's there:
+
+```powershell
+cloudflared --version
+```
+
+> **Why not `winget`?** Cloudflare's own instructions often show
+> `winget install --id Cloudflare.cloudflared`, but **winget isn't installed on Windows
+> Server**, so that command fails there. The download above works on Windows Server *and*
+> regular Windows 10/11. (If you happen to be on a Windows 10/11 desktop that already has
+> winget, the one-liner is a fine shortcut instead.)
 
 ### Step 2: Create the tunnel in Cloudflare's dashboard
 
