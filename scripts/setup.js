@@ -19,7 +19,7 @@ import { OLLAMA_BASE_URL, EMBEDDING_MODEL, QUERY_MODEL, LIFECONTEXT_API_KEY_PLAC
 
 // Ollama's native API (/api/*) lives at the host root; strip the OpenAI-compat /v1 suffix that
 // OLLAMA_BASE_URL carries for the embedding/chat SDK.
-const OLLAMA_HOST = OLLAMA_BASE_URL.replace(/\/v1\/?$/, '');
+const OLLAMA_HOST = OLLAMA_BASE_URL.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENV_PATH = join(ROOT, '.env');
 const ENV_EXAMPLE_PATH = join(ROOT, '.env.example');
