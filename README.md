@@ -102,7 +102,7 @@ Every endpoint/tool requires the `x-api-key` header. REST and MCP share one stor
 
 **Phase 2.0 (foundation) — working.** Every memory is now an **artifact** (an event with time, place, and a text representation) in a unified store, backed by an **entity graph** (contacts as the spine) and **hybrid retrieval** (vector KNN + FTS5 keyword search fused with reciprocal rank fusion, planned by a small LLM). Local store → embed (Ollama) → recall works over both REST and MCP; `npm run migrate` brings earlier memories forward, `npm run import:contacts` seeds people.
 
-What's next is connector-driven: an HTTP ingest contract so anything — a Claude Code hook, an iMessage watcher, a photo-EXIF scan — can feed the same brain. See the [connector contract](docs/04-connector-contract.md) and the [roadmap](docs/05-roadmap.md).
+Feeding the brain is connector-driven: an HTTP ingest contract so anything — a Claude Code hook, an iMessage watcher, a photo-EXIF scan — can submit artifacts. The three reference connectors live in [`connectors/`](connectors/) (one self-contained folder each; the HTTP contract is their only coupling to core — `npm run check:boundary` enforces it). See the [connector contract](docs/04-connector-contract.md) and the [roadmap](docs/05-roadmap.md).
 
 ## Design documents
 

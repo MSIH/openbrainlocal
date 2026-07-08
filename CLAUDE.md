@@ -28,7 +28,8 @@ src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS,
 src/server.js            — the server: REST + MCP tools, auth, transport (imports the modules above)
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
 src/contacts.js          — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
-docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap)
+connectors/              — external HTTP connectors, one self-contained folder each (doc 04; NEVER import src/ — `npm run check:boundary`)
+docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap, 06 consolidation)
 .env.example             — required env template (copy to .env; never commit .env)
 .claude/rules/           — coding standards, data-model, design-philosophy (read before editing)
 ```
