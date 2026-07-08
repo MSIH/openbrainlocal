@@ -140,7 +140,10 @@ Wherever a tool asked for your LifeContext address, swap `http://localhost:3000`
   Get-NetFirewallPortFilter | Where-Object LocalPort -eq 3000
   ```
 
-  No output = nothing is exposed. Good.
+  No output means no rule mentions port 3000 at all — nothing is exposed. If something
+  does come back, open **Windows Defender Firewall with Advanced Security** and check
+  whether it's an *inbound allow* rule for 3000; delete it unless you created it on
+  purpose.
 
 - **A second key that you can revoke.** In the Zero Trust dashboard, **Access →
   Applications → Add an application** for `lc.yourdomain.com`, then create a **Service
@@ -208,5 +211,7 @@ Without `app.set('trust proxy', 1)`, the rate limiter would see one visitor — 
 internet sharing a single 100-requests-per-minute bucket — and `express-rate-limit` logs
 `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` validation errors. With it, Express reads the real
 client address from the `X-Forwarded-For` header Cloudflare sets, and rate limiting works
-per visitor. The setting is enabled in `src/server.js` and is harmless for plain localhost
-use (local requests carry no forwarded header and behave exactly as before).
+per visitor. It's on by default and harmless for plain localhost use (local requests carry
+no forwarded header and behave exactly as before). If your server is reachable directly on
+your LAN and you *don't* use a tunnel or proxy, you can set `TRUST_PROXY=0` in `.env` so
+forwarded headers are never trusted.

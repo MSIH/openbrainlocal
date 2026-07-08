@@ -19,6 +19,11 @@ const int = (v, dflt) => {
 
 export const PORT = process.env.PORT || 3000;
 
+// Express 'trust proxy' hop count. 1 = one reverse proxy in front (Cloudflare Tunnel —
+// docs/07-cloudflare-tunnel-setup.md); harmless for direct localhost use. Set TRUST_PROXY=0
+// to never trust forwarded headers (direct-only installs).
+export const TRUST_PROXY = int(process.env.TRUST_PROXY, 1);
+
 // Local file store. Overridable via DB_PATH — set it in .env to point at an existing DB.
 export const DB_PATH = process.env.DB_PATH || 'life-context.db';
 
