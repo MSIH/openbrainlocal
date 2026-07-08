@@ -9,8 +9,8 @@
  * valid because the embedding model/dimension are unchanged (data-model.md rule 2); do
  * NOT run this across a model swap.
  *
- * The originals are left untouched (append-only). Back up life-context.db first.
- *   Run:  npm run migrate
+ * The originals are left untouched (append-only). Back up your DB file first
+ * (life-context.db by default, or DB_PATH if set).  Run:  npm run migrate
  */
 import { db, storeArtifactTxn, sha256, logEvent } from './db.js';
 

@@ -19,7 +19,7 @@ const int = (v, dflt) => {
 
 export const PORT = process.env.PORT || 3000;
 
-// Local file store. Overridable so tests/migrations can target a throwaway DB.
+// Local file store. Overridable via DB_PATH — set it in .env to point at an existing DB.
 export const DB_PATH = process.env.DB_PATH || 'life-context.db';
 
 // --- Embedding / LLM gateway (local Ollama, OpenAI-compatible) ---

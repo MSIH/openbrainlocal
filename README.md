@@ -45,7 +45,7 @@ cp .env.example .env              # then set LIFECONTEXT_API_KEY to a random val
 npm start                         # REST + MCP on http://localhost:3000
 ```
 
-Upgrading from an earlier version? Migrate your existing memories into the artifact store once (back up `life-context.db` first — it's idempotent and safe to re-run). It reuses the stored vectors as-is, so it's only valid while the embedding model and `VECTOR_DIMENSION` are unchanged:
+Upgrading from an earlier version? Migrate your existing memories into the artifact store once (back up your DB file first — `life-context.db` by default, or whatever `DB_PATH` points to — it's idempotent and safe to re-run). It reuses the stored vectors as-is, so it's only valid while the embedding model and `VECTOR_DIMENSION` are unchanged:
 
 ```bash
 npm run migrate                   # copies memories -> artifacts (type='note'), reusing vectors
