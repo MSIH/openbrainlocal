@@ -7,6 +7,7 @@ node_modules/
 *.db-wal
 *.db-shm
 logs/
+_*.log
 
 # per-connector runtime spool/state files (connectors/**)
 *-spool.jsonl

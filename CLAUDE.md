@@ -31,7 +31,7 @@ src/contacts.js          — `npm run import:contacts <file>`: vCard -> entities
 connectors/              — external HTTP connectors, one self-contained folder each (doc 04; NEVER import src/ — `npm run check:boundary`)
 docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap, 06 consolidation)
 .env.example             — required env template (copy to .env; never commit .env)
-.claude/rules/           — coding standards, data-model, design-philosophy (read before editing)
+.claude/rules/           — coding standards, data-model, connector-conventions, design-philosophy (read before editing)
 ```
 
 ## Two Interfaces (same DB behind both)

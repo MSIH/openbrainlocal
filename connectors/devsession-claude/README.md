@@ -1,6 +1,6 @@
 # devsession-claude
 
-> Renamed from `devsession`. If you registered a `.claude/settings.json` hook pointing at the old `devsession/index.js` path, update it to `devsession-claude/index.js` (see Setup below). The ingest payload's `source` field also changed from `'devsession'` to `'devsession-claude'` — artifacts already ingested under the old value keep it; only new ingests use the new one, so a `search`/`GET /api/v1/ingest` query scoped to `source: 'devsession'` won't find sessions recorded after this change (and vice versa) unless you backfill. The name change reflects that this connector is specifically for Claude Code — see [#10](https://github.com/MSIH/life-context-connectors/issues/10) for planned sibling connectors covering other AI coding tools.
+> Renamed from `devsession`. If you registered a `.claude/settings.json` hook pointing at the old `devsession/index.js` path, update it to `devsession-claude/index.js` (see Setup below). The ingest payload's `source` field also changed from `'devsession'` to `'devsession-claude'` — artifacts already ingested under the old value keep it; only new ingests use the new one, so a `search`/`GET /api/v1/ingest` query scoped to `source: 'devsession'` won't find sessions recorded after this change (and vice versa) unless you backfill. The name change reflects that this connector is specifically for Claude Code — see [the sibling-connectors issue](https://github.com/MSIH/life-context-connectors/issues/10) (transferred to the core tracker) for planned sibling connectors covering other AI coding tools.
 
 A Claude Code `SessionEnd` (and, optionally, `PreCompact`) hook that turns every coding session into a searchable `dev_session` artifact in [LifeContext](https://github.com/msih/life-context). Implements [Milestone 1](https://github.com/msih/life-context/issues/28) of the LifeContext roadmap — the **push** reference connector.
 
@@ -14,7 +14,7 @@ A Claude Code `SessionEnd` (and, optionally, `PreCompact`) hook that turns every
 ## Setup
 
 1. `cp .env.example .env` and fill in:
-   - `LIFECONTEXT_URL` / `LIFECONTEXT_API_KEY` — where LifeContext is running and its `x-api-key` (set the key to the same value as `BRAIN_SECRET_KEY` in the core server's own `.env`)
+   - `LIFECONTEXT_URL` / `LIFECONTEXT_API_KEY` — where LifeContext is running and its `x-api-key` (set the key to the same value as `LIFECONTEXT_API_KEY` in the core server's own `.env`)
    - The default summarizer provider (`claude-cli`) needs nothing else configured. If you'd rather use a local/hosted OpenAI-compatible endpoint, set `CHAT_PROVIDER=openai` and fill in `CHAT_BASE_URL` / `CHAT_MODEL` (and `CHAT_API_KEY` if the endpoint requires bearer auth) — see `.env.example`. (`life-context`'s [`docs/local-llm-setup-guide.md`](https://github.com/msih/life-context/blob/2.0/docs/local-llm-setup-guide.md) covers running Ollama locally.)
 2. No `npm install` needed — zero dependencies, Node 18+ built-ins only (`fetch`, `fs/promises`, `child_process`).
 3. Register the hook in your project's or user's `.claude/settings.json`. `SessionEnd` alone is enough to get started; also registering `PreCompact` (recommended — see below) captures long-running sessions before they compact instead of only at the very end:

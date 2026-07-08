@@ -17,6 +17,7 @@
     "src/",
     "scripts/",
     "schemas/",
+    ".env.example",
     "README.md",
     "LICENSE"
   ],
