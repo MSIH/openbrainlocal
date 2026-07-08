@@ -20,7 +20,7 @@ const int = (v, dflt) => {
 export const PORT = process.env.PORT || 3000;
 
 // Local file store. Overridable so tests/migrations can target a throwaway DB.
-export const DB_PATH = process.env.DB_PATH || 'unlimited_shared_brain.db';
+export const DB_PATH = process.env.DB_PATH || 'life-context.db';
 
 // --- Embedding / LLM gateway (local Ollama, OpenAI-compatible) ---
 export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1';
@@ -41,5 +41,5 @@ export const KNN_MIN = int(process.env.KNN_MIN, 50);      // floor on k so fusio
 export const KNN_MAX = int(process.env.KNN_MAX, 500);     // ceiling on k (perf guard)
 
 // --- Auth --- (raw value; the server validates it — scripts don't need it)
-export const BRAIN_SECRET_KEY = process.env.BRAIN_SECRET_KEY;
-export const BRAIN_SECRET_PLACEHOLDER = 'change-this-to-a-long-secure-token';
+export const LIFECONTEXT_API_KEY = process.env.LIFECONTEXT_API_KEY;
+export const LIFECONTEXT_API_KEY_PLACEHOLDER = 'change-this-to-a-long-secure-token';

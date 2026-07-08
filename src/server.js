@@ -25,7 +25,7 @@ import { z } from "zod";
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, BRAIN_SECRET_KEY, BRAIN_SECRET_PLACEHOLDER } from './config.js';
+import { PORT, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER } from './config.js';
 import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES } from './search.js';
@@ -33,8 +33,8 @@ import { TYPE_REGISTRY } from './ingest-types.js';
 import { buildIngestRouter } from './ingest.js';
 
 // Fail closed instantly if the secret is unset or still the placeholder.
-if (!BRAIN_SECRET_KEY || BRAIN_SECRET_KEY === BRAIN_SECRET_PLACEHOLDER) {
-  console.error("❌ CRITICAL ERROR: BRAIN_SECRET_KEY is unset or insecure. System halting.");
+if (!LIFECONTEXT_API_KEY || LIFECONTEXT_API_KEY === LIFECONTEXT_API_KEY_PLACEHOLDER) {
+  console.error("❌ CRITICAL ERROR: LIFECONTEXT_API_KEY is unset or insecure. System halting.");
   process.exit(1);
 }
 
@@ -88,7 +88,7 @@ function secureCompare(input, secret) {
 
 function requireHeaderAuth(req, res, next) {
   const token = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
-  if (!secureCompare(token, BRAIN_SECRET_KEY)) {
+  if (!secureCompare(token, LIFECONTEXT_API_KEY)) {
     return res.status(401).json({ error: "Unauthorized: Invalid or missing secret key token." });
   }
   next();

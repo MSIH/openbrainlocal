@@ -1,7 +1,7 @@
 /**
  * The artifact type registry (docs/04-connector-contract.md §6): the one source of truth
  * for the v1 type vocabulary so the planner prompt (search.js), the zod TypeEnum
- * (brainserver.js), and GET /api/v1/ingest/types can never diverge. Static config, no DB
+ * (server.js), and GET /api/v1/ingest/types can never diverge. Static config, no DB
  * table — the roadmap's M0 deliverable 4 calls for "static config"; a table adds migration
  * surface for a list that already changes with code (the planner prompt references it).
  *

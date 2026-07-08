@@ -39,13 +39,13 @@ ollama pull qwen3-embedding:0.6b
 ollama pull qwen2.5:3b            # query-planner chat model (QUERY_MODEL); search degrades gracefully if absent
 
 # 3. Configure the secret
-cp .env.example .env              # then set BRAIN_SECRET_KEY to a random value
+cp .env.example .env              # then set LIFECONTEXT_API_KEY to a random value
 
 # 4. Run
 npm start                         # REST + MCP on http://localhost:3000
 ```
 
-Upgrading from an earlier version? Migrate your existing memories into the artifact store once (back up `unlimited_shared_brain.db` first — it's idempotent and safe to re-run). It reuses the stored vectors as-is, so it's only valid while the embedding model and `VECTOR_DIMENSION` are unchanged:
+Upgrading from an earlier version? Migrate your existing memories into the artifact store once (back up `life-context.db` first — it's idempotent and safe to re-run). It reuses the stored vectors as-is, so it's only valid while the embedding model and `VECTOR_DIMENSION` are unchanged:
 
 ```bash
 npm run migrate                   # copies memories -> artifacts (type='note'), reusing vectors
@@ -57,7 +57,7 @@ Seed the entity graph from your contacts (people become searchable and future em
 npm run import:contacts contacts.vcf
 ```
 
-Smoke test (`$KEY` = your `BRAIN_SECRET_KEY`):
+Smoke test (`$KEY` = your `LIFECONTEXT_API_KEY`):
 
 ```bash
 curl -s -X POST localhost:3000/api/remember -H "x-api-key: $KEY" -H "Content-Type: application/json" -d '{"content":"My sister Sarah lives in Austin."}'

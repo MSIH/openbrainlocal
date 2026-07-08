@@ -9,7 +9,7 @@
  * valid because the embedding model/dimension are unchanged (data-model.md rule 2); do
  * NOT run this across a model swap.
  *
- * The originals are left untouched (append-only). Back up unlimited_shared_brain.db first.
+ * The originals are left untouched (append-only). Back up life-context.db first.
  *   Run:  npm run migrate
  */
 import { db, storeArtifactTxn, sha256, logEvent } from './db.js';

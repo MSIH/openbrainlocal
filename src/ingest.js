@@ -1,7 +1,7 @@
 /**
  * The single-artifact ingest endpoint (connector contract doc 04 §2–§4, roadmap M0
  * deliverable 1) plus the batch endpoint (#19, roadmap M0 deliverable 2). Keeps
- * brainserver.js a wiring file: the shared zod payload schema, warning computation, the
+ * server.js a wiring file: the shared zod payload schema, warning computation, the
  * embed-then-upsert orchestration, and the router factory all live here so the JSON-schema
  * generator (#20) reuses ONE definition.
  *
@@ -139,7 +139,7 @@ function formatIngestResult(result, warnings) {
   return body;
 }
 
-// Route-local wrapper (mirrors brainserver.js): funnels async rejections into next(err) so the
+// Route-local wrapper (mirrors server.js): funnels async rejections into next(err) so the
 // router error middleware / the app error funnel handle them.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -158,7 +158,7 @@ async function ingestBatchItem(rawItem, index) {
   } catch (err) {
     // Full detail logged server-side with the item index so a batch failure is attributable
     // (design-philosophy §4); the item is skipped, the loop continues. The client-facing body
-    // stays generic — mirrors the app's own 500 posture (brainserver.js's error funnel masks
+    // stays generic — mirrors the app's own 500 posture (server.js's error funnel masks
     // internal errors behind "Internal server error"), so an embed/DB failure never leaks
     // internal connection details (e.g. the Ollama URL) to an API-key holder.
     console.error(`ingest batch item ${index} failed`, err);
@@ -167,7 +167,7 @@ async function ingestBatchItem(rawItem, index) {
 }
 
 /**
- * Build the /api/v1 connector router. Mounted BEFORE the global 32 KB parser in brainserver.js
+ * Build the /api/v1 connector router. Mounted BEFORE the global 32 KB parser in server.js
  * so the 256 KB cap (contract §2) applies to ingest bodies while legacy routes keep their cap.
  * `requireAuth` is the shared x-api-key middleware, injected so this module stays server-agnostic.
  */

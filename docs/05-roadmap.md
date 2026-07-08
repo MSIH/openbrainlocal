@@ -158,4 +158,4 @@ rule when their turn comes:
 - No milestone starts until the previous exit test passes against the real server — no "done pending testing"
 - Connectors share one monorepo, `life-context-connectors`, for now — one folder per connector; core repo (`life-context`) stays contract + core only. Split a connector into its own repo the moment it needs an independent release cadence or an external owner (lazy-branching, doc 04 §10)
 - Any design decision invalidated by real retrieval behavior gets changed and doc 04 updated in the same commit — the doc tracks reality, not intent
-- Backup `unlimited_shared_brain.db` before every migration; migrations stay idempotent
+- Backup `life-context.db` before every migration; migrations stay idempotent

@@ -11,7 +11,7 @@ You produce a **GitHub issue** and a **numbered implementation plan** before any
 
 ## Step 1 — Scope the task
 1. Read `CLAUDE.md` and `.claude/rules/*.md` for conventions and absolute rules.
-2. Read `src/brainserver.js` (the server), plus any `docs/**` that describe the area. There is no repo-map — read the actual code.
+2. Read `src/server.js` (the server), plus any `docs/**` that describe the area. There is no repo-map — read the actual code.
 3. Identify files to **create** vs **modify**, and any integration points (schema/`db.exec`, MCP tool registration, REST routes, `settings.json`).
 4. Watch the known hazards from `.claude/rules/data-model.md` (sqlite-vec `BigInt` PK, `VECTOR_DIMENSION` match, enrich-then-commit, append-only).
 
@@ -25,7 +25,7 @@ The plan must satisfy the "fresh agent, zero conversation context" test from `/d
 ## Step 3 — File the issue
 Follow `/draft-issue`'s standard and tier selection. Write the marker, then:
 ```bash
-gh issue create --repo MSIH/openbrainlocal --title "<conventional-commit title>" --body-file <file> [--label ...]
+gh issue create --repo MSIH/life-context --title "<conventional-commit title>" --body-file <file> [--label ...]
 ```
 
 ## Step 4 — Confirmation gate (mandatory) — then worktree

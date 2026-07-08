@@ -14,7 +14,7 @@ Independent, local-first implementation of the "Open Brain" concept by Nate B. J
 ## Stack
 - **Runtime:** Node.js 18+ , ESM (`"type": "module"`) — no TypeScript.
 - **Web:** Express 5 + `express-rate-limit`.
-- **Store:** `better-sqlite3` + `sqlite-vec` (vec0 virtual table), WAL mode. Local file `unlimited_shared_brain.db`.
+- **Store:** `better-sqlite3` + `sqlite-vec` (vec0 virtual table), WAL mode. Local file `life-context.db`.
 - **Embeddings/LLM:** OpenAI SDK pointed at **local Ollama** (`http://localhost:11434/v1`), model `qwen3-embedding:0.6b` (1024-dim).
 - **AI interface:** `@modelcontextprotocol/sdk` — Streamable HTTP MCP server.
 - **Validation:** `zod`. **Config:** `dotenv`.
@@ -25,7 +25,7 @@ src/config.js            — single config source (dotenv loads here, before any
 src/db.js                — the store: schema (artifacts + entity graph + vec/FTS), prepared stmts, storeArtifactTxn, ingest_log
 src/embeddings.js        — shared Ollama client + getEmbedding (used by server + scripts)
 src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS, RRF fusion, timeline/about_entity
-src/brainserver.js       — the server: REST + MCP tools, auth, transport (imports the modules above)
+src/server.js       — the server: REST + MCP tools, auth, transport (imports the modules above)
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
 src/connectors/contacts.js — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
 docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap)
@@ -43,10 +43,10 @@ docs/                    — design + setup docs (03 core design, 04 connector c
 ```bash
 npm install                      # + `npm rebuild better-sqlite3` if native build was skipped
 ollama pull qwen3-embedding:0.6b # engine must be running on :11434
-cp .env.example .env             # set BRAIN_SECRET_KEY to a random value (placeholder is rejected)
+cp .env.example .env             # set LIFECONTEXT_API_KEY to a random value (placeholder is rejected)
 npm start                        # serves on :3000
 ```
-Smoke test (`$KEY` = `BRAIN_SECRET_KEY`): `POST /api/remember` then `/api/recall` — recall returns the memory + a distance score. Full steps in `README.md` Quickstart and `docs/local-llm-setup-guide.md`.
+Smoke test (`$KEY` = `LIFECONTEXT_API_KEY`): `POST /api/remember` then `/api/recall` — recall returns the memory + a distance score. Full steps in `README.md` Quickstart and `docs/local-llm-setup-guide.md`.
 
 </context>
 
@@ -74,12 +74,12 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 - Commit messages: imperative, ≤2 sentences. Reference issues/PRs as `#<n> "<title>"`.
 
 ## Style & Data
-- Match `src/brainserver.js`'s existing density and idiom. Details in `.claude/rules/coding-standards.md`.
+- Match `src/server.js`'s existing density and idiom. Details in `.claude/rules/coding-standards.md`.
 - SQLite/schema conventions (occurred_at vs ingested_at, raw_path not blobs, dedup keys, WAL): `.claude/rules/data-model.md`.
 - Design ethos (data preservation, logging, docs-close-to-code, baseline method, AI-artifact capture): `.claude/rules/design-philosophy.md`.
 
 ## Env / Config keys (`.env`)
-- `BRAIN_SECRET_KEY` (required — server hard-exits if unset or left at the placeholder)
+- `LIFECONTEXT_API_KEY` (required — server hard-exits if unset or left at the placeholder)
 - `PORT` (default 3000)
 - Optional/for later cloud enrichment: provider keys — keep out of git.
 

@@ -7,7 +7,7 @@ Defines the stable boundary between the LifeContext core (artifact store, entity
 > **Status: partially implemented.** `POST /api/v1/ingest` (single-artifact upsert on
 > `(source, source_id)`, §2–§4), `POST /api/v1/ingest/batch` (up to 100 artifacts per call,
 > per-item isolation, §2), and `GET /api/v1/ingest/types` (§6) are **live** in `src/ingest.js`
-> / `src/brainserver.js`. The event (`/events`) and per-connector state endpoints below remain
+> / `src/server.js`. The event (`/events`) and per-connector state endpoints below remain
 > design-only ([`05-roadmap.md`](05-roadmap.md) Milestone 0+). The contract is declared
 > v1-stable only after three real connectors have used it (Milestone 5). This doc supersedes
 > the ingestion-pipeline framing in [`03-ob2-design.md`](03-ob2-design.md) §3 — see the naming
@@ -272,7 +272,7 @@ The core doesn't run connectors, but reference connectors follow these patterns 
 - **Trigger patterns** — three shapes cover everything: **watch** (react to a file/db changing: `chat.db`, a Documents folder), **poll** (ask on an interval: now-playing, an IMAP inbox), **push** (something else initiates: a Claude Code hook, an iOS Shortcut, a browser extension). These are implementation styles, not API concepts — the wire looks identical.
 - **Cursor state** — incremental connectors need a high-water mark ("last ROWID synced"). Keep it in a local file next to the connector, *or* use the optional `GET/PUT /api/v1/sources/:source/state` blob store so the cursor lives with the brain and survives connector-machine reinstalls. Either is contract-conformant.
 - **Backoff & batching** — batch endpoint for backlogs (100/call), single ingest for live trickle. Respect 429s with exponential backoff. Rate limit is per key.
-- **Per-connector API keys** *(core roadmap item)* — v1 ships with the single `BRAIN_SECRET_KEY`; a follow-up adds named keys with per-key `source` binding and revocation, so a leaked phone Shortcut key can be killed without rotating the brain. The contract is written assuming this arrives; connectors shouldn't share keys across devices.
+- **Per-connector API keys** *(core roadmap item)* — v1 ships with the single `LIFECONTEXT_API_KEY`; a follow-up adds named keys with per-key `source` binding and revocation, so a leaked phone Shortcut key can be killed without rotating the brain. The contract is written assuming this arrives; connectors shouldn't share keys across devices.
 - **Failure posture** — a connector that dies must lose at most its uncommitted cursor window. Never buffer unbounded in memory; never require the brain to be up to *observe* (queue locally, flush on reconnect) if the source data is ephemeral (now-playing is ephemeral; `chat.db` is not, so the iMessage connector can simply do nothing while the server is down).
 
 ---
