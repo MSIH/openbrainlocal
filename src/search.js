@@ -10,7 +10,7 @@
 import { z } from 'zod';
 import { db, resolveEntityIds, getEntity, getArtifactById, getRelations } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
-import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX } from './config.js';
+import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS } from './config.js';
 import { ARTIFACT_TYPES } from './ingest-types.js';
 
 // Re-exported so the planner prompt below, the plan-schema filter, and every existing
@@ -45,6 +45,7 @@ function planSystemPrompt(today) {
     '  place: a place string, or null',
     '  time_start, time_end: ISO dates (YYYY-MM-DD) resolving any relative time, or null',
     '  semantic: the meaning-bearing core of the query (always a non-empty string)',
+    'For week- or month-scale summary questions ("what was I doing in October"), set types to ["digest"] — daily digests answer those in one hit.',
     'Do not invent filters the query does not imply. Emit valid JSON only.',
   ].join('\n');
 }
@@ -115,6 +116,11 @@ const ftsInStmt = db.prepare(`
 `);
 // Cheap existence probe: is this place string a usable filter at all?
 const placeExistsStmt = db.prepare('SELECT 1 FROM artifacts WHERE place_label LIKE ? LIMIT 1');
+// Same probe shape for digests: does the range have any daily digest to answer from?
+const digestExistsStmt = db.prepare(`
+  SELECT 1 FROM artifacts WHERE type = 'digest'
+    AND date(occurred_at) >= date(?) AND date(occurred_at) <= date(?) LIMIT 1
+`);
 const timelineStmt = db.prepare(`
   SELECT * FROM artifacts
   WHERE (@start IS NULL OR date(occurred_at) >= date(@start))
@@ -233,10 +239,21 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
 }
 
 export function timeline(start, end, types, limit = 50) {
+  const s = emptyish(start) || null;
+  const e = emptyish(end) || null;
+  let effTypes = types?.length ? types : null;
+  // Month-scale ranges answer from daily digests when they exist (roadmap M6 deliverable 3):
+  // a bounded span >= DIGEST_TIMELINE_DAYS with no explicit type filter returns the digests,
+  // not hundreds of raw rows. Explicit types always win; open-ended or digest-less ranges
+  // fall through unchanged.
+  if (!effTypes && s && e) {
+    const spanDays = (new Date(e) - new Date(s)) / 86400000;
+    if (spanDays >= DIGEST_TIMELINE_DAYS && digestExistsStmt.get(s, e)) effTypes = ['digest'];
+  }
   return timelineStmt.all({
-    start: emptyish(start) || null,
-    end: emptyish(end) || null,
-    types_json: types?.length ? JSON.stringify(types) : null,
+    start: s,
+    end: e,
+    types_json: effTypes ? JSON.stringify(effTypes) : null,
     limit,
   });
 }

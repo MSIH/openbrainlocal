@@ -56,6 +56,12 @@ Seed the entity graph from your contacts (people become searchable and future em
 npm run import:contacts contacts.vcf
 ```
 
+Consolidate each day's artifacts into one searchable daily digest (schedule it nightly — see [`docs/06-consolidation.md`](docs/06-consolidation.md)):
+
+```bash
+npm run consolidate               # yesterday; --date=YYYY-MM-DD or --backfill=N for history
+```
+
 Smoke test (`$KEY` = your `LIFECONTEXT_API_KEY`):
 
 ```bash
@@ -105,5 +111,6 @@ What's next is connector-driven: an HTTP ingest contract so anything — a Claud
 | [`docs/03-ob2-design.md`](docs/03-ob2-design.md) | The core design: unified artifact schema, entity graph, hybrid retrieval, query planner, consolidation. Its build-phase table (§6) is superseded by the roadmap below. |
 | [`docs/04-connector-contract.md`](docs/04-connector-contract.md) | The connector contract — the versioned HTTP + JSON ingest API (`/api/v1/ingest`) that lets any external process, in any language, feed the brain: artifact payloads, entity hints, the event lane, the type registry, and the compatibility promise. |
 | [`docs/05-roadmap.md`](docs/05-roadmap.md) | The current roadmap: sequence-ordered milestones with exit tests — ingest API foundations, the first three reference connectors (`devsession`, `imessage`, `photo-exif`), planner hardening, contract v1 freeze, consolidation, and distribution. |
+| [`docs/06-consolidation.md`](docs/06-consolidation.md) | Consolidation v1 — `npm run consolidate`: nightly daily digests (`type='digest'`), regeneration semantics (input-hash skip, derived-only upsert), timeline/planner digest awareness, scheduling snippets. |
 | [`docs/local-llm-setup-guide.md`](docs/local-llm-setup-guide.md) | Setting up Ollama and the local models (Windows-focused; Linux notes included). Later steps predate the 2.0 layout — see the notes inside. |
 | [`docs/windows-service-winsw.md`](docs/windows-service-winsw.md) | Running the Node server as a Windows service with WinSW. |
