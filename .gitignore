@@ -13,3 +13,7 @@ logs/
 .claude/.pre-doc-review-done
 .claude/.draft-issue-skip
 .claude/.cloud-issue-done
+
+# Windows service (WinSW) — local machine setup
+LifeContext.exe
+LifeContext.xml
