@@ -15,6 +15,35 @@ Written for **Windows 11** (PowerShell). Linux notes at the end.
 
 ---
 
+## Quick start (automated) — `npm run setup`
+
+Once [Ollama is installed](#step-1--install-ollama) and running, one command does the model pulls and `.env` generation for you:
+
+```bash
+npm install
+npm run setup     # checks Ollama, pulls the embedding model (+ optional query model), writes .env
+npm start
+```
+
+`npm run setup` (`scripts/setup.js`):
+- confirms the Ollama daemon is reachable at `OLLAMA_BASE_URL`,
+- pulls `EMBEDDING_MODEL` (required) and `QUERY_MODEL` (optional — search degrades to pure semantic if it's missing),
+- writes `.env` from `.env.example` with a random `LIFECONTEXT_API_KEY`, **only if `.env` doesn't already exist** (it never overwrites your key),
+- exits non-zero if Ollama is unreachable or the required model fails to pull.
+
+It's idempotent — models already present aren't re-downloaded. It prints the generated key once; save it (it's the `x-api-key` for every request).
+
+**Chat with your memory (optional):** build the bundled Ollama persona and talk to your brain:
+
+```bash
+ollama create lifecontext -f Modelfile   # base model is qwen3:8b — edit FROM to use another
+ollama run lifecontext --keepalive 24h
+```
+
+The manual, step-by-step setup below remains the source of truth for what `npm run setup` automates (and for the 24/7 service configuration).
+
+---
+
 ## Step 1 — Install Ollama
 
 1. Download the Windows installer from <https://ollama.com/download>
