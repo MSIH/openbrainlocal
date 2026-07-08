@@ -24,8 +24,8 @@ import {
   db, storeArtifactTxn, sha256, logEvent,
   insertEntityStmt, insertAliasStmt, resolveEntityIds, normalizeName, normalizePhone,
   canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
-} from '../db.js';
-import { embedToFloat32 } from '../embeddings.js';
+} from './db.js';
+import { embedToFloat32 } from './embeddings.js';
 
 const findBySource = db.prepare('SELECT id FROM artifacts WHERE source = ? AND source_id = ?');
 const findByHash = db.prepare('SELECT id FROM artifacts WHERE content_hash = ? LIMIT 1');

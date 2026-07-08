@@ -27,7 +27,7 @@ src/embeddings.js        — shared Ollama client + getEmbedding (used by server
 src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS, RRF fusion, timeline/about_entity
 src/server.js            — the server: REST + MCP tools, auth, transport (imports the modules above)
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
-src/connectors/contacts.js — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
+src/contacts.js          — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
 docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap)
 .env.example             — required env template (copy to .env; never commit .env)
 .claude/rules/           — coding standards, data-model, design-philosophy (read before editing)

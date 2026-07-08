@@ -8,7 +8,7 @@
     "setup": "node scripts/setup.js",
     "start": "node src/server.js",
     "migrate": "node src/migrate.js",
-    "import:contacts": "node src/connectors/contacts.js",
+    "import:contacts": "node src/contacts.js",
     "schema:ingest": "node scripts/generate-ingest-schema.js"
   },
   "license": "MIT",
