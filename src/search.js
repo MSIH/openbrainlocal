@@ -19,6 +19,7 @@ import { ARTIFACT_TYPES } from './ingest-types.js';
 export { ARTIFACT_TYPES };
 
 const PLAN_TIMEOUT_MS = 8000;
+const MS_PER_DAY = 86_400_000;
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 const emptyish = (s) => (typeof s === 'string' && s.trim() ? s : null);
 
@@ -239,15 +240,15 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
 }
 
 export function timeline(start, end, types, limit = 50) {
-  const s = emptyish(start) || null;
-  const e = emptyish(end) || null;
+  const s = emptyish(start);
+  const e = emptyish(end);
   let effTypes = types?.length ? types : null;
   // Month-scale ranges answer from daily digests when they exist (roadmap M6 deliverable 3):
   // a bounded span >= DIGEST_TIMELINE_DAYS with no explicit type filter returns the digests,
   // not hundreds of raw rows. Explicit types always win; open-ended or digest-less ranges
-  // fall through unchanged.
+  // fall through unchanged. +1: the range is inclusive on both ends (a 14-day calendar span).
   if (!effTypes && s && e) {
-    const spanDays = (new Date(e) - new Date(s)) / 86400000;
+    const spanDays = (new Date(e) - new Date(s)) / MS_PER_DAY + 1;
     if (spanDays >= DIGEST_TIMELINE_DAYS && digestExistsStmt.get(s, e)) effTypes = ['digest'];
   }
   return timelineStmt.all({

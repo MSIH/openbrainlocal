@@ -15,30 +15,24 @@
  *         npm run consolidate -- --backfill=30     (last 30 days, oldest first)
  */
 import { pathToFileURL } from 'node:url';
-import { db, upsertArtifactTxn, sha256, logEvent } from './db.js';
+import { db, upsertArtifactTxn, getArtifactBySource, sha256, logEvent } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { DIGEST_MODEL, DIGEST_TIMEOUT_MS, DIGEST_MAX_ARTIFACTS, DIGEST_TEXT_CLIP } from './config.js';
 import { TYPE_REGISTRY } from './ingest-types.js';
 
 const DIGEST_ELIGIBLE_TYPES = TYPE_REGISTRY.filter((t) => t.digest_eligible).map((t) => t.type);
 
-// The day's inputs, oldest first. Capped: a heavy day degrades to "first N" rather than
-// blowing the model's context — the cap is recorded in extra_json so it's visible later.
+// The day's inputs, oldest first. Sargable range on occurred_at (ISO text compares correctly:
+// '<d>' <= both '<d>' and '<d>T…' < next day) so idx_artifacts_time seeks instead of scanning.
+// Fetches cap+1 so truncation is detected, not inferred; a heavy day degrades to "first N"
+// rather than blowing the model's context — the cap is recorded in extra_json.
 const eligibleStmt = db.prepare(`
   SELECT id, type, occurred_at, place_label, text_repr FROM artifacts
-  WHERE date(occurred_at) = date(?)
+  WHERE occurred_at >= ? AND occurred_at < date(?, '+1 day')
     AND type IN (SELECT value FROM json_each(?))
   ORDER BY occurred_at ASC
   LIMIT ?
 `);
-const existingDigestStmt = db.prepare(
-  `SELECT id, extra_json FROM artifacts WHERE source = 'consolidation' AND source_id = ?`
-);
-
-// Regenerate only when the day's input set changed: hash of sorted (id, text hash) pairs.
-// text_repr participates so an enrichment wave (e.g. a photo caption upsert) refreshes the digest.
-const inputHash = (rows) =>
-  sha256(JSON.stringify(rows.map((r) => [r.id, sha256(r.text_repr || '')]).sort((a, b) => a[0] - b[0])));
 
 // Category framing per roadmap M6: dev sessions -> worked on, messages -> talked with,
 // photos/visits -> was at. Unlisted types land under "Also".
@@ -53,12 +47,16 @@ const DIGEST_SYSTEM_PROMPT = [
 // Reasoning models (the default qwen3:8b) may emit <think> blocks in content — strip them.
 const stripThink = (s) => s.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
-async function generateDigest(date, rows) {
-  const lines = rows.map((r) => {
-    const t = (r.occurred_at || '').slice(11, 16);
-    const place = r.place_label ? ` @ ${r.place_label}` : '';
-    return `- [${r.type}]${t ? ` ${t}` : ''}${place} ${(r.text_repr || '').slice(0, DIGEST_TEXT_CLIP)}`;
-  });
+// One prompt line per artifact — this is EXACTLY what the model consumes, so the input hash
+// is computed over these lines: a change past the clip (or in a field the prompt doesn't
+// use) can't force a pointless regen, and a place_label backfill can't be silently skipped.
+const promptLine = (r) => {
+  const t = (r.occurred_at || '').slice(11, 16);
+  const place = r.place_label ? ` @ ${r.place_label}` : '';
+  return `- [${r.type}]${t ? ` ${t}` : ''}${place} ${(r.text_repr || '').slice(0, DIGEST_TEXT_CLIP)}`;
+};
+
+async function generateDigest(date, lines) {
   const resp = await ai.chat.completions.create(
     {
       model: DIGEST_MODEL,
@@ -71,7 +69,11 @@ async function generateDigest(date, rows) {
     { timeout: DIGEST_TIMEOUT_MS, maxRetries: 0 }
   );
   const text = stripThink(resp.choices[0]?.message?.content || '');
-  if (!text) throw new Error(`consolidate: ${DIGEST_MODEL} returned an empty digest for ${date}`);
+  // A dangling <think> means the output was truncated mid-reasoning (token cap) — storing it
+  // would commit raw chain-of-thought as permanent memory. Empty and truncated both fail loudly.
+  if (!text || text.includes('<think>')) {
+    throw new Error(`consolidate: ${DIGEST_MODEL} returned an empty or truncated digest for ${date}`);
+  }
   return text;
 }
 
@@ -81,13 +83,18 @@ async function generateDigest(date, rows) {
  * (CLAUDE.md rule 4) — a failed Ollama call writes nothing.
  */
 export async function consolidateDay(date) {
-  const rows = eligibleStmt.all(date, JSON.stringify(DIGEST_ELIGIBLE_TYPES), DIGEST_MAX_ARTIFACTS);
-  if (!rows.length) {
+  const fetched = eligibleStmt.all(date, date, JSON.stringify(DIGEST_ELIGIBLE_TYPES), DIGEST_MAX_ARTIFACTS + 1);
+  if (!fetched.length) {
     console.log(`consolidate: ${date} no digest-eligible artifacts — skipped`);
     return { date, status: 'empty' };
   }
-  const hash = inputHash(rows);
-  const existing = existingDigestStmt.get(`daily-${date}`);
+  const truncated = fetched.length > DIGEST_MAX_ARTIFACTS;
+  const rows = truncated ? fetched.slice(0, DIGEST_MAX_ARTIFACTS) : fetched;
+  const lines = rows.map(promptLine);
+  // Regenerate only when the model's actual input changed (the prompt lines) — an enrichment
+  // wave that touches a field the prompt uses refreshes the digest; anything else skips free.
+  const hash = sha256(JSON.stringify(lines));
+  const existing = getArtifactBySource('consolidation', `daily-${date}`);
   if (existing) {
     try {
       if (JSON.parse(existing.extra_json || '{}').input_hash === hash) {
@@ -99,22 +106,17 @@ export async function consolidateDay(date) {
     }
   }
 
-  const text = await generateDigest(date, rows);
+  const text = await generateDigest(date, lines);
   const vec = await embedToFloat32(text);
   const types = [...new Set(rows.map((r) => r.type))];
-  const extra = {
-    input_hash: hash,
-    artifact_count: rows.length,
-    truncated: rows.length === DIGEST_MAX_ARTIFACTS,
-    types,
-    model: DIGEST_MODEL,
-  };
+  const extra = { input_hash: hash, artifact_count: rows.length, truncated, types, model: DIGEST_MODEL };
+  // No content_hash: it's write-once (not in MUTABLE_FIELDS) and a digest has no raw bytes —
+  // a regeneration would leave it fingerprinting stale text. Identity is (source, source_id).
   const r = upsertArtifactTxn(
     {
       type: 'digest',
       source: 'consolidation',
       source_id: `daily-${date}`,
-      content_hash: sha256(text),
       occurred_at: date,
       text_repr: text,
       extra_json: JSON.stringify(extra),
@@ -133,7 +135,13 @@ export async function consolidateDay(date) {
 // Local calendar date (not UTC slice — a 9pm run must digest today's local day, minus offset).
 const localDate = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const daysAgo = (n) => localDate(new Date(Date.now() - n * 86400000));
+// Calendar arithmetic via setDate, not fixed-ms subtraction — DST days are 23/25h and a
+// millisecond stride would duplicate one local date and skip its neighbor twice a year.
+const daysAgo = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return localDate(d);
+};
 
 function parseArgs(argv) {
   const args = { date: null, backfill: null };
@@ -151,9 +159,8 @@ async function main() {
   const { date, backfill } = parseArgs(process.argv.slice(2));
   // Default: yesterday. Backfill: last N days ending yesterday, oldest first — each day is
   // its own transaction, so a mid-run failure keeps completed days (restartable, like migrate).
-  const days = date
-    ? [date]
-    : Array.from({ length: backfill || 1 }, (_, i) => daysAgo((backfill || 1) - i));
+  const n = backfill || 1;
+  const days = date ? [date] : Array.from({ length: n }, (_, i) => daysAgo(n - i));
   const tally = { created: 0, updated: 0, unchanged: 0, empty: 0 };
   for (const d of days) tally[(await consolidateDay(d)).status]++;
   console.log(

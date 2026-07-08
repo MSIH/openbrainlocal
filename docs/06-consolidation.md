@@ -81,6 +81,19 @@ posture. macOS/Linux: a `launchd` plist or cron line (`0 2 * * * cd /path/to/lif
 | `DIGEST_TEXT_CLIP` | `500` | Chars of each artifact's `text_repr` given to the model |
 | `DIGEST_TIMELINE_DAYS` | `14` | Timeline spans ≥ this prefer digests over raw rows |
 
+## Known limitations
+
+- **Day grouping is by the stored `occurred_at` string** (SQLite `date()`, no timezone
+  conversion) — consistent with every other date filter in the store (`timeline`, the search
+  prefilter). Artifacts stored with UTC `Z` timestamps by a connector west of UTC can group an
+  evening event into the next day's digest; fixing that is a store-wide timezone policy
+  decision, not a consolidation one.
+- **Extension types (`x-*`) are not digest-eligible** — eligibility comes from `TYPE_REGISTRY`,
+  which only lists registered types. A custom `x-*` connector type is searchable but won't
+  appear in digests until it's promoted into the registry.
+- **Sub-threshold timelines include digest rows** alongside the raw artifacts they summarize
+  (a digest is an ordinary artifact); pass explicit `types` to exclude them.
+
 ## Deferred (ships when needed)
 
 - **Weekly/monthly rollups** (design §5 item 3) — after daily digests prove out; rollups read

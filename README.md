@@ -59,7 +59,7 @@ npm run import:contacts contacts.vcf
 Consolidate each day's artifacts into one searchable daily digest (schedule it nightly — see [`docs/06-consolidation.md`](docs/06-consolidation.md)):
 
 ```bash
-npm run consolidate               # yesterday; --date=YYYY-MM-DD or --backfill=N for history
+npm run consolidate               # yesterday; `-- --date=YYYY-MM-DD` or `-- --backfill=N` for history
 ```
 
 Smoke test (`$KEY` = your `LIFECONTEXT_API_KEY`):
