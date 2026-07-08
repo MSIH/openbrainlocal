@@ -12,7 +12,7 @@ Pre-PR review of **documentation** on the current branch. Catch inaccuracy, stal
 1. `git status --short`; `git rev-parse --abbrev-ref HEAD`
 2. `git diff main...HEAD --stat -- '*.md' 'docs/**'`
 3. `git diff main...HEAD -- '*.md' 'docs/**'` — and Read each changed doc **in full**.
-4. Read the code/config the doc describes — `src/brainserver.js`, `package.json`, `.env.example`, `.claude/**`. **Accuracy is judged against the code, not the prose.**
+4. Read the code/config the doc describes — `src/server.js`, `package.json`, `.env.example`, `.claude/**`. **Accuracy is judged against the code, not the prose.**
 
 If the scoped diff is empty or whitespace-only, say so and stop.
 
@@ -34,7 +34,7 @@ Routing: `typo-only` → Editorial + Accuracy only. `copyedit`/`substantive`/`ne
 ## Step 2 — Persona reviews
 Run each engaged persona as a separate, labeled section. Each finding: **file:line**, the offending excerpt (≤25 words), the issue, and a concrete fix. Bucket into **Blockers / Should-fix `[sev N/10]` / Nits**.
 
-- **Accuracy vs. code** (always) — every claim matches current code/config. Flag drift: wrong endpoint / flag / env var / model name / vector dimension; behavior the code doesn't actually do; numbers that disagree with `src/brainserver.js`, `.env.example`, or `package.json`.
+- **Accuracy vs. code** (always) — every claim matches current code/config. Flag drift: wrong endpoint / flag / env var / model name / vector dimension; behavior the code doesn't actually do; numbers that disagree with `src/server.js`, `.env.example`, or `package.json`.
 - **Command correctness** (if commands present) — every command is copy-pasteable and correct for this repo + Windows: right paths, flags, and order; `npm` / `ollama` / `curl` invocations actually work; `$KEY` / placeholders explained; no invented flags.
 - **Clarity / plain-language** (prose changes) — jargon defined on first use; steps concrete and ordered; a new contributor with zero context could follow it (same test as `/draft-issue`).
 - **Structure / editorial** (always) — heading hierarchy sane; no leftover scaffolding / TODOs / stale `Status` lines; lists over prose for enumerations; density matches sibling docs.

@@ -139,16 +139,16 @@ Everything else — the transaction pattern, MCP transport, auth — is untouche
 
 `CREATE VIRTUAL TABLE IF NOT EXISTS` will **not** resize the old 1536-dim vec table, and old OpenAI vectors are incompatible with Qwen vectors anyway. Re-embed once:
 
-1. **Back up first** (the whole point of local SQLite):
+1. **Back up first** (the whole point of local SQLite). Substitute your actual DB file — `life-context.db` is the default; use whatever `DB_PATH` points to if you've set it:
 
 ```powershell
-Copy-Item unlimited_shared_brain.db unlimited_shared_brain.backup.db
+Copy-Item life-context.db life-context.backup.db
 ```
 
-2. **Drop the old vector table** (raw memories are safe in `memories`):
+2. **Drop the old vector table** (raw memories are safe in `memories`). Same file substitution applies:
 
 ```powershell
-sqlite3 unlimited_shared_brain.db "DROP TABLE vec_memories;"
+sqlite3 life-context.db "DROP TABLE vec_memories;"
 ```
 
 3. **Start the server once** — the startup `db.exec` recreates `vec_memories` at 1024 dims.
@@ -160,7 +160,7 @@ import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import OpenAI from 'openai';
 
-const db = new Database('unlimited_shared_brain.db');
+const db = new Database(process.env.DB_PATH || 'life-context.db');
 sqliteVec.load(db);
 
 const ollama = new OpenAI({ baseURL: "http://localhost:11434/v1", apiKey: "ollama" });
@@ -219,7 +219,7 @@ nssm set BrainServer AppRotateBytes 10485760
 nssm set BrainServer Start SERVICE_AUTO_START
 ```
 
-`AppDirectory` matters: it's the working directory, so the server finds `.env` and creates `unlimited_shared_brain.db` there. Create the `logs` folder first (`New-Item -ItemType Directory -Force "$appDir\logs"`).
+`AppDirectory` matters: it's the working directory, so the server finds `.env` and creates `life-context.db` there. Create the `logs` folder first (`New-Item -ItemType Directory -Force "$appDir\logs"`).
 
 **3. Start and verify:**
 

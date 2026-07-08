@@ -2,10 +2,10 @@
 globs: **/*.js, **/*.mjs
 
 ## Code-First Principle
-Generated code is optimized for machine consumption: concise, dense, pattern-matched to the existing codebase (`src/brainserver.js`).
+Generated code is optimized for machine consumption: concise, dense, pattern-matched to the existing codebase (`src/server.js`).
 
 ## Before Creating/Editing Any File
-1. Read `src/brainserver.js` (and any sibling of the same kind) first.
+1. Read `src/server.js` (and any sibling of the same kind) first.
 2. Match its structure, density, and style exactly.
 3. Do not introduce new patterns, frameworks, or formatting conventions unasked.
 

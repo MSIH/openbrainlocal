@@ -2,13 +2,13 @@
 
 Issues are implementation briefs for a fresh agent with zero conversation context. Test: *could a new Claude Code session implement this correctly using only the issue body and the codebase, with no memory of prior discussion?* If no, the issue is incomplete.
 
-Author a GitHub issue for `MSIH/openbrainlocal`, get explicit approval on the Implementation Plan, then file it. A `PreToolUse` hook (`.claude/hooks/draft-issue-gate.sh`) blocks `gh issue create` until this skill writes a fresh marker (600s) — no marker, no issue.
+Author a GitHub issue for `MSIH/life-context`, get explicit approval on the Implementation Plan, then file it. A `PreToolUse` hook (`.claude/hooks/draft-issue-gate.sh`) blocks `gh issue create` until this skill writes a fresh marker (600s) — no marker, no issue.
 
 ## When
 Before ANY branch-creating work — issue first, always. No exceptions (not for "trivial", doc-only, or config changes).
 
 ## Step 1 — Investigate
-Read the relevant code before drafting: `src/brainserver.js`, `docs/**`, `.claude/rules/*`. For a bug, locate the root-cause file **and line** and confirm the reproduction — do not file on a symptom. Open at most a few files; don't read the world.
+Read the relevant code before drafting: `src/server.js`, `docs/**`, `.claude/rules/*`. For a bug, locate the root-cause file **and line** and confirm the reproduction — do not file on a symptom. Open at most a few files; don't read the world.
 
 ## Tier selection (choose before drafting)
 | Tier | Use when | Sections |
@@ -43,7 +43,7 @@ Type (exactly 1, from the commit prefix): `fix`→bug · `feat`→enhancement ·
 ## Step 4 — Write the marker, then file (back-to-back; marker is fresh 600s)
 ```bash
 date -u +%Y-%m-%dT%H:%M:%SZ > "$CLAUDE_PROJECT_DIR/.claude/.draft-issue-done"
-gh issue create --repo MSIH/openbrainlocal --title "<conventional-commit title, ≤70 chars>" --body-file <file> [--label <type>]
+gh issue create --repo MSIH/life-context --title "<conventional-commit title, ≤70 chars>" --body-file <file> [--label <type>]
 ```
 Confirm the active `gh` account is **MSIH** first (`gh auth status`).
 
