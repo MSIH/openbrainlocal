@@ -4,12 +4,16 @@
 // Image-only PDFs are ingested immediately with their thin header (findable by filename from
 // wave 1) and queued for ocr-worker.js, which later upserts an OCR'd text_repr onto the same
 // (source, source_id). See README.md for setup and the exit test.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDotEnvIfPresent, walkDocumentFiles, sourceIdFor, contentHashOfFile, chunkByBudget, ingestClient, BATCH_MAX } from './lib/shared.js';
-import { extractDocument, formatOf } from './lib/extract.js';
+import {
+  loadDotEnvIfPresent, envNumber, textReprMaxChars, walkDocumentFiles, sourceIdFor, statKeyOf,
+  contentHashOfBuffer, readJsonFile, writeJsonFile, updateJsonFile, chunkByBudget, ingestClient, BATCH_MAX,
+} from './lib/shared.js';
+import { extractDocument } from './lib/extract.js';
 import { buildTextRepr } from './lib/text-repr.js';
 
 loadDotEnvIfPresent(path.dirname(fileURLToPath(import.meta.url)));
@@ -21,32 +25,14 @@ const MANIFEST_PATH = process.env.DOCUMENTS_MANIFEST_PATH
   || path.join(os.homedir(), '.life-context', 'documents-manifest.json');
 const OCR_QUEUE_PATH = process.env.DOCUMENTS_OCR_QUEUE_PATH
   || path.join(os.homedir(), '.life-context', 'documents-ocr-queue.json');
-// `|| dflt` would override an explicit 0 (0 is falsy) — Number.isFinite distinguishes
-// "not set" (NaN) from "set to zero" (a real, useful value for tests).
-const rawMaxMb = Number(process.env.DOCUMENTS_MAX_FILE_MB);
-const MAX_FILE_BYTES = (Number.isFinite(rawMaxMb) ? rawMaxMb : 50) * 1024 * 1024;
-// Hard ceiling 100,000 chars: keeps any single serialized payload safely under the batch
-// byte budget (lib/shared.js) no matter what the env says.
-const rawMaxChars = Number(process.env.DOCUMENTS_TEXT_REPR_MAX_CHARS);
-const TEXT_REPR_MAX_CHARS = Math.min(Number.isFinite(rawMaxChars) ? rawMaxChars : 12000, 100000);
-
-function readJson(filePath) {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function writeJson(filePath, value) {
-  mkdirSync(path.dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(value));
-}
+const MAX_FILE_BYTES = envNumber('DOCUMENTS_MAX_FILE_MB', 50) * 1024 * 1024;
+const TEXT_REPR_MAX_CHARS = textReprMaxChars();
 
 async function buildPayload(absPath, relPath) {
-  const format = formatOf(absPath);
-  const { text, occurredAt, meta, needsOcr } = await extractDocument(absPath);
-  const contentHash = await contentHashOfFile(absPath);
+  // One read serves both extraction and hashing — every extractor buffers the whole file
+  // anyway (bounded by MAX_FILE_BYTES), so a second streamed read would double the disk I/O.
+  const buffer = await readFile(absPath);
+  const { format, text, occurredAt, meta, needsOcr } = await extractDocument(absPath, buffer);
   const { text_repr, extracted_chars, truncated } = buildTextRepr(format, meta, relPath, text, TEXT_REPR_MAX_CHARS);
 
   const payload = {
@@ -54,7 +40,7 @@ async function buildPayload(absPath, relPath) {
     source_id: sourceIdFor(relPath),
     type: 'document',
     text_repr,
-    content_hash: contentHash,
+    content_hash: contentHashOfBuffer(buffer),
     raw_path: absPath,
     extra: { format, extracted_chars, truncated, needs_ocr: needsOcr, ocr_done: false, ...meta },
   };
@@ -77,19 +63,26 @@ async function main() {
   }
 
   const { postIngestBatch } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
-  const manifest = readJson(MANIFEST_PATH);
-  // Queue entries carry the file's full `extra` so ocr-worker.js can send a complete
-  // replacement — the server's upsert overwrites extra_json whole, never merges keys.
-  const ocrQueue = readJson(OCR_QUEUE_PATH);
+  const manifest = readJsonFile(MANIFEST_PATH);
   let scanned = 0;
   let skippedUnchanged = 0;
   let skippedOversize = 0;
   const pending = [];
 
+  // Persist per successful batch, not per run: a failed batch (or a crash) must lose at most
+  // its own uncommitted window (doc 04 §7), never the bookkeeping of everything already
+  // server-confirmed this run. The OCR queue is updated against a fresh read — ocr-worker.js
+  // may be draining it concurrently, and overwriting from a run-start snapshot would resurrect
+  // entries it completed (see updateJsonFile).
   const flush = async () => {
     if (!pending.length) return;
     for (const group of chunkByBudget(pending)) {
       const result = await postIngestBatch(group.map((p) => p.payload));
+      if (!Array.isArray(result?.results)) {
+        throw new Error(`documents: unexpected ingest response shape from ${LIFECONTEXT_URL} — is this a LifeContext server?`);
+      }
+      const flagged = [];
+      const cleared = [];
       result.results.forEach((r, i) => {
         if (r.error) {
           console.error('documents: item failed', group[i].payload.source_id, r.error, r.issues ?? '');
@@ -99,10 +92,17 @@ async function main() {
           // any stale entry when a changed file now has a real text layer.
           const { relPath, statKey, payload } = group[i];
           manifest[relPath] = statKey;
-          if (payload.extra.needs_ocr) ocrQueue[relPath] = { statKey, extra: payload.extra };
-          else delete ocrQueue[relPath];
+          if (payload.extra.needs_ocr) flagged.push({ relPath, statKey, extra: payload.extra });
+          else cleared.push(relPath);
         }
       });
+      writeJsonFile(MANIFEST_PATH, manifest);
+      if (flagged.length || cleared.length) {
+        updateJsonFile(OCR_QUEUE_PATH, (queue) => {
+          for (const { relPath, statKey, extra } of flagged) queue[relPath] = { statKey, extra };
+          for (const relPath of cleared) delete queue[relPath];
+        });
+      }
     }
     pending.length = 0;
   };
@@ -122,7 +122,7 @@ async function main() {
         skippedOversize++;
         continue;
       }
-      statKey = `${stat.mtimeMs}:${stat.size}`;
+      statKey = statKeyOf(stat);
       if (manifest[relPath] === statKey) {
         skippedUnchanged++;
         continue;
@@ -137,10 +137,8 @@ async function main() {
     if (pending.length >= BATCH_MAX) await flush();
   }
   await flush();
-  writeJson(MANIFEST_PATH, manifest);
-  writeJson(OCR_QUEUE_PATH, ocrQueue);
 
-  const queued = Object.keys(ocrQueue).length;
+  const queued = Object.keys(readJsonFile(OCR_QUEUE_PATH)).length;
   console.error(`documents: scanned ${scanned} new/changed file(s), skipped ${skippedUnchanged} unchanged, ${skippedOversize} oversize; ${queued} awaiting OCR`);
 }
 

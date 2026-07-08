@@ -6,22 +6,22 @@
 // module is the single swap point for an external poppler `pdftoppm` binary instead.
 import { createCanvas } from '@napi-rs/canvas';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { pdfOpenParams } from './pdf.js';
 
 const RENDER_SCALE = 2; // 72dpi base × 2 ≈ 144 DPI — enough for OCR without huge bitmaps
+// MediaBox comes from the untrusted PDF; uncapped, a declared 14,400pt (spec-max) or garbage
+// page size times RENDER_SCALE would ask the canvas for a multi-GB native bitmap.
+const MAX_DIM_PX = 8192;
 
 export async function rasterizePdf(buffer, maxPages) {
-  const doc = await getDocument({
-    data: new Uint8Array(buffer),
-    disableFontFace: true,
-    useSystemFonts: false,
-    isEvalSupported: false,
-  }).promise;
-  const numPages = doc.numPages;
+  const doc = await getDocument(pdfOpenParams(buffer)).promise;
   const images = [];
   try {
-    for (let n = 1; n <= Math.min(numPages, maxPages); n++) {
+    for (let n = 1; n <= Math.min(doc.numPages, maxPages); n++) {
       const page = await doc.getPage(n);
-      const viewport = page.getViewport({ scale: RENDER_SCALE });
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.min(RENDER_SCALE, MAX_DIM_PX / base.width, MAX_DIM_PX / base.height);
+      const viewport = page.getViewport({ scale });
       const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
       await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
       images.push(canvas.toBuffer('image/png'));
@@ -30,5 +30,5 @@ export async function rasterizePdf(buffer, maxPages) {
   } finally {
     await doc.destroy();
   }
-  return { images, numPages };
+  return images;
 }

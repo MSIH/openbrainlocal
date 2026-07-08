@@ -3,6 +3,17 @@
 // representations stay structurally identical.
 
 const FORMAT_LABELS = { pdf: 'PDF', docx: 'DOCX', xlsx: 'XLSX', pptx: 'PPTX' };
+// Titles come from untrusted document metadata; uncapped, a garbage multi-KB title would make
+// the "always-surviving" header itself blow the payload budget.
+const TITLE_MAX_CHARS = 200;
+// Hard byte ceiling per text_repr: the char cap counts UTF-16 code units, but the server's
+// 256KB request limit counts bytes — 100k CJK chars serialize to ~300KB. This cap is what
+// actually guarantees a single payload fits (kept well under shared.js's BATCH_BYTE_BUDGET).
+const PAYLOAD_TEXT_BYTE_CAP = 150 * 1024;
+// Collapsing runs over the raw extract before truncation; on a multi-MB extract >99% of that
+// work is thrown away. Pre-slicing to generous multiples of the cap (collapsing only ever
+// shrinks text) bounds the regex passes without changing what survives truncation.
+const COLLAPSE_MARGIN = 4;
 
 function countLabel(meta) {
   if (meta.page_count != null) return `${meta.page_count} page${meta.page_count === 1 ? '' : 's'}`;
@@ -17,7 +28,7 @@ function countLabel(meta) {
 export function buildHeader(format, meta, relPath) {
   const count = countLabel(meta);
   const kind = count ? `${FORMAT_LABELS[format] ?? format}, ${count}` : FORMAT_LABELS[format] ?? format;
-  const title = meta.title ? ` — "${meta.title}"` : '';
+  const title = meta.title ? ` — "${String(meta.title).slice(0, TITLE_MAX_CHARS)}"` : '';
   return `Document (${kind}): ${relPath}${title}`;
 }
 
@@ -37,25 +48,41 @@ export function collapseWhitespace(text) {
 // length is recorded in extra.extracted_chars and raw_path keeps the pointer to everything.
 export function truncateHeadTail(text, cap) {
   if (text.length <= cap) return { text, truncated: false };
+  if (cap <= 0) return { text: '', truncated: text.length > 0 }; // slice(-0) would return the WHOLE string
   const head = Math.floor(cap * 0.8);
   const tail = cap - head;
   const omitted = text.length - head - tail;
   return {
-    text: `${text.slice(0, head)}\n[... ${omitted} chars omitted ...]\n${text.slice(-tail)}`,
+    text: `${text.slice(0, head)}${tail > 0 ? `\n[... ${omitted} chars omitted ...]\n${text.slice(-tail)}` : ''}`,
     truncated: true,
   };
 }
 
 // header + body → { text_repr, extracted_chars, truncated }. The cap applies to the body;
-// the header always survives whole.
+// the header always survives whole. extracted_chars is the RAW extract length (pre-collapse,
+// pre-truncation) — the honest "how much text was there" number.
 export function buildTextRepr(format, meta, relPath, body, maxChars) {
   const header = buildHeader(format, meta, relPath);
-  const collapsed = collapseWhitespace(body ?? '');
+  const raw = body ?? '';
   const bodyCap = Math.max(0, maxChars - header.length - 2);
-  const { text, truncated } = truncateHeadTail(collapsed, bodyCap);
-  return {
-    text_repr: text ? `${header}\n\n${text}` : header,
-    extracted_chars: collapsed.length,
-    truncated,
-  };
+  const windowed = raw.length > bodyCap * COLLAPSE_MARGIN * 2
+    ? `${raw.slice(0, bodyCap * COLLAPSE_MARGIN)}\n${raw.slice(-bodyCap * COLLAPSE_MARGIN)}`
+    : raw;
+  const collapsed = collapseWhitespace(windowed);
+  let { text, truncated } = truncateHeadTail(collapsed, bodyCap);
+  truncated = truncated || windowed !== raw;
+
+  let textRepr = text ? `${header}\n\n${text}` : header;
+  // Byte backstop: chars ≠ bytes (CJK ≈ 3 bytes/char, control chars 6 as \uXXXX). Halve the
+  // body until the whole text_repr serializes under the payload byte cap — converges in a
+  // few iterations and almost never runs at the default char cap.
+  let effectiveCap = bodyCap;
+  while (Buffer.byteLength(JSON.stringify(textRepr)) > PAYLOAD_TEXT_BYTE_CAP && effectiveCap > 0) {
+    effectiveCap = Math.floor(effectiveCap / 2);
+    ({ text } = truncateHeadTail(collapsed, effectiveCap));
+    truncated = true;
+    textRepr = text ? `${header}\n\n${text}` : header;
+  }
+
+  return { text_repr: textRepr, extracted_chars: raw.length, truncated };
 }

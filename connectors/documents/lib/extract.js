@@ -1,5 +1,6 @@
-// Extension → extractor dispatch. Every extractor returns the same shape:
-// { text, occurredAt: Date|null, meta: {…type-specific counts/title}, needsOcr: boolean }.
+// Extension → extractor dispatch. Every extractor returns the same shape, and extractDocument
+// stamps `format` onto it so callers never re-derive it (dispatch and the recorded value can't
+// disagree): { format, text, occurredAt: Date|null, meta: {…type-specific counts/title}, needsOcr }.
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { extractPdf } from './pdf.js';
@@ -10,19 +11,14 @@ export function formatOf(absPath) {
   return ext ? ext.slice(1) : null; // '.PDF' → 'pdf'
 }
 
-export async function extractDocument(absPath) {
+const EXTRACTORS = { pdf: extractPdf, docx: extractDocx, xlsx: extractXlsx, pptx: extractPptx };
+
+// `buffer` is optional so callers that already read the file (scan.js hashes the same bytes)
+// don't force a second read from disk.
+export async function extractDocument(absPath, buffer = null) {
   const format = formatOf(absPath);
-  const buffer = await readFile(absPath);
-  switch (format) {
-    case 'pdf':
-      return extractPdf(buffer);
-    case 'docx':
-      return extractDocx(buffer);
-    case 'xlsx':
-      return extractXlsx(buffer);
-    case 'pptx':
-      return extractPptx(buffer);
-    default:
-      throw new Error(`no extractor for ${absPath}`); // the walker only yields known extensions
-  }
+  const extractor = EXTRACTORS[format];
+  if (!extractor) throw new Error(`no extractor for ${absPath}`); // the walker only yields known extensions
+  const result = await extractor(buffer ?? (await readFile(absPath)));
+  return { format, ...result };
 }

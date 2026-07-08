@@ -1,21 +1,26 @@
 #!/usr/bin/env node
 // Low-priority background worker: drains the OCR queue scan.js writes (image-only PDFs),
-// rasterizes each with pdfjs + @napi-rs/canvas, OCRs the pages with tesseract.js (pure WASM,
-// fully local), and upserts the SAME (source, source_id) with an enriched text_repr. One file
-// at a time, queue rewritten after each (kill-safe at any point), throttled between files.
+// rasterizes each with pdfjs + @napi-rs/canvas, OCRs the pages with tesseract.js (WASM,
+// runs locally; the ~15MB language model is fetched once and cached), and upserts the SAME
+// (source, source_id) with an enriched text_repr. One file at a time, the queue entry is
+// removed via a fresh read-modify-write after each success (kill-safe, and safe against a
+// concurrently finishing scan.js), throttled between files.
 //
 // Scope: image-only PDFs ONLY. Standalone images are photo-exif's source ownership — OCRing
 // them here would create a second artifact for the same file under a different `source`.
 //
 // Nightly-window scheduling is config, not code — this script does a single pass and exits;
 // start/stop it on a schedule with cron or Task Scheduler. See README.md.
-import { existsSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, statSync, mkdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createWorker } from 'tesseract.js';
-import { loadDotEnvIfPresent, sourceIdFor, ingestClient } from './lib/shared.js';
+import {
+  loadDotEnvIfPresent, envNumber, textReprMaxChars, sourceIdFor, statKeyOf,
+  readJsonFile, updateJsonFile, ingestClient,
+} from './lib/shared.js';
 import { buildTextRepr } from './lib/text-repr.js';
 import { rasterizePdf } from './lib/rasterize.js';
 
@@ -32,32 +37,21 @@ const OCR_LANG = process.env.DOCUMENTS_OCR_LANG || 'eng';
 // would drop eng.traineddata into the working tree).
 const OCR_CACHE_PATH = process.env.DOCUMENTS_OCR_CACHE_PATH
   || path.join(os.homedir(), '.life-context', 'tesseract');
-// Number.isFinite, not `||` — an explicit 0 must win over the default (see scan.js).
-const rawMaxPages = Number(process.env.DOCUMENTS_OCR_MAX_PAGES);
-const OCR_MAX_PAGES = Number.isFinite(rawMaxPages) ? rawMaxPages : 20;
-const rawThrottle = Number(process.env.DOCUMENTS_OCR_THROTTLE_MS);
-const OCR_THROTTLE_MS = Number.isFinite(rawThrottle) ? rawThrottle : 1000;
-const rawMaxChars = Number(process.env.DOCUMENTS_TEXT_REPR_MAX_CHARS);
-const TEXT_REPR_MAX_CHARS = Math.min(Number.isFinite(rawMaxChars) ? rawMaxChars : 12000, 100000);
-
-// Queue shape (written by scan.js): { [relPath]: { statKey, extra } }. The stored extra is the
-// file's complete wave-1 extra — resent whole because the server's upsert overwrites
-// extra_json as one field, never merges keys.
-async function readQueue() {
-  try {
-    return JSON.parse(await readFile(OCR_QUEUE_PATH, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function writeQueue(queue) {
-  mkdirSync(path.dirname(OCR_QUEUE_PATH), { recursive: true });
-  writeFileSync(OCR_QUEUE_PATH, JSON.stringify(queue));
-}
+// Optional override for where the language model is fetched FROM (tesseract.js otherwise
+// uses its built-in CDN) — lets an air-gapped host point at a local tessdata mirror.
+const OCR_LANG_PATH = process.env.DOCUMENTS_OCR_LANG_PATH;
+const OCR_MAX_PAGES = envNumber('DOCUMENTS_OCR_MAX_PAGES', 20);
+const OCR_THROTTLE_MS = envNumber('DOCUMENTS_OCR_THROTTLE_MS', 1000);
+const TEXT_REPR_MAX_CHARS = textReprMaxChars();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function dropEntry(relPath) {
+  updateJsonFile(OCR_QUEUE_PATH, (queue) => {
+    delete queue[relPath];
+  });
 }
 
 async function main() {
@@ -70,31 +64,40 @@ async function main() {
     process.exit(1);
   }
 
-  const queue = await readQueue();
-  const entries = Object.entries(queue);
+  // Queue shape (written by scan.js): { [relPath]: { statKey, extra } }. The stored extra is
+  // the file's complete wave-1 extra — resent whole because the server's upsert overwrites
+  // extra_json as one field, never merges keys.
+  const entries = Object.entries(readJsonFile(OCR_QUEUE_PATH));
   if (!entries.length) {
     console.error('documents: OCR queue empty, nothing to do');
     return;
   }
 
   const { postIngest } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
+  const scanRootPrefix = path.resolve(SCAN_ROOT) + path.sep;
 
   // Drop stale entries BEFORE paying tesseract init: a file that moved or changed since it
   // was flagged is dropped — if it's still image-only, the next scan.js run re-flags it
   // against the new statKey.
   const live = [];
   for (const [relPath, entry] of entries) {
-    const absPath = path.join(SCAN_ROOT, relPath);
+    const absPath = path.resolve(SCAN_ROOT, relPath);
+    // The queue file is local state, but keys still must not escape the scan root — a '..'
+    // key would otherwise let a corrupted/tampered queue OCR and index arbitrary files.
+    if (!absPath.startsWith(scanRootPrefix)) {
+      console.error(`documents: dropping OCR queue entry outside the scan root: ${relPath}`);
+      dropEntry(relPath);
+      continue;
+    }
     let stat;
     try {
       stat = statSync(absPath);
     } catch {
       stat = null;
     }
-    if (!stat || `${stat.mtimeMs}:${stat.size}` !== entry.statKey) {
+    if (!stat || statKeyOf(stat) !== entry.statKey) {
       console.error(`documents: dropping stale OCR queue entry ${relPath}`);
-      delete queue[relPath];
-      writeQueue(queue);
+      dropEntry(relPath);
     } else {
       live.push({ relPath, entry, absPath });
     }
@@ -108,19 +111,23 @@ async function main() {
   let tesseract;
   try {
     mkdirSync(OCR_CACHE_PATH, { recursive: true });
-    tesseract = await createWorker(OCR_LANG, 1, { cachePath: OCR_CACHE_PATH });
+    tesseract = await createWorker(OCR_LANG, 1, {
+      cachePath: OCR_CACHE_PATH,
+      ...(OCR_LANG_PATH ? { langPath: OCR_LANG_PATH } : {}),
+    });
   } catch (err) {
     console.error('documents: tesseract failed to initialize, stopping (queue left intact)', err);
     return;
   }
 
   let done = 0;
+  let remaining = live.length;
   try {
     for (const { relPath, entry, absPath } of live) {
       let body;
       let ocrPages;
       try {
-        const { images } = await rasterizePdf(await readFile(absPath), OCR_MAX_PAGES);
+        const images = await rasterizePdf(await readFile(absPath), OCR_MAX_PAGES);
         const pages = [];
         for (let i = 0; i < images.length; i++) {
           const { data } = await tesseract.recognize(images[i]);
@@ -133,8 +140,8 @@ async function main() {
         // A single bad PDF must not loop forever — drop it loudly; scan.js re-flags it only
         // if the file itself changes.
         console.error(`documents: OCR failed for ${relPath}, dropping from queue`, err);
-        delete queue[relPath];
-        writeQueue(queue);
+        dropEntry(relPath);
+        remaining--;
         continue;
       }
 
@@ -152,11 +159,20 @@ async function main() {
           extra: { ...entry.extra, extracted_chars, truncated, needs_ocr: false, ocr_done: true, ocr_pages: ocrPages },
         });
       } catch (err) {
+        // 4xx (bar the client-retried 429) is deterministic for THIS payload — drop it or it
+        // wedges the whole queue behind it forever. Anything else means the server is down
+        // or unhappy: stop the run and leave the rest for next time.
+        if (err.status >= 400 && err.status < 500 && err.status !== 429) {
+          console.error(`documents: ingest rejected ${relPath} (${err.status}), dropping from queue`, err);
+          dropEntry(relPath);
+          remaining--;
+          continue;
+        }
         console.error(`documents: ingest failed for ${relPath}, stopping run (will resume next time)`, err);
-        break; // server unreachable — keep the entry and everything after it
+        break;
       }
-      delete queue[relPath];
-      writeQueue(queue); // after every success, not batched — kill-safe at any point
+      dropEntry(relPath); // fresh read-modify-write after every success — kill-safe at any point
+      remaining--;
       done++;
 
       await sleep(OCR_THROTTLE_MS);
@@ -165,7 +181,7 @@ async function main() {
     await tesseract.terminate();
   }
 
-  console.error(`documents: OCR'd ${done} file(s) this run, ${Object.keys(queue).length} remaining`);
+  console.error(`documents: OCR'd ${done} file(s) this run, ${remaining} remaining`);
 }
 
 main()

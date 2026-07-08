@@ -1,7 +1,8 @@
-// Shared by scan.js and ocr-worker.js. Both scripts must compute source_id identically —
-// a mismatch here would silently create duplicate artifacts instead of upserting the same one.
+// Shared by scan.js and ocr-worker.js. Both scripts must compute source_id and statKey
+// identically — a mismatch would silently create duplicate artifacts (source_id) or drop the
+// whole OCR backlog as "stale" (statKey), so both live here as the single owner.
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -15,8 +16,27 @@ export function loadDotEnvIfPresent(dir) {
     const match = /^\s*([\w.-]+)\s*=\s*(.*)?\s*$/.exec(line);
     if (!match || line.trim().startsWith('#')) continue;
     const [, key, rawValue = ''] = match;
-    if (process.env[key] === undefined) process.env[key] = rawValue.replace(/^['"]|['"]$/g, '');
+    // trim() before quote-stripping: the greedy capture keeps trailing spaces, and an
+    // invisible trailing space in LIFECONTEXT_API_KEY would 401 every request.
+    if (process.env[key] === undefined) process.env[key] = rawValue.trim().replace(/^['"]|['"]$/g, '');
   }
+}
+
+// Numeric env parsing: `|| dflt` would override an explicit 0 (0 is falsy), and Number('')
+// is 0 — so a set-but-blank line must mean "unset", while an explicit 0 is a real value.
+export function envNumber(name, dflt) {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return dflt;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : dflt;
+}
+
+// text_repr sizing, shared so wave-1 (scan.js) and the OCR wave (ocr-worker.js) can never
+// drift onto different budgets for the same artifact. The char ceiling plus the byte cap in
+// text-repr.js together guarantee any single payload fits the server's 256KB request limit.
+export const TEXT_REPR_CEILING_CHARS = 100000;
+export function textReprMaxChars() {
+  return Math.min(envNumber('DOCUMENTS_TEXT_REPR_MAX_CHARS', 12000), TEXT_REPR_CEILING_CHARS);
 }
 
 export const DOCUMENT_EXTENSIONS = new Set(['.pdf', '.docx', '.xlsx', '.pptx']);
@@ -29,7 +49,16 @@ export const DOCUMENT_EXTENSIONS = new Set(['.pdf', '.docx', '.xlsx', '.pptx']);
 // same name in different subfolders (e.g. two years' "report.pdf") collide onto the same
 // source_id and silently overwrite each other via upsert instead of being two artifacts.
 export async function* walkDocumentFiles(root, dir = root) {
-  const entries = await readdir(dir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    // One unlistable subdirectory (Windows "System Volume Information", an EPERM ACL) must
+    // skip that subtree, not abort the walk — the throw would surface at the caller's
+    // for-await, outside its per-file error handling.
+    console.error(`documents: skipping unreadable directory ${dir}`, err);
+    return;
+  }
   for (const entry of entries) {
     const absPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
@@ -48,15 +77,60 @@ export function sourceIdFor(relPath) {
   return relPath;
 }
 
-export function contentHashOfFile(absPath) {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('sha256');
-    const stream = createReadStream(absPath);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('end', () => resolve(hash.digest('hex')));
-    stream.on('error', reject);
-  });
+// The unchanged-file cache key AND the OCR-queue staleness key — scan.js writes it, the
+// worker compares it. Changing the format in one place only would silently drop the whole
+// OCR backlog as "stale".
+export function statKeyOf(stat) {
+  return `${stat.mtimeMs}:${stat.size}`;
 }
+
+// Every extractor already buffers the whole file (bounded by DOCUMENTS_MAX_FILE_MB), so the
+// hash reuses that buffer instead of a second full read from disk.
+export function contentHashOfBuffer(buffer) {
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
+// --- JSON state files (manifest, OCR queue) ---
+
+export function readJsonFile(filePath) {
+  let raw;
+  try {
+    raw = readFileSync(filePath, 'utf8');
+  } catch {
+    return {}; // no state file yet — first run
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    // A corrupt state file must be loud: for the OCR queue it is the only record of pending
+    // work, so silently treating it as empty would discard the backlog with no trace.
+    console.error(`documents: state file ${filePath} is corrupt, starting empty`, err);
+    return {};
+  }
+}
+
+// Atomic write (temp + rename in the same directory) so a kill mid-write can never leave
+// truncated JSON — "kill-safe at any point" is only true if the write itself is.
+export function writeJsonFile(filePath, value) {
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(value));
+  renameSync(tmpPath, filePath);
+}
+
+// Read-mutate-write against the CURRENT file contents, not a run-start snapshot. scan.js and
+// ocr-worker.js can be scheduled to overlap (README's cron staggers them 15 minutes apart —
+// a backfill scan runs longer); each side applying its own adds/deletes to a fresh read
+// shrinks the lost-update window from a whole run to microseconds. (Fully eliminating it
+// needs per-entry files — doc 04 §7's spool caveat — not worth it yet.)
+export function updateJsonFile(filePath, mutate) {
+  const value = readJsonFile(filePath);
+  mutate(value);
+  writeJsonFile(filePath, value);
+  return value;
+}
+
+// --- ingest client ---
 
 export const BATCH_MAX = 100; // contract cap (docs/04-connector-contract.md §2)
 // The ingest API rejects request bodies over 256KB; document text_reprs are big enough that
@@ -64,9 +138,8 @@ export const BATCH_MAX = 100; // contract cap (docs/04-connector-contract.md §2
 // by serialized size as well as count. 200KB leaves margin for the envelope and JSON escaping.
 export const BATCH_BYTE_BUDGET = 200 * 1024;
 
-// Groups pending items ({ payload, ... }) into batches that respect BOTH caps. A single
-// payload can never exceed the budget on its own: text_repr is capped at
-// DOCUMENTS_TEXT_REPR_MAX_CHARS (hard ceiling 100,000 chars — see scan.js config parsing).
+// Groups pending items ({ payload, ... }) into batches that respect BOTH caps. Single-payload
+// size is bounded by text-repr.js's byte cap (PAYLOAD_TEXT_BYTE_CAP < this budget).
 export function chunkByBudget(pending) {
   const groups = [];
   let group = [];
@@ -85,26 +158,44 @@ export function chunkByBudget(pending) {
   return groups;
 }
 
+const RETRY_DELAYS_MS = [1000, 2000, 4000]; // doc 04 §7: respect 429s with exponential backoff
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function ingestClient({ url, apiKey }) {
-  async function postIngest(payload) {
-    const res = await fetch(`${url}/api/v1/ingest`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error(`ingest returned ${res.status}`);
-    return res.json();
+  // Throws Error with .status set (0 for network errors) so callers can tell a per-item
+  // 4xx from "server unreachable" and react differently.
+  async function post(route, body) {
+    for (let attempt = 0; ; attempt++) {
+      let res;
+      try {
+        res = await fetch(`${url}${route}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        const wrapped = new Error(`ingest ${route} unreachable: ${err.message}`);
+        wrapped.status = 0;
+        throw wrapped;
+      }
+      if (res.status === 429 && attempt < RETRY_DELAYS_MS.length) {
+        await sleep(RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      if (!res.ok) {
+        const err = new Error(`ingest ${route} returned ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      return res.json();
+    }
   }
 
-  async function postIngestBatch(payloads) {
-    const res = await fetch(`${url}/api/v1/ingest/batch`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
-      body: JSON.stringify({ artifacts: payloads }),
-    });
-    if (!res.ok) throw new Error(`ingest batch returned ${res.status}`);
-    return res.json();
-  }
-
-  return { postIngest, postIngestBatch };
+  return {
+    postIngest: (payload) => post('/api/v1/ingest', payload),
+    postIngestBatch: (payloads) => post('/api/v1/ingest/batch', { artifacts: payloads }),
+  };
 }

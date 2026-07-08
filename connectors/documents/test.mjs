@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
-import { chunkByBudget, BATCH_MAX, BATCH_BYTE_BUDGET, DOCUMENT_EXTENSIONS } from './lib/shared.js';
-import { truncateHeadTail, collapseWhitespace, buildHeader } from './lib/text-repr.js';
+import { chunkByBudget, BATCH_MAX, BATCH_BYTE_BUDGET, DOCUMENT_EXTENSIONS, statKeyOf, envNumber } from './lib/shared.js';
+import { truncateHeadTail, collapseWhitespace, buildHeader, buildTextRepr } from './lib/text-repr.js';
 import { parsePdfDate, needsOcr } from './lib/pdf.js';
 import { parseCoreXml, extractPptxText, decodeXmlEntities, loadZip } from './lib/ooxml.js';
 import { formatOf } from './lib/extract.js';
@@ -128,7 +128,7 @@ function run(script, env) {
 
 // --- pure-function tests ---
 
-test('truncateHeadTail: passthrough under cap, head+tail split over it', () => {
+test('truncateHeadTail: passthrough under cap, head+tail split over it, cap 0 drops the body', () => {
   assert.deepEqual(truncateHeadTail('short', 100), { text: 'short', truncated: false });
   const long = 'A'.repeat(900) + 'MIDDLE' + 'Z'.repeat(900);
   const { text, truncated } = truncateHeadTail(long, 200);
@@ -137,6 +137,32 @@ test('truncateHeadTail: passthrough under cap, head+tail split over it', () => {
   assert.ok(text.startsWith('AAA'), 'head preserved');
   assert.ok(text.endsWith('ZZZ'), 'tail preserved');
   assert.match(text, /\[\.\.\. \d+ chars omitted \.\.\.\]/);
+  // Regression: slice(-0) returns the WHOLE string — cap 0 must drop the body, not leak it.
+  assert.deepEqual(truncateHeadTail(long, 0), { text: '', truncated: true });
+});
+
+test('buildTextRepr: header survives a tiny cap intact; body capped; byte backstop on multibyte text', () => {
+  const body = 'word '.repeat(2000);
+  const capped = buildTextRepr('pdf', { page_count: 2 }, 'a.pdf', body, 120);
+  assert.ok(capped.text_repr.startsWith('Document (PDF, 2 pages): a.pdf'));
+  assert.ok(capped.text_repr.length <= 200, 'body honors the cap');
+  assert.equal(capped.truncated, true);
+  assert.equal(capped.extracted_chars, body.length);
+  // 100k 3-byte CJK chars would serialize to ~300KB; the byte backstop must keep the payload text under ~150KB.
+  const cjk = buildTextRepr('pdf', {}, 'b.pdf', '漢'.repeat(100000), 100000);
+  assert.ok(Buffer.byteLength(JSON.stringify(cjk.text_repr)) <= 150 * 1024);
+  assert.equal(cjk.truncated, true);
+});
+
+test('envNumber: blank means unset, explicit zero is honored', () => {
+  process.env.TEST_ENV_NUM = '';
+  assert.equal(envNumber('TEST_ENV_NUM', 50), 50, 'set-but-blank falls back to the default');
+  process.env.TEST_ENV_NUM = '0';
+  assert.equal(envNumber('TEST_ENV_NUM', 50), 0, 'explicit 0 must win over the default');
+  process.env.TEST_ENV_NUM = 'abc';
+  assert.equal(envNumber('TEST_ENV_NUM', 50), 50);
+  delete process.env.TEST_ENV_NUM;
+  assert.equal(envNumber('TEST_ENV_NUM', 50), 50);
 });
 
 test('collapseWhitespace: collapses runs and blank-line stacks, keeps line structure', () => {
@@ -161,6 +187,11 @@ test('chunkByBudget: splits by serialized size and by the 100-item cap', () => {
   assert.equal(tinyGroups.length, 2);
   assert.equal(tinyGroups[0].length, BATCH_MAX);
   assert.ok(BATCH_BYTE_BUDGET < 256 * 1024);
+
+  // A solo item over the budget still forms its own group (never dropped, never looped).
+  const solo = chunkByBudget([{ payload: { text_repr: 'x'.repeat(BATCH_BYTE_BUDGET + 1024) } }]);
+  assert.equal(solo.length, 1);
+  assert.equal(solo[0].length, 1);
 });
 
 test('extension dispatch: known extensions map, case-insensitively; others are not walked', () => {
@@ -173,6 +204,7 @@ test('extension dispatch: known extensions map, case-insensitively; others are n
 test('parsePdfDate: offsets, quote quirks, partial dates, garbage', () => {
   assert.equal(parsePdfDate("D:20190304143000+05'30'").toISOString(), '2019-03-04T09:00:00.000Z');
   assert.equal(parsePdfDate('D:20190304143000Z').toISOString(), '2019-03-04T14:30:00.000Z');
+  assert.equal(parsePdfDate("D:20190304143000Z00'00'").toISOString(), '2019-03-04T14:30:00.000Z'); // spec-legal UTC form (iText)
   assert.equal(parsePdfDate('D:2019').toISOString(), '2019-01-01T00:00:00.000Z');
   assert.equal(parsePdfDate('20190304143000Z').toISOString(), '2019-03-04T14:30:00.000Z'); // D: optional in the wild
   assert.equal(parsePdfDate('D:16010101000000Z'), null, 'epoch garbage rejected');
@@ -181,7 +213,7 @@ test('parsePdfDate: offsets, quote quirks, partial dates, garbage', () => {
   assert.equal(parsePdfDate(undefined), null);
 });
 
-test('parseCoreXml: valid W3CDTF + title, missing element, malformed date', async () => {
+test('parseCoreXml: valid W3CDTF + title, missing element, malformed date, clamps, missing-TZ-as-UTC', async () => {
   const ok = await loadZip(await makePptx({ slides: [['x']], created: '2021-06-15T10:00:00Z', title: 'Deck &amp; Notes' }));
   const core = await parseCoreXml(ok);
   assert.equal(core.created.toISOString(), '2021-06-15T10:00:00.000Z');
@@ -190,6 +222,13 @@ test('parseCoreXml: valid W3CDTF + title, missing element, malformed date', asyn
   assert.deepEqual(await parseCoreXml(none), { created: null, title: null });
   const bad = await loadZip(await makePptx({ slides: [['x']], created: 'garbage' }));
   assert.equal((await parseCoreXml(bad)).created, null);
+  const future = await loadZip(await makePptx({ slides: [['x']], created: '2999-01-01T00:00:00Z' }));
+  assert.equal((await parseCoreXml(future)).created, null, 'future dates rejected');
+  const epoch = await loadZip(await makePptx({ slides: [['x']], created: '1989-06-01T00:00:00Z' }));
+  assert.equal((await parseCoreXml(epoch)).created, null, 'pre-1990 template epochs rejected');
+  // Lenient writers omit the TZ designator; new Date() would read that as LOCAL time.
+  const noTz = await loadZip(await makePptx({ slides: [['x']], created: '2021-06-15T10:00:00' }));
+  assert.equal((await parseCoreXml(noTz)).created.toISOString(), '2021-06-15T10:00:00.000Z', 'missing TZ treated as UTC');
 });
 
 test('needsOcr: thresholds', () => {
@@ -199,7 +238,7 @@ test('needsOcr: thresholds', () => {
   assert.equal(needsOcr('', 0), false, 'zero pages is not a scan');
 });
 
-test('extractPptxText: slide order (slide10 after slide9), entity decode, slide numbering', async () => {
+test('extractPptxText: slide order (slide10 after slide9), run/paragraph joining, entity decode', async () => {
   const zip = new JSZip();
   for (let i = 1; i <= 10; i++) zip.file(`ppt/slides/slide${i}.xml`, `<p:sld xmlns:a="x"><a:t>Slide body ${i} &amp; more</a:t></p:sld>`);
   const { text, slideCount } = await extractPptxText(await loadZip(await zip.generateAsync({ type: 'nodebuffer' })));
@@ -207,7 +246,17 @@ test('extractPptxText: slide order (slide10 after slide9), entity decode, slide 
   const lines = text.split('\n');
   assert.equal(lines[0], 'Slide 1: Slide body 1 & more');
   assert.equal(lines[9], 'Slide 10: Slide body 10 & more');
+
+  // PowerPoint splits words across runs within a paragraph — they must join with NO space,
+  // while separate paragraphs (and text boxes) join with one.
+  const split = new JSZip();
+  split.file('ppt/slides/slide1.xml', '<p:sld xmlns:a="x"><a:p><a:r><a:t>inter</a:t></a:r><a:r><a:t>national</a:t></a:r></a:p><a:p><a:t>Second para</a:t></a:p></p:sld>');
+  const joined = await extractPptxText(await loadZip(await split.generateAsync({ type: 'nodebuffer' })));
+  assert.equal(joined.text, 'Slide 1: international Second para');
+
   assert.equal(decodeXmlEntities('&lt;a&gt; &#65;&#x42;'), '<a> AB');
+  assert.equal(decodeXmlEntities('&#38;lt;'), '&lt;', 'numeric & must not be re-decoded by the named pass');
+  assert.equal(decodeXmlEntities('x &#x110000; y'), 'x &#x110000; y', 'out-of-range code point kept raw, not RangeError');
 });
 
 // --- end-to-end: scan.js against generated fixtures + mock ingest server ---
@@ -282,6 +331,9 @@ test('scan.js: mixed fixture dir → correct payloads per format; unchanged-file
   assert.equal(pptx.occurred_at, undefined, 'no metadata date -> omitted, never guessed from mtime');
   assert.equal(pptx.extra.slide_count, 2);
 
+  // Documents with a real text layer must stay OUT of the OCR queue.
+  assert.deepEqual(JSON.parse(readFileSync(queuePath, 'utf8')), {});
+
   // Re-run with the same (populated) manifest: nothing changed on disk, so nothing re-sent.
   const { server: server2, port: port2, requests: requests2 } = await startMockServer(batchOkHandler);
   const rerun = await run('scan.js', { ...env, LIFECONTEXT_URL: `http://127.0.0.1:${port2}` });
@@ -315,8 +367,64 @@ test('scan.js: image-only PDF ingests thin with needs_ocr and lands in the OCR q
   const queue = JSON.parse(readFileSync(queuePath, 'utf8'));
   const stat = statSync(path.join(tmp, 'scanned.pdf'));
   assert.deepEqual(Object.keys(queue), ['scanned.pdf']);
-  assert.equal(queue['scanned.pdf'].statKey, `${stat.mtimeMs}:${stat.size}`);
-  assert.equal(queue['scanned.pdf'].extra.needs_ocr, true, 'queue carries the full wave-1 extra for the whole-field upsert');
+  assert.equal(queue['scanned.pdf'].statKey, statKeyOf(stat));
+  // The FULL wave-1 extra, not a subset — the worker resends it whole (extra_json overwrites whole).
+  assert.deepEqual(queue['scanned.pdf'].extra, artifact.extra);
+});
+
+test('scan.js: per-item batch failure is not manifested (retried next run) while successes are', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'documents-item-fail-'));
+  writeFileSync(path.join(tmp, 'bad.docx'), await makeDocx({ paragraphs: ['First document body.'] }));
+  writeFileSync(path.join(tmp, 'good.docx'), await makeDocx({ paragraphs: ['Second document body.'] }));
+
+  const { server, port } = await startMockServer((req, body, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      summary: {},
+      // Index-aligned per-item results, one failed — mirrors src/ingest.js's batch shape.
+      results: body.artifacts.map((a, i) => (a.source_id === 'bad.docx'
+        ? { error: 'validation', issues: [{ path: ['text_repr'] }] }
+        : { id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })),
+    }));
+  });
+
+  const manifestPath = path.join(tmp, 'manifest.json');
+  const result = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    DOCUMENTS_SCAN_ROOT: tmp,
+    DOCUMENTS_MANIFEST_PATH: manifestPath,
+    DOCUMENTS_OCR_QUEUE_PATH: path.join(tmp, 'ocr-queue.json'),
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /item failed bad\.docx/);
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert.deepEqual(Object.keys(manifest), ['good.docx'], 'failed item must be retried next run, not cached as done');
+});
+
+test('scan.js: DOCUMENTS_TEXT_REPR_MAX_CHARS caps text_repr end-to-end with the header intact', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'documents-truncate-'));
+  writeFileSync(path.join(tmp, 'long.docx'), await makeDocx({ paragraphs: [`start ${'lorem ipsum '.repeat(500)}end`] }));
+
+  const { server, port, requests } = await startMockServer(batchOkHandler);
+  const result = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    DOCUMENTS_SCAN_ROOT: tmp,
+    DOCUMENTS_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
+    DOCUMENTS_OCR_QUEUE_PATH: path.join(tmp, 'ocr-queue.json'),
+    DOCUMENTS_TEXT_REPR_MAX_CHARS: '200',
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  const [artifact] = requests[0].body.artifacts;
+  assert.ok(artifact.text_repr.startsWith('Document (DOCX): long.docx'), 'header survives truncation whole');
+  assert.ok(artifact.text_repr.length <= 300, `text_repr should honor the cap, got ${artifact.text_repr.length}`);
+  assert.equal(artifact.extra.truncated, true);
+  assert.ok(artifact.extra.extracted_chars > 5000, 'extracted_chars records the full pre-truncation length');
 });
 
 test('scan.js: same filename in different subdirectories gets distinct source_ids', async () => {
@@ -361,7 +469,14 @@ test('scan.js: oversize file skipped without ingest or manifest entry', async ()
   assert.equal(result.status, 0, result.stderr);
   assert.equal(requests.length, 0);
   assert.match(result.stderr, /oversize/);
-  assert.deepEqual(JSON.parse(readFileSync(manifestPath, 'utf8')), {}, 'not manifested — raising the limit later picks it up');
+  // Manifest is written per successful batch; a run that ingested nothing writes nothing.
+  let manifest = {};
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch {
+    // no file — equivalent to an empty manifest
+  }
+  assert.deepEqual(manifest, {}, 'not manifested — raising the limit later picks it up');
 });
 
 test('ocr-worker.js: stale statKey entry dropped without ingest; queue rewritten', async () => {
