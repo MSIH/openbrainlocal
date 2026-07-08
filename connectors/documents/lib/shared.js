@@ -42,7 +42,8 @@ export function textReprMaxChars() {
 export const DOCUMENT_EXTENSIONS = new Set(['.pdf', '.docx', '.xlsx', '.pptx']);
 
 // Manual recursive walk rather than fs.readdir's `recursive` option — that option needs
-// Node 20.1+ and this connector declares a genuinely-true `>=18` floor.
+// Node 20.1+ and this connector's floor is 20.0 (pdfjs-dist declares >=20; unlike its
+// siblings this connector can't honestly claim 18).
 //
 // `root` stays fixed across the whole recursion (only `dir` advances) — relPath must always be
 // relative to the original scan root, never to the current subdirectory, or two files with the
