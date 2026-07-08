@@ -74,8 +74,46 @@ After the PR is created, request a Copilot review (`--reviewer @copilot` at crea
 ## Step 6 — Monitor & resolve reviews (second-level)
 Poll up to ~10 min for reviews (use the Monitor tool, not a sleep loop). When they arrive, fetch all three endpoints — formal reviews, inline thread comments, PR conversation comments — and triage each: **Accept** (fix; ≥7 before merge), **Defer** (valid, out of scope → follow-up issue, link it), **Dismiss** (invalid / violates a repo convention → cite the rule). Persona findings outrank bot findings on repo conventions (e.g., a bot suggesting a committed `.env`, hardcoded key, or non-`BigInt` vec PK is wrong here). Apply mechanical Accepts, rebuild/smoke, push, resolve every thread. Hard cap: one Copilot re-request per invocation.
 
-## Step 7 — Post-merge cleanup (automatic, no prompt)
-Once the PR is MERGED (gh is source of truth): from the primary checkout `git checkout main && git pull origin main`; `git worktree remove <path> --force` (guard: state==MERGED, no uncommitted **tracked** changes); `git worktree prune`; `git branch -D <branch>`; `git fetch origin --prune`. Never remove a worktree whose PR isn't merged.
+## Step 7 — Post-merge cleanup (automatic — no prompt)
+
+Once a PR opened via this flow is **merged**, clean up its worktree **immediately and without asking**. The user has standing approval for post-merge worktree cleanup — do NOT prompt, do NOT offer; just do it. Stale worktrees and merged branches otherwise pile up (see `git worktree list`).
+
+Trigger this step when you observe the PR is merged: the user says it merged / "merge it", you just ran `gh pr merge`, or a poll returns `state: MERGED`.
+
+```bash
+set -euo pipefail   # any failed precondition (gh, cd, pull) aborts before we touch the worktree
+PR_NUMBER=${PR_NUMBER:-$(gh pr view --json number --jq .number)}
+STATE=$(gh pr view "$PR_NUMBER" --json state --jq .state)          # gh is the source of truth
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+WORKTREE=$(git rev-parse --show-toplevel)
+MAIN=$(git worktree list --porcelain | sed -n '1s/^worktree //p')  # primary checkout
+
+# 1. Hard guards — never remove a worktree whose PR is not merged, or one with uncommitted TRACKED work.
+[ "$STATE" = "MERGED" ] || { echo "PR #$PR_NUMBER state=$STATE (not MERGED) — skip cleanup"; exit 0; }
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "Worktree has uncommitted tracked changes — STOP, report to user, do NOT remove"; exit 1
+fi
+
+# 2. Move to the primary checkout and sync the default branch (CLAUDE.md post-merge step).
+cd "$MAIN" && git checkout 2.0 && git pull origin 2.0
+
+# 3. Remove the merged worktree, then prune the branch.
+#    --force clears disposable UNTRACKED artifacts (PR-body temp files, .pre-pr-review-done marker);
+#    tracked changes were already rejected by the guard above.
+git worktree remove "$WORKTREE" --force
+git worktree prune
+# Branch is safe to force-delete: gh confirmed MERGED, and a squash-merge leaves the branch tip
+# unreachable from 2.0 (so plain `git branch -d` would wrongly refuse).
+git branch -D "$BRANCH" 2>/dev/null || true
+git fetch origin --prune      # drop the remote-tracking ref if GitHub auto-deleted the head branch
+```
+
+Rules:
+- **No confirmation prompt.** This is the default, not a gate. Asking "should I remove the worktree?" after a merge is exactly what this step exists to eliminate.
+- Guard on `state == MERGED` first (via `gh`, the source of truth). NEVER remove a worktree whose PR is still open or was closed unmerged.
+- Refuse on uncommitted **tracked** changes (`git status --porcelain --untracked-files=no` non-empty) — STOP and report; do not `--force` over real work. Disposable untracked artifacts (temp PR-body files, markers) are fine to clear.
+- Always `cd "$MAIN"` before `git worktree remove` — you cannot remove the worktree you are standing in.
+- `git branch -D` is correct here only because `gh` confirmed the merge; outside that guard, never force-delete a branch.
 
 ## Rules
 - Do not open the PR yourself in this skill — output + gate-clear only.
