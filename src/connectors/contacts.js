@@ -112,7 +112,7 @@ function finalizeCard(lines, raw) {
       case 'TEL': c.phones.push(value); break;
       case 'BDAY': c.birthday = value; break;
       case 'ADR': { const a = value.split(';').filter(Boolean).join(', '); c.address = a; c.addresses.push(a); break; }
-      case 'ORG': { const [, department] = value.split(';'); c.org = value.split(';').filter(Boolean).join(', '); if (department) c.department = department; break; }
+      case 'ORG': { const parts = value.split(';'); c.org = parts.filter(Boolean).join(', '); if (parts[1]) c.department = parts[1]; break; }
       case 'TITLE': c.title = value; break;
       case 'ROLE': c.role = value; break;
       case 'NOTE': c.note = value; break;
@@ -126,8 +126,8 @@ function finalizeCard(lines, raw) {
       case 'RELATED': c.relatedNames.push({ type: paramValue(params, 'TYPE') || label || 'Other', name: value }); break; // vCard 4.0
       case 'IMPP': c.im.push(parseImpp(value, params)); break;
       case 'X-SOCIALPROFILE': c.socialProfiles.push({ service: paramValue(params, 'TYPE'), url: value }); break;
-      case 'X-PHONETIC-FIRST-NAME': c.phonetic = { ...(c.phonetic || {}), given: value }; break;
-      case 'X-PHONETIC-LAST-NAME': c.phonetic = { ...(c.phonetic || {}), family: value }; break;
+      case 'X-PHONETIC-FIRST-NAME': (c.phonetic ??= {}).given = value; break;
+      case 'X-PHONETIC-LAST-NAME': (c.phonetic ??= {}).family = value; break;
       case 'X-ABSHOWAS': if (value.toUpperCase() === 'COMPANY') c.isCompany = true; break;
       case 'KIND': if (value.toLowerCase() === 'org') c.isCompany = true; break;
       default:
