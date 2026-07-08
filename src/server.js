@@ -25,7 +25,7 @@ import { z } from "zod";
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER } from './config.js';
+import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER } from './config.js';
 import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES } from './search.js';
@@ -242,9 +242,9 @@ function buildMcpServer() {
 // --- EXPRESS APP ---
 const app = express();
 
-// If deployed behind a reverse proxy (nginx, Cloudflare), uncomment so rate limiting
-// and IP logging use the real client IP instead of the proxy's:
-// app.set('trust proxy', 1);
+// Behind a reverse proxy (Cloudflare Tunnel — docs/07-cloudflare-tunnel-setup.md) rate limiting
+// and IP logging must use the real client IP from X-Forwarded-For, not the proxy's 127.0.0.1.
+app.set('trust proxy', TRUST_PROXY);
 
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
