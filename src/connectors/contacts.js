@@ -10,8 +10,13 @@
  * resolves — accepting the occasional manual merge over chasing full auto-resolution.
  *   Run:  npm run import:contacts <file.vcf>
  *
- * Hand-rolled minimal vCard parser (built-ins over deps): the handful of fields we need
- * plus RFC line-unfolding is simpler than a dependency.
+ * Hand-rolled minimal vCard parser (built-ins over deps): RFC line-unfolding plus a
+ * connector-agnostic contact superset (docs/03-ob2-design.md §2.2) that Apple/Google/Android
+ * exports map onto. Apple 3.0 groups labeled properties under an `itemN.` prefix and carries
+ * an `X-ABLabel` sibling (e.g. `item1.X-ABDATE` + `item1.X-ABLabel:_$!<Anniversary>!$_`); we
+ * split the group prefix off the property name and pair each value with its label after the
+ * whole card is read (order-independent). vCard 4.0 equivalents (ANNIVERSARY/RELATED/NICKNAME)
+ * are read by property name too, so both versions land in the same shape.
  */
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -24,60 +29,174 @@ import { embedToFloat32 } from '../embeddings.js';
 const findBySource = db.prepare('SELECT id FROM artifacts WHERE source = ? AND source_id = ?');
 const findByHash = db.prepare('SELECT id FROM artifacts WHERE content_hash = ? LIMIT 1');
 
+// Legacy single-property IM extensions (pre-IMPP). service = the tag after `X-`.
+const LEGACY_IM_PROPS = new Set([
+  'X-AIM', 'X-MSN', 'X-YAHOO', 'X-ICQ', 'X-JABBER', 'X-SKYPE', 'X-SKYPE-USERNAME', 'X-GTALK', 'X-GADUGADU', 'X-GROUPWISE',
+]);
+
 // Single-pass unescape: decode each escape once so a literal escaped backslash (\\n) isn't
 // re-interpreted by a later pass.
 const unescape = (v) => v.replace(/\\([nN,;\\])/g, (_, ch) => (ch === 'n' || ch === 'N' ? '\n' : ch));
 
+// Apple wraps its built-in label tokens as `_$!<Anniversary>!$_`; custom labels are stored
+// verbatim. Decode the wrapper, pass everything else through unchanged.
+export function decodeAppleLabel(label) {
+  if (!label) return label;
+  const m = label.match(/^_\$!<(.*)>!\$_$/);
+  return m ? m[1] : label;
+}
+
+// Split a vCard property head into an optional `itemN` group, the uppercased property name,
+// and its params ([{key, value}], keys uppercased; keys may repeat, e.g. TYPE=HOME;TYPE=CELL).
+function splitProp(head) {
+  const tokens = head.split(';');
+  let name = tokens[0];
+  let group = null;
+  const gm = name.match(/^(item\d+)\.(.+)$/i);
+  if (gm) { group = gm[1].toLowerCase(); name = gm[2]; }
+  const params = tokens.slice(1).map((t) => {
+    const eq = t.indexOf('=');
+    return eq === -1
+      ? { key: t.toUpperCase(), value: '' }
+      : { key: t.slice(0, eq).toUpperCase(), value: t.slice(eq + 1) };
+  });
+  return { group, prop: name.toUpperCase(), params };
+}
+
+const paramValue = (params, key) => {
+  const p = params.find((x) => x.key === key.toUpperCase());
+  return p ? p.value : null;
+};
+
+// vCard date encodings vary (19930808, 1993-08-08, --0808); normalize a full YYYYMMDD/
+// YYYY-MM-DD to dashed form for the embedded text, pass anything else through untouched.
+// The raw value is kept in the structured `dates[]` field — this is display-only.
+function formatVcardDate(v) {
+  const m = String(v).match(/^(\d{4})-?(\d{2})-?(\d{2})$/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : v;
+}
+
+// An IMPP value is a URI (`xmpp:user@host`, `aim:goim?screenname=foo`); the service comes from
+// the X-SERVICE-TYPE param when present, else the URI scheme. handle = the part after the scheme.
+function parseImpp(value, params) {
+  const colon = value.indexOf(':');
+  const scheme = colon === -1 ? null : value.slice(0, colon);
+  const handle = colon === -1 ? value : value.slice(colon + 1);
+  return { service: paramValue(params, 'X-SERVICE-TYPE') || scheme, handle };
+}
+
+// Build the connector-agnostic contact object from a card's parsed property lines. Labels are
+// resolved first (a group's X-ABLabel may precede OR follow its value line), then each line is
+// routed. New list fields default to []; scalar fields are absent unless present. `address`,
+// `org` (scalars) are kept as before for back-compat; `addresses[]` carries the full list.
+function finalizeCard(lines, raw) {
+  const c = {
+    emails: [], phones: [], addresses: [], urls: [], dates: [], relatedNames: [],
+    categories: [], nicknames: [], im: [], socialProfiles: [], raw,
+  };
+  const groupLabels = {};
+  for (const l of lines) {
+    if (l.group && l.prop === 'X-ABLABEL') groupLabels[l.group] = decodeAppleLabel(l.value);
+  }
+  for (const { group, prop, params, value } of lines) {
+    const label = group ? groupLabels[group] : null;
+    switch (prop) {
+      case 'FN': c.fn = value; break;
+      case 'N': {
+        const [family, given, additional, prefix, suffix] = value.split(';');
+        c.name = { family, given, additional, prefix, suffix };
+        if (!c.fn) c.fn = [given, family].filter(Boolean).join(' ').trim() || value;
+        break;
+      }
+      case 'EMAIL': c.emails.push(value); break;
+      case 'TEL': c.phones.push(value); break;
+      case 'BDAY': c.birthday = value; break;
+      case 'ADR': { const a = value.split(';').filter(Boolean).join(', '); c.address = a; c.addresses.push(a); break; }
+      case 'ORG': { const parts = value.split(';'); c.org = parts.filter(Boolean).join(', '); if (parts[1]) c.department = parts[1]; break; }
+      case 'TITLE': c.title = value; break;
+      case 'ROLE': c.role = value; break;
+      case 'NOTE': c.note = value; break;
+      case 'UID': c.uid = value; break;
+      case 'NICKNAME': for (const n of value.split(',').map((s) => s.trim()).filter(Boolean)) c.nicknames.push(n); break;
+      case 'URL': c.urls.push(value); break;
+      case 'CATEGORIES': for (const g of value.split(',').map((s) => s.trim()).filter(Boolean)) c.categories.push(g); break;
+      case 'X-ABDATE': c.dates.push({ type: label || 'Other', value }); break;
+      case 'ANNIVERSARY': c.dates.push({ type: 'Anniversary', value }); break; // vCard 4.0
+      case 'X-ABRELATEDNAMES': c.relatedNames.push({ type: label || 'Other', name: value }); break;
+      case 'RELATED': c.relatedNames.push({ type: paramValue(params, 'TYPE') || label || 'Other', name: value }); break; // vCard 4.0
+      case 'IMPP': c.im.push(parseImpp(value, params)); break;
+      case 'X-SOCIALPROFILE': c.socialProfiles.push({ service: paramValue(params, 'TYPE'), url: value }); break;
+      case 'X-PHONETIC-FIRST-NAME': (c.phonetic ??= {}).given = value; break;
+      case 'X-PHONETIC-LAST-NAME': (c.phonetic ??= {}).family = value; break;
+      case 'X-ABSHOWAS': if (value.toUpperCase() === 'COMPANY') c.isCompany = true; break;
+      case 'KIND': if (value.toLowerCase() === 'org') c.isCompany = true; break;
+      default:
+        if (LEGACY_IM_PROPS.has(prop)) c.im.push({ service: prop.replace(/^X-/, '').replace(/-USERNAME$/, ''), handle: value });
+        break;
+    }
+  }
+  return c;
+}
+
 /**
  * Parse vCard text into structured contact objects. Exported for unit testing.
- * Handles RFC line-folding (continuation lines begin with space/tab) and multi-valued
- * EMAIL/TEL. Returns [{ fn, emails[], phones[], birthday, address, org, note, uid, raw }].
+ * Handles RFC line-folding (continuation lines begin with space/tab), the Apple `itemN.` group
+ * prefix, and multi-valued properties. Returns the connector-agnostic superset objects
+ * (see finalizeCard): { fn, name, emails[], phones[], addresses[], address, org, title, role,
+ * birthday, dates[], relatedNames[], categories[], nicknames[], urls[], im[], socialProfiles[],
+ * phonetic, isCompany, note, uid, raw }.
  */
 export function parseVCards(text) {
   // Unfold folded lines, then normalize line endings.
   const unfolded = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n[ \t]/g, '');
   const cards = [];
-  let cur = null;
+  let lines = null;    // parsed property lines of the current card
+  let raw = null;      // trimmed raw lines, joined at END for content_hash
   for (const line of unfolded.split('\n')) {
     const trimmed = line.trim();
-    if (/^BEGIN:VCARD$/i.test(trimmed)) { cur = { emails: [], phones: [], raw: [trimmed] }; continue; }
-    if (!cur) continue;
-    cur.raw.push(trimmed);
-    if (/^END:VCARD$/i.test(trimmed)) { cur.raw = cur.raw.join('\n'); cards.push(cur); cur = null; continue; }
+    if (/^BEGIN:VCARD$/i.test(trimmed)) { lines = []; raw = [trimmed]; continue; }
+    if (lines == null) continue;
+    raw.push(trimmed);
+    if (/^END:VCARD$/i.test(trimmed)) { cards.push(finalizeCard(lines, raw.join('\n'))); lines = null; raw = null; continue; }
 
     const colon = line.indexOf(':');
     if (colon === -1) continue;
-    const namePart = line.slice(0, colon);
     const value = unescape(line.slice(colon + 1).trim());
     if (!value) continue;
-    const prop = namePart.split(';')[0].toUpperCase(); // strip params
-    switch (prop) {
-      case 'FN': cur.fn = value; break;
-      case 'N': if (!cur.fn) { const [family, given] = value.split(';'); cur.fn = [given, family].filter(Boolean).join(' ').trim() || value; } break;
-      case 'EMAIL': cur.emails.push(value); break;
-      case 'TEL': cur.phones.push(value); break;
-      case 'BDAY': cur.birthday = value; break;
-      case 'ADR': cur.address = value.split(';').filter(Boolean).join(', '); break;
-      case 'ORG': cur.org = value.split(';').filter(Boolean).join(', '); break;
-      case 'TITLE': cur.title = value; break;
-      case 'NOTE': cur.note = value; break;
-      case 'UID': cur.uid = value; break;
-      default: break;
-    }
+    const { group, prop, params } = splitProp(line.slice(0, colon)); // strip group + params
+    lines.push({ group, prop, params, value });
   }
   return cards.filter((c) => c.fn || c.emails.length || c.phones.length);
 }
 
-// Assemble the natural-language text_repr that gets embedded.
-function contactTextRepr(c) {
+// Assemble the natural-language text_repr that gets embedded. Every superset field that carries
+// recall value is folded in as a labeled line so keyword + semantic search can reach it.
+// Exported for unit testing alongside parseVCards.
+export function contactTextRepr(c) {
   const parts = [c.fn || c.emails[0] || 'Unnamed contact'];
   if (c.title || c.org) parts.push([c.title, c.org].filter(Boolean).join(' at '));
+  if (c.nicknames.length) parts.push(`Nickname: ${c.nicknames.join(', ')}`);
   if (c.emails.length) parts.push(`Email: ${c.emails.join(', ')}`);
   if (c.phones.length) parts.push(`Phone: ${c.phones.join(', ')}`);
   if (c.birthday) parts.push(`Birthday: ${c.birthday}`);
+  for (const d of c.dates) parts.push(`${d.type}: ${formatVcardDate(d.value)}`);
   if (c.address) parts.push(`Address: ${c.address}`);
+  for (const r of c.relatedNames) parts.push(`${r.type}: ${r.name}`);
+  if (c.urls.length) parts.push(`URL: ${c.urls.join(', ')}`);
+  if (c.im.length) parts.push(`IM: ${c.im.map((i) => (i.service ? `${i.service}:${i.handle}` : i.handle)).join(', ')}`);
+  if (c.socialProfiles.length) parts.push(`Social: ${c.socialProfiles.map((s) => (s.service ? `${s.service} ${s.url}` : s.url)).join(', ')}`);
+  if (c.categories.length) parts.push(`Categories: ${c.categories.join(', ')}`);
   if (c.note) parts.push(c.note);
   return parts.join('. ') + '.';
+}
+
+// The structured superset fields, shared by the entity attrs and the artifact extra_json.
+function structuredFields(c) {
+  return {
+    emails: c.emails, phones: c.phones, addresses: c.addresses,
+    nicknames: c.nicknames, dates: c.dates, relatedNames: c.relatedNames,
+    categories: c.categories, urls: c.urls, im: c.im, socialProfiles: c.socialProfiles,
+  };
 }
 
 // Reuse an existing entity if any email or the name already resolves to one.
@@ -93,20 +212,23 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec) => {
   let entityCreated = false;
   if (entityId == null) {
     const attrs = {
-      emails: c.emails, phones: c.phones,
+      ...structuredFields(c),
       birthday: c.birthday ?? null, address: c.address ?? null,
-      org: c.org ?? null, title: c.title ?? null, note: c.note ?? null,
+      org: c.org ?? null, department: c.department ?? null,
+      title: c.title ?? null, role: c.role ?? null, note: c.note ?? null,
+      phonetic: c.phonetic ?? null, isCompany: c.isCompany ?? false,
     };
     entityId = insertEntityStmt.run('person', c.fn || c.emails[0] || 'Unnamed', JSON.stringify(attrs)).lastInsertRowid;
     entityCreated = true;
   }
   if (c.fn) insertAliasStmt.run(entityId, normalizeName(c.fn), 'name');
+  for (const n of c.nicknames) insertAliasStmt.run(entityId, normalizeName(n), 'name');
   for (const e of c.emails) insertAliasStmt.run(entityId, normalizeName(e), 'email');
   for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasStmt.run(entityId, d, 'phone'); }
 
   const res = storeArtifactTxn(
     { type: 'contact', source: 'vcard', source_id: c.uid ?? null, content_hash: contentHash,
-      text_repr: textRepr, extra_json: JSON.stringify({ emails: c.emails, phones: c.phones }) },
+      text_repr: textRepr, extra_json: JSON.stringify(structuredFields(c)) },
     vec,
     [{ entity_id: entityId, role: 'self', confidence: 1.0 }]
   );
