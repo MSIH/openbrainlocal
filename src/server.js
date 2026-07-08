@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Architecture: Unlimited Local Shared Brain (Web API + Streamable HTTP MCP Server)
+ * Architecture: LifeContext (Web API + Streamable HTTP MCP Server)
  *
  * Adapted from Nate B. Jones's OB1 (Open Brain) framework.
  * https://github.com/NateBJones-Projects/OB1

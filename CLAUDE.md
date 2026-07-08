@@ -25,7 +25,7 @@ src/config.js            — single config source (dotenv loads here, before any
 src/db.js                — the store: schema (artifacts + entity graph + vec/FTS), prepared stmts, storeArtifactTxn, ingest_log
 src/embeddings.js        — shared Ollama client + getEmbedding (used by server + scripts)
 src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS, RRF fusion, timeline/about_entity
-src/server.js       — the server: REST + MCP tools, auth, transport (imports the modules above)
+src/server.js            — the server: REST + MCP tools, auth, transport (imports the modules above)
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
 src/connectors/contacts.js — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
 docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap)
