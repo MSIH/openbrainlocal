@@ -30,20 +30,19 @@ Every AI tool keeps its own siloed memory, so each new chat or tool starts from 
 Runs fully local — no cloud. Requires [Node.js](https://nodejs.org) 18+ and [Ollama](https://ollama.com/download).
 
 ```bash
-# 1. Install dependencies
+# 1. Install dependencies (Ollama must be installed and running)
 npm install
 npm rebuild better-sqlite3        # only if npm skipped its native build
 
-# 2. Pull the models: embedding (1024-dim — matches VECTOR_DIMENSION) + the query-planner chat model
-ollama pull qwen3-embedding:0.6b
-ollama pull qwen2.5:3b            # query-planner chat model (QUERY_MODEL); search degrades gracefully if absent
+# 2. Bootstrap: pulls the embedding model (+ optional query model) and writes .env with a
+#    random LIFECONTEXT_API_KEY. Idempotent — safe to re-run; never overwrites an existing .env.
+npm run setup
 
-# 3. Configure the secret
-cp .env.example .env              # then set LIFECONTEXT_API_KEY to a random value
-
-# 4. Run
+# 3. Run
 npm start                         # REST + MCP on http://localhost:3000
 ```
+
+`npm run setup` prints the generated `LIFECONTEXT_API_KEY` once — **save it**; it's the `x-api-key` header for every call. Prefer to do it by hand? The manual equivalent (pull `qwen3-embedding:0.6b` + `qwen2.5:3b`, `cp .env.example .env`, set a key) is in [`docs/local-llm-setup-guide.md`](docs/local-llm-setup-guide.md).
 
 Upgrading from an earlier version? Migrate your existing memories into the artifact store once (back up your DB file first — `life-context.db` by default, or whatever `DB_PATH` points to — it's idempotent and safe to re-run). It reuses the stored vectors as-is, so it's only valid while the embedding model and `VECTOR_DIMENSION` are unchanged:
 
