@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { db, resolveEntityIds, getEntity, getArtifactById, getRelations } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS } from './config.js';
-import { ARTIFACT_TYPES } from './ingest-types.js';
+import { ARTIFACT_TYPES, TYPE_REGISTRY } from './ingest-types.js';
 
 // Re-exported so the planner prompt below, the plan-schema filter, and every existing
 // importer of ARTIFACT_TYPES from search.js pick up the registry (docs/04-connector-contract.md
@@ -117,10 +117,22 @@ const ftsInStmt = db.prepare(`
 `);
 // Cheap existence probe: is this place string a usable filter at all?
 const placeExistsStmt = db.prepare('SELECT 1 FROM artifacts WHERE place_label LIKE ? LIMIT 1');
-// Same probe shape for digests: does the range have any daily digest to answer from?
-const digestExistsStmt = db.prepare(`
-  SELECT 1 FROM artifacts WHERE type = 'digest'
-    AND date(occurred_at) >= date(?) AND date(occurred_at) <= date(?) LIMIT 1
+// Per-day digest substitution (roadmap M6 deliverable 3): within the range, a day that has a
+// daily digest is represented by it — its digest-eligible raw rows are folded away; undigested
+// days keep their raw artifacts (partial backfill must never hide data), and types the digest
+// doesn't summarize (digest_eligible: false, e.g. contact) are never hidden. When the range
+// holds no digests at all, the NOT IN set is empty and this is identical to timelineStmt.
+const DIGEST_ELIGIBLE_JSON = JSON.stringify(TYPE_REGISTRY.filter((t) => t.digest_eligible).map((t) => t.type));
+const timelineDigestStmt = db.prepare(`
+  SELECT * FROM artifacts
+  WHERE date(occurred_at) >= date(@start) AND date(occurred_at) <= date(@end)
+    AND (type = 'digest'
+      OR type NOT IN (SELECT value FROM json_each(@eligible_json))
+      OR date(occurred_at) NOT IN (
+        SELECT date(occurred_at) FROM artifacts
+        WHERE type = 'digest' AND date(occurred_at) >= date(@start) AND date(occurred_at) <= date(@end)))
+  ORDER BY occurred_at ASC
+  LIMIT @limit
 `);
 const timelineStmt = db.prepare(`
   SELECT * FROM artifacts
@@ -188,23 +200,44 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   const searchText = [plan.semantic || query, ...unresolvedTerms].join(' ');
 
   // SQL prefilter -> candidate id set (skip entirely when there are no structured filters).
+  const prefilter = (f) =>
+    new Set(
+      candidateStmt
+        .all({
+          types_json: f.types.length ? JSON.stringify(f.types) : null,
+          ents_json: f.entityIds.length ? JSON.stringify(f.entityIds) : null,
+          t0: f.t0 || null,
+          t1: f.t1 || null,
+          place: f.place ? `%${f.place}%` : null,
+        })
+        .map((r) => r.id)
+    );
+
   let candidates = null;
-  let candidatesJson = null;
   if (effTypes.length || entityIds.length || t0 || t1 || place) {
-    const rows = candidateStmt.all({
-      types_json: effTypes.length ? JSON.stringify(effTypes) : null,
-      ents_json: entityIds.length ? JSON.stringify(entityIds) : null,
-      t0: t0 || null,
-      t1: t1 || null,
-      place: place ? `%${place}%` : null,
-    });
-    candidates = new Set(rows.map((r) => r.id));
-    // TODO(planner-overfilter): empty here conflates "caller's explicit filters matched
-    // nothing" (honest) with "the LLM invented a filter" (silent planner failure). Retry
-    // with only the caller's explicit args, folding plan-derived terms into searchText.
-    if (candidates.size === 0) return []; // filters matched nothing — semantic can't rescue it
-    candidatesJson = JSON.stringify([...candidates]);
+    candidates = prefilter({ types: effTypes, entityIds, t0, t1, place });
+    if (candidates.size === 0) {
+      // Planner-overfilter fix (M2 rule: demote, never drop): zero candidates conflates
+      // "caller's explicit filters matched nothing" (honest) with "the LLM invented a
+      // filter" (silent planner failure — e.g. the prompt steers summary queries to
+      // types=['digest'], which must not empty the search when no digests exist for the
+      // period). Retry with only the caller's explicit args; place is always plan-derived.
+      const caller = {
+        types: types?.length ? types : [],
+        entityIds: entities?.length ? entityIds : [],
+        t0: emptyish(timeRange?.start),
+        t1: emptyish(timeRange?.end),
+        place: null,
+      };
+      if (caller.types.length || caller.entityIds.length || caller.t0 || caller.t1) {
+        candidates = prefilter(caller);
+        if (candidates.size === 0) return []; // the caller's own filters matched nothing — honest empty
+      } else {
+        candidates = null; // every filter was plan-invented — fall back to pure semantic + keyword
+      }
+    }
   }
+  const candidatesJson = candidates ? JSON.stringify([...candidates]) : null;
 
   const k = clamp(limit * KNN_OVERFETCH, KNN_MIN, KNN_MAX);
 
@@ -242,19 +275,20 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
 export function timeline(start, end, types, limit = 50) {
   const s = emptyish(start);
   const e = emptyish(end);
-  let effTypes = types?.length ? types : null;
-  // Month-scale ranges answer from daily digests when they exist (roadmap M6 deliverable 3):
-  // a bounded span >= DIGEST_TIMELINE_DAYS with no explicit type filter returns the digests,
-  // not hundreds of raw rows. Explicit types always win; open-ended or digest-less ranges
-  // fall through unchanged. +1: the range is inclusive on both ends (a 14-day calendar span).
-  if (!effTypes && s && e) {
+  // Month-scale ranges answer from daily digests where they exist (per-day substitution —
+  // see timelineDigestStmt): a bounded span >= DIGEST_TIMELINE_DAYS with no explicit type
+  // filter. Explicit types always win; open-ended ranges are unchanged. +1: the range is
+  // inclusive on both ends (a 14-day calendar span).
+  if (!types?.length && s && e) {
     const spanDays = (new Date(e) - new Date(s)) / MS_PER_DAY + 1;
-    if (spanDays >= DIGEST_TIMELINE_DAYS && digestExistsStmt.get(s, e)) effTypes = ['digest'];
+    if (spanDays >= DIGEST_TIMELINE_DAYS) {
+      return timelineDigestStmt.all({ start: s, end: e, eligible_json: DIGEST_ELIGIBLE_JSON, limit });
+    }
   }
   return timelineStmt.all({
     start: s,
     end: e,
-    types_json: effTypes ? JSON.stringify(effTypes) : null,
+    types_json: types?.length ? JSON.stringify(types) : null,
     limit,
   });
 }

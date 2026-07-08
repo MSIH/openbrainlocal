@@ -54,10 +54,14 @@ oldest-first with each `text_repr` clipped to `DIGEST_TEXT_CLIP` chars (`truncat
 ## Retrieval awareness
 
 - **Planner** (`src/search.js`): the query-plan prompt steers week/month-scale summary questions
-  to `types: ["digest"]`.
-- **Timeline** (`src/search.js`): a bounded range spanning ≥ `DIGEST_TIMELINE_DAYS` (default 14)
-  with **no explicit type filter** returns only digests **when the range contains any** —
-  otherwise (explicit `types`, open-ended range, or no digests yet) behavior is unchanged.
+  to `types: ["digest"]`. Safety net: when a *plan-derived* filter matches zero candidates (e.g.
+  no digests exist for the period), the search retries with only the caller's explicit filters
+  instead of returning empty — the planner can narrow a search, never silently empty it.
+- **Timeline** (`src/search.js`): a bounded range spanning ≥ `DIGEST_TIMELINE_DAYS` (default 14,
+  inclusive of both ends) with **no explicit type filter** substitutes **per day**: a day with a
+  digest is represented by it; undigested days keep their raw artifacts (a partial backfill never
+  hides data); types a digest doesn't summarize (`digest_eligible: false`, e.g. `contact`) are
+  never hidden. Explicit `types` or open-ended ranges are unchanged.
 
 ## Scheduling (config, not code)
 
