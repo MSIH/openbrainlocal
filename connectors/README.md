@@ -1,33 +1,28 @@
-# life-context-connectors
+# Connectors
 
-Official connectors for [**LifeContext**](https://github.com/msih/life-context) — the local, self-owned AI memory server. Each connector is an isolated process that gathers data from one corner of a digital life and submits it to LifeContext over the versioned `POST /api/v1/ingest` contract. Nothing here imports or depends on LifeContext's source; the HTTP contract is the only coupling point.
+Official connectors for **LifeContext** — each is an isolated process that gathers data from one corner of a digital life and submits it to a running LifeContext server over the versioned `POST /api/v1/ingest` contract ([`docs/04-connector-contract.md`](../docs/04-connector-contract.md)). **Nothing here imports LifeContext source or another connector's code** — the HTTP contract is the only coupling point, enforced by `npm run check:boundary` from the repo root.
 
-## Why one repo for all connectors
-
-The contract (`docs/04-connector-contract.md` §10, mirrored here) calls for each connector to be independently forkable, but while there's a single maintainer building the first reference connectors, splitting into N repos is pure overhead — repo creation, permissions, and per-session scoping with no payoff yet. So: **one monorepo, one folder per connector**, sharing scaffolding (HTTP client + spool-file patterns) and one place to clone. Any connector splits out into its own standalone repo the moment it needs an independent release cadence or an external contributor wants to own just that one — that's the trigger, not a timeline.
+> Formerly the standalone `life-context-connectors` repo, folded into this repo (with full history) once the two-repo split proved to be overhead without payoff — see doc 04 §10. A connector still splits out into its own repo the moment it needs an independent release cadence or an external owner (`git subtree split --prefix=connectors/<name>`).
 
 ## Structure
 
 ```
 devsession-claude/  Claude Code SessionEnd/PreCompact hook → dev_session artifacts (Milestone 1)
-imessage/            iMessage chat.db sync → message/photo artifacts (Milestone 3)
-photo-exif/          Photo library EXIF scan + VLM captioning → photo artifacts (Milestone 4)
-docs/                A copy of the connector contract (source of truth: msih/life-context)
+imessage/           iMessage chat.db sync → message/photo artifacts (Milestone 3)
+photo-exif/         Photo library EXIF scan + VLM captioning → photo artifacts (Milestone 4)
 ```
 
-More connectors land here the same way as later milestones come up (see the [roadmap](https://github.com/msih/life-context/blob/2.0/docs/05-roadmap.md)).
+Each connector is self-contained: its own `package.json` (dependencies never shared), its own `README.md` (setup, env vars, trigger registration), its own `.env` (gitignored). There is no repo-wide build — these are client processes deployed wherever the source data lives (e.g. `imessage/` runs on a Mac), cloned from this repo.
 
 ## Adding a connector
 
-1. New top-level folder, named after the connector's `source` value (e.g. `imessage/`).
+1. New folder under `connectors/`, named after the connector's `source` value (e.g. `imessage/`).
 2. Own `package.json` (or equivalent for another language) — no shared dependencies assumed between connectors.
 3. Own `README.md` with setup steps and, for push-style connectors, the trigger registration snippet.
-4. Talk to LifeContext only via `POST {LIFECONTEXT_URL}/api/v1/ingest` (or `/ingest/batch`) per `docs/04-connector-contract.md`. Validate payloads against [`schemas/ingest.v1.json`](https://github.com/msih/life-context/blob/2.0/schemas/ingest.v1.json) in the source repo if you want CI-time checking without a live server.
+4. Talk to LifeContext only via `POST {LIFECONTEXT_URL}/api/v1/ingest` (or `/ingest/batch`) per [`docs/04-connector-contract.md`](../docs/04-connector-contract.md). Validate payloads against [`schemas/ingest.v1.json`](../schemas/ingest.v1.json) for CI-time checking without a live server. Never import from `src/`.
 
-## Tracking
-
-Milestones are tracked in the core repo: [msih/life-context issue #28](https://github.com/msih/life-context/issues/28) (Milestone 1 — devsession-claude, in progress). File connector-specific issues here, referencing that epic with `msih/life-context#28`.
+Conventions (payload shape, `source_id` discipline, spool/failure posture, entity hints): [`.claude/rules/connector-conventions.md`](../.claude/rules/connector-conventions.md).
 
 ## License
 
-MIT (see `LICENSE`) — matches LifeContext's own license, but each connector folder is free to declare its own.
+MIT (see `LICENSE`) — each connector folder is free to declare its own.

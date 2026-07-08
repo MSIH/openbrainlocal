@@ -1,7 +1,7 @@
 # Connector Conventions
-globs: **/*.js — anything that talks to a LifeContext server's ingest API
+globs: connectors/**/*.js — anything that talks to a LifeContext server's ingest API
 
-This is the connector-side counterpart to `life-context`'s `.claude/rules/data-model.md`. Connectors never touch SQLite/sqlite-vec directly (doc 04 §1.1 — they're isolated HTTP clients, not in-process plugins), so the hazards here are about the wire contract, not the store. Full spec: `docs/04-connector-contract.md` (mirrored copy in this repo; source of truth is `msih/life-context`).
+The connector-side counterpart to `data-model.md`. Connectors (top-level `connectors/`, one folder each) never touch SQLite/sqlite-vec directly (doc 04 §1.1 — they're isolated HTTP clients, not in-process plugins), so the hazards here are about the wire contract, not the store. **A connector never imports from `src/`** — the HTTP contract is the only coupling point, enforced by `npm run check:boundary`. Full spec: `docs/04-connector-contract.md`.
 
 ## The contract, in one paragraph
 A connector's only job is to turn some corner of a digital life into `POST /api/v1/ingest` (or `/ingest/batch`) calls: `{source, source_id, type, text_repr, occurred_at?, content_hash?, latitude?, longitude?, place_label?, raw_path?, extra?, entity_hints?}`. Core does everything downstream — embedding, entity resolution, storage. A connector that tries to do core's job (compute a vector, assert an entity ID, delete data) has stepped outside the contract.
@@ -16,7 +16,7 @@ A connector's only job is to turn some corner of a digital life into `POST /api/
 
 ## Failure posture (doc 04 §7)
 - A connector that dies must lose at most its uncommitted window — never buffer unbounded in memory, never require the server to be up just to *observe* source data that isn't ephemeral (a message database sitting on disk doesn't need the server to be running to be read later).
-- **Spool to disk, don't retry-loop in memory.** When the ingest call fails, append the payload (as JSON) to a local file and flush it on the connector's next run. See `devsession-claude/index.js`'s `spool()`/`flushSpool()` for the reference implementation — including the caveat that a single shared spool file isn't safe under concurrent invocations of the same connector; per-payload files under a spool directory avoid that race if a connector might ever run concurrently with itself.
+- **Spool to disk, don't retry-loop in memory.** When the ingest call fails, append the payload (as JSON) to a local file and flush it on the connector's next run. See `connectors/devsession-claude/index.js`'s `spool()`/`flushSpool()` for the reference implementation — including the caveat that a single shared spool file isn't safe under concurrent invocations of the same connector; per-payload files under a spool directory avoid that race if a connector might ever run concurrently with itself.
 - **A push-style connector (a hook, a Shortcut) must never hang or crash the thing that invoked it.** Catch everything at the top level, log to stderr, and exit 0 regardless of internal outcome.
 
 ## Batch vs. single ingest
