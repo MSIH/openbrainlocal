@@ -8,7 +8,7 @@
  * Search never throws just because Ollama is offline.
  */
 import { z } from 'zod';
-import { db, resolveEntityIds, getEntity, getArtifactById } from './db.js';
+import { db, resolveEntityIds, getEntity, getArtifactById, getRelations } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX } from './config.js';
 import { ARTIFACT_TYPES } from './ingest-types.js';
@@ -241,11 +241,12 @@ export function timeline(start, end, types, limit = 50) {
   });
 }
 
-// Graph-only recall: no embedding. Resolve name -> entity -> recent linked artifacts.
+// Graph-only recall: no embedding. Resolve name -> entity -> recent linked artifacts +
+// person<->person relations (issue #37). `relations` is [] when the person has none.
 export function aboutEntity(name, limit = 10) {
   const ids = resolveEntityIds(name);
   if (!ids.length) return { resolved: false, name, entities: [] };
-  const entities = ids.map((id) => ({ entity: getEntity(id), artifacts: aboutStmt.all(id, limit) }));
+  const entities = ids.map((id) => ({ entity: getEntity(id), artifacts: aboutStmt.all(id, limit), relations: getRelations(id) }));
   return { resolved: true, name, entities };
 }
 

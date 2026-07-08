@@ -167,6 +167,8 @@ Normalization (lowercase, digits-only phones) happens core-side; connectors subm
 
 **Never in the payload:** entity IDs, entity creation requests, relationship assertions ("this is my sister"). Durable facts enter the graph through contacts import and consolidation, not through connectors.
 
+> **Internal reuse — person↔person relations (issue #37).** The contacts importer stages *unresolved relationship targets* in this same table using a distinct `alias_type='relation'` marker (with `role` = the raw relationship label), so they never collide with the external hint vocabulary above. This is a core-side mechanism, **not** a connector payload field — external connectors still submit only `{email, phone, name, handle}` hints. When the related person is later imported, `resolveRelationHints` turns each staged row into an `entity_relations` edge (see design doc §2.2).
+
 ```sql
 -- New staging table (core migration, not a payload concern). UNIQUE(artifact_id, alias,
 -- alias_type, role) is an additive deviation from an earlier sketch of this table: it makes

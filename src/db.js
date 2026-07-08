@@ -79,6 +79,24 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_unresolved_alias ON unresolved_aliases(alias, alias_type);
 
+  -- Person<->person edges (issue #37). entity_links joins artifacts->entities; this joins
+  -- entities to each other (spouse/child/parent/…). Append-only + idempotent via the UNIQUE
+  -- key + OR IGNORE, mirroring entity_links. Directional: from_entity_id = the contact owner,
+  -- to_entity_id = the related person; asymmetric; confidence 1.0 for an explicit contact field.
+  CREATE TABLE IF NOT EXISTS entity_relations (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_entity_id INTEGER NOT NULL REFERENCES entities(id),
+    to_entity_id   INTEGER NOT NULL REFERENCES entities(id),
+    relation_type  TEXT NOT NULL,       -- canonical vocab (RELATION_TYPE_MAP) or 'custom'
+    raw_label      TEXT,                -- original source label, preserved (esp. for 'custom')
+    confidence     REAL DEFAULT 1.0,
+    source         TEXT,                -- vcard|…
+    created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(from_entity_id, to_entity_id, relation_type)
+  );
+  CREATE INDEX IF NOT EXISTS idx_relations_from ON entity_relations(from_entity_id);
+  CREATE INDEX IF NOT EXISTS idx_relations_to ON entity_relations(to_entity_id);
+
   -- Semantic index (dim MUST equal the embedding model's output).
   CREATE VIRTUAL TABLE IF NOT EXISTS vec_artifacts USING vec0(
     artifact_id INTEGER PRIMARY KEY,
@@ -107,7 +125,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS ingest_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update
+    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved
     actor       TEXT,
     details     TEXT                    -- JSON
   );
@@ -176,6 +194,23 @@ const resolveAliasStmt = db.prepare('SELECT DISTINCT entity_id FROM entity_alias
 const resolveAliasByTypeStmt = db.prepare('SELECT DISTINCT entity_id FROM entity_aliases WHERE alias = ? AND alias_type = ?');
 const getEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const logStmt = db.prepare('INSERT INTO ingest_log (event_type, actor, details) VALUES (?, ?, ?)');
+// entity_relations (issue #37): append-only edges, OR IGNORE for idempotency.
+const insertRelationStmt = db.prepare(`
+  INSERT OR IGNORE INTO entity_relations (from_entity_id, to_entity_id, relation_type, raw_label, confidence, source)
+  VALUES (@from_entity_id, @to_entity_id, @relation_type, @raw_label, @confidence, @source)
+`);
+const getRelationsStmt = db.prepare(`
+  SELECT r.to_entity_id AS entity_id, r.relation_type, r.raw_label, r.confidence, e.canonical_name AS name
+  FROM entity_relations r JOIN entities e ON e.id = r.to_entity_id
+  WHERE r.from_entity_id = ? ORDER BY r.relation_type, e.canonical_name
+`);
+// Name aliases of an entity — used to match staged relation hints that point at this person.
+const selectNameAliasesStmt = db.prepare(`SELECT alias FROM entity_aliases WHERE entity_id = ? AND alias_type = 'name'`);
+// Staged relation hints keyed by the related person's normalized name (alias_type='relation'
+// marks them so they never collide with ordinary artifact->entity alias hints).
+const selectRelationHintsStmt = db.prepare(`SELECT artifact_id, role FROM unresolved_aliases WHERE alias = ? AND alias_type = 'relation'`);
+// The self-entity of a contact artifact — the "from" side of a staged relation.
+const selectSelfEntityStmt = db.prepare(`SELECT entity_id FROM entity_links WHERE artifact_id = ? AND role = 'self' LIMIT 1`);
 
 // The 11 artifact columns storeArtifactTxn writes; callers pass a partial and we fill nulls.
 const ARTIFACT_FIELDS = ['type', 'source', 'source_id', 'content_hash', 'occurred_at',
@@ -387,6 +422,70 @@ export function resolveEntityHints(artifactId, hints) {
     }
   }
   return { resolved, unresolved };
+}
+
+// Canonical person<->person relation vocabulary (issue #37). Maps an Apple X-ABLabel /
+// Google `type` / Android relation label (lowercased) onto one enum; anything unrecognized is
+// 'custom' with the original label preserved in entity_relations.raw_label.
+const RELATION_TYPE_MAP = {
+  spouse: 'spouse', husband: 'spouse', wife: 'spouse',
+  partner: 'partner',
+  'domestic partner': 'domesticPartner', domesticpartner: 'domesticPartner',
+  child: 'child', son: 'child', daughter: 'child',
+  parent: 'parent', mother: 'mother', mom: 'mother', father: 'father', dad: 'father',
+  sibling: 'sibling', brother: 'brother', sister: 'sister',
+  friend: 'friend', relative: 'relative',
+  assistant: 'assistant', manager: 'manager',
+  'referred by': 'referredBy', referredby: 'referredBy',
+};
+export const canonicalRelationType = (rawLabel) =>
+  RELATION_TYPE_MAP[String(rawLabel ?? '').trim().toLowerCase()] || 'custom';
+
+/**
+ * Insert one append-only person<->person edge (OR IGNORE — re-inserting the same triple is a
+ * no-op, so callers are idempotent). Logs `relation_added` only when a row is actually created.
+ * Returns true if a new edge was written.
+ */
+export function upsertEntityRelation({ from_entity_id, to_entity_id, relation_type, raw_label = null, confidence = 1.0, source = null }, eventType = 'relation_added') {
+  const info = insertRelationStmt.run({ from_entity_id, to_entity_id, relation_type, raw_label, confidence, source });
+  if (info.changes > 0) logEvent(eventType, source ?? 'entity_relations', { from_entity_id, to_entity_id, relation_type, raw_label });
+  return info.changes > 0;
+}
+
+/**
+ * Stage a relation whose related name doesn't resolve yet: recorded on the owner's contact
+ * artifact in unresolved_aliases (alias_type='relation', role=raw label). When the related
+ * person is later imported, resolveRelationHints forms the edge. Idempotent via the table's
+ * UNIQUE(artifact_id, alias, alias_type, role).
+ */
+export function stageRelationHint(artifactId, relatedName, rawLabel) {
+  insertUnresolvedStmt.run(artifactId, normalizeName(relatedName), 'relation', rawLabel, 1.0);
+}
+
+/**
+ * Form edges for staged relations that now resolve to `entityId` — i.e. an earlier import
+ * named this person as someone's relation before their own contact existed. Matches the
+ * entity's name aliases against staged hints, derives the "from" side from the hint artifact's
+ * self-link, and inserts the (canonicalized) edge. Append-only and idempotent (staged rows are
+ * left in place; the OR IGNORE edge insert absorbs re-runs). Returns the count of edges formed.
+ */
+export function resolveRelationHints(entityId) {
+  let formed = 0;
+  for (const { alias } of selectNameAliasesStmt.all(entityId)) {
+    for (const hint of selectRelationHintsStmt.all(alias)) {
+      const from = selectSelfEntityStmt.get(hint.artifact_id);
+      if (!from || from.entity_id === entityId) continue; // no self-loop
+      const relation_type = canonicalRelationType(hint.role);
+      if (upsertEntityRelation({ from_entity_id: from.entity_id, to_entity_id: entityId, relation_type, raw_label: hint.role, confidence: 1.0, source: 'vcard' }, 'relation_resolved')) {
+        formed++;
+      }
+    }
+  }
+  return formed;
+}
+
+export function getRelations(entityId) {
+  return getRelationsStmt.all(entityId);
 }
 
 export function getEntity(id) {

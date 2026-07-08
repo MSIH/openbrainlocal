@@ -211,10 +211,11 @@ function buildMcpServer() {
     async ({ name, limit = 10 }) => {
       const res = aboutEntity(name, limit);
       if (!res.resolved) return { content: [{ type: "text", text: `No entity found for "${name}".` }] };
-      const blocks = res.entities.map(({ entity, artifacts }) => {
+      const blocks = res.entities.map(({ entity, artifacts, relations }) => {
         const header = `${entity.canonical_name} (${entity.kind})${entity.attrs ? ` — ${JSON.stringify(entity.attrs)}` : ""}`;
+        const rels = relations?.length ? `\nRelations: ${relations.map((r) => `${r.relation_type} → ${r.name}`).join(", ")}` : "";
         const items = artifacts.map(artifactLine).join("\n");
-        return `${header}\n${items || "  (no linked artifacts yet)"}`;
+        return `${header}${rels}\n${items || "  (no linked artifacts yet)"}`;
       });
       return { content: [{ type: "text", text: blocks.join("\n\n") }] };
     }
