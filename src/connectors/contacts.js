@@ -23,6 +23,7 @@ import { pathToFileURL } from 'node:url';
 import {
   db, storeArtifactTxn, sha256, logEvent,
   insertEntityStmt, insertAliasStmt, resolveEntityIds, normalizeName, normalizePhone,
+  canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
 } from '../db.js';
 import { embedToFloat32 } from '../embeddings.js';
 
@@ -206,6 +207,26 @@ function resolveExistingEntity(c) {
   return null;
 }
 
+// Turn parsed relatedNames[] into person<->person edges (issue #37). A related name that
+// already resolves to an entity becomes an edge now; one that doesn't is staged on this
+// contact's artifact and formed later when that person is imported. Then resolve any relations
+// that earlier imports staged pointing at THIS person (the reverse import order).
+function linkRelations(fromEntityId, artifactId, relatedNames) {
+  for (const rel of relatedNames) {
+    if (!rel?.name) continue;
+    const relationType = canonicalRelationType(rel.type);
+    const targets = resolveEntityIds(rel.name).filter((id) => id !== fromEntityId);
+    if (targets.length) {
+      for (const toId of targets) {
+        upsertEntityRelation({ from_entity_id: fromEntityId, to_entity_id: toId, relation_type: relationType, raw_label: rel.type, confidence: 1.0, source: 'vcard' });
+      }
+    } else {
+      stageRelationHint(artifactId, rel.name, rel.type);
+    }
+  }
+  resolveRelationHints(fromEntityId);
+}
+
 // One contact -> entity(+aliases) + contact artifact + self link, atomically.
 const importOneTxn = db.transaction((c, textRepr, contentHash, vec) => {
   let entityId = resolveExistingEntity(c);
@@ -232,6 +253,9 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec) => {
     vec,
     [{ entity_id: entityId, role: 'self', confidence: 1.0 }]
   );
+  // Relations need the self-link (just written) to derive the "from" side of a staged hint.
+  // Skip on a dedup hit — the first import already formed/staged them (all steps are idempotent).
+  if (!res.deduped) linkRelations(entityId, res.id, c.relatedNames);
   return { entityCreated, artifactId: res.id, deduped: res.deduped };
 });
 

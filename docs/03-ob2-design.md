@@ -119,7 +119,24 @@ CREATE TABLE entity_links (
                                       -- <1.0 = inferred (NER, face match)
   PRIMARY KEY (artifact_id, entity_id, role)
 );
+
+-- Person<->person edges (issue #37). entity_links joins artifacts->entities;
+-- this joins entities to each other. Directional (from = contact owner,
+-- to = related person), append-only, idempotent via the UNIQUE key + OR IGNORE.
+CREATE TABLE entity_relations (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_entity_id INTEGER NOT NULL REFERENCES entities(id),
+  to_entity_id   INTEGER NOT NULL REFERENCES entities(id),
+  relation_type  TEXT NOT NULL,        -- canonical enum (spouse|partner|child|
+                                       -- parent|mother|father|sibling|…) or 'custom'
+  raw_label      TEXT,                 -- original source label (preserved for 'custom')
+  confidence     REAL DEFAULT 1.0,     -- 1.0 for an explicit contact field
+  source         TEXT,
+  UNIQUE(from_entity_id, to_entity_id, relation_type)
+);
 ```
+
+**Person↔person relationships (issue #37).** A contact's `relatedNames[] {type, name}` (parsed above) become `entity_relations` edges. Because every source expresses a relationship as a related **name string + a type** (no foreign key), this is a name→entity resolution problem, so it reuses the same machinery as alias hints: for each related name, `resolveEntityIds(name)` — a hit inserts the edge now; a miss is **staged** on the owner's contact artifact in `unresolved_aliases` (`alias_type='relation'`, `role` = the raw label) and `resolveRelationHints` forms the edge when that person is later imported (so either import order converges). The raw label is canonicalized (`RELATION_TYPE_MAP`) to a fixed vocabulary — `spouse, partner, domesticPartner, child, parent, mother, father, sibling, brother, sister, friend, relative, assistant, manager, referredBy, custom` — with the original preserved in `raw_label`. Edges are append-only and idempotent (`UNIQUE(from, to, relation_type)` + `OR IGNORE`); `ingest_log` records `relation_added` / `relation_resolved`. `about_entity` returns them as `relations: [{ entity_id, name, relation_type, raw_label, confidence }]` (`raw_label` carries the original label, most useful when `relation_type` is `custom`).
 
 **Contacts are the spine.** Your contacts import seeds the `entities` table with high-quality person records (name, emails, phones, birthday, relationship). Every subsequent artifact links to them deterministically: email `From:` header matches an alias → hard link, confidence 1.0. A name mentioned in a document body → NER-inferred link, confidence 0.7. Confidence lets retrieval prefer certain links without discarding fuzzy ones.
 
@@ -255,7 +272,7 @@ Keep the per-session server factory and Streamable HTTP transport from v2.2 unch
 - `store_memory(content)` — unchanged (manual notes are just `type='note'` artifacts)
 - `search(query, types?, time_range?, entities?, limit?)` — hybrid planner above
 - `timeline(start, end, types?)` — pure chronological recall
-- `about_entity(name)` — resolve → profile + linked artifact digest ("everything about Sarah")
+- `about_entity(name)` — resolve → profile + linked artifact digest + person↔person `relations` ("everything about Sarah")
 - `get_artifact(id)` — full `text_repr` + metadata + `raw_path`
 
 ---

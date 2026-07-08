@@ -90,7 +90,7 @@ Every endpoint/tool requires the `x-api-key` header. REST and MCP share one stor
   - `store_memory` / `search_memories` — the original note store + recall (unchanged on the wire)
   - `search` — hybrid semantic + keyword search with optional `types` / `time_range` / `entities` filters
   - `timeline` — chronological recall over a date range
-  - `about_entity` — resolve a person/place/org and return their profile + recent linked artifacts
+  - `about_entity` — resolve a person/place/org and return their profile, recent linked artifacts, and person↔person relations (spouse, child, parent, …)
   - `get_artifact` — one artifact's full text, metadata, and entity links by id
 
 ## Status
