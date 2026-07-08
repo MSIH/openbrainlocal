@@ -39,8 +39,11 @@ You need three things:
    a strong one now (paste into PowerShell):
 
    ```powershell
-   -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 48 | ForEach-Object {[char]$_})
+   $b = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | ForEach-Object { $_.ToString('x2') })
    ```
+
+   (This uses Windows' cryptographic random generator — the right tool for a secret. Works
+   in both Windows PowerShell 5.1 and PowerShell 7.)
 
    Put the result in `.env` as `LIFECONTEXT_API_KEY=<the new value>` and restart the server.
    Update any tool that was using the old key.
@@ -134,16 +137,20 @@ Wherever a tool asked for your LifeContext address, swap `http://localhost:3000`
 
 - **Check the direct port is closed.** The tunnel talks to your server privately, so nothing
   on the internet should reach port 3000 directly. Windows Firewall blocks inbound
-  connections by default; just make sure nobody added an allow rule for 3000:
+  connections by default; make sure nobody added an *inbound allow* rule for 3000:
 
   ```powershell
-  Get-NetFirewallPortFilter | Where-Object LocalPort -eq 3000
+  Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True |
+    Where-Object { ($_ | Get-NetFirewallPortFilter).LocalPort -eq 3000 } |
+    Select-Object DisplayName
   ```
 
-  No output means no rule mentions port 3000 at all — nothing is exposed. If something
-  does come back, open **Windows Defender Firewall with Advanced Security** and check
-  whether it's an *inbound allow* rule for 3000; delete it unless you created it on
-  purpose.
+  No output means no enabled inbound-allow rule opens port 3000 — good. If a rule comes
+  back, open **Windows Defender Firewall with Advanced Security** and delete it unless you
+  created it on purpose. (One caveat: this only tells you about the firewall's own rules —
+  if Windows Firewall itself is turned off, or another firewall/VPN is in play, verify
+  there too. The surest test is to try reaching `http://<your-server-ip>:3000` from another
+  device and confirm it *fails*.)
 
 - **A second key that you can revoke.** In the Zero Trust dashboard, **Access →
   Applications → Add an application** for `lc.yourdomain.com`, then create a **Service
