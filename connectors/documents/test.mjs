@@ -18,7 +18,7 @@ import { parsePdfDate, needsOcr } from './lib/pdf.js';
 import { parseCoreXml, extractPptxText, decodeXmlEntities, loadZip } from './lib/ooxml.js';
 import { formatOf } from './lib/extract.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url)); // import.meta.dirname needs Node 20.11+; this connector declares >=18
+const __dirname = path.dirname(fileURLToPath(import.meta.url)); // import.meta.dirname needs Node 20.11+; this connector's floor is 20.0
 
 // --- fixture builders ---
 

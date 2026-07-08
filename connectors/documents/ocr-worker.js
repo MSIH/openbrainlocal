@@ -11,7 +11,7 @@
 //
 // Nightly-window scheduling is config, not code — this script does a single pass and exits;
 // start/stop it on a schedule with cron or Task Scheduler. See README.md.
-import { existsSync, statSync, mkdirSync } from 'node:fs';
+import { existsSync, statSync, mkdirSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -74,24 +74,30 @@ async function main() {
   }
 
   const { postIngest } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
-  const scanRootPrefix = path.resolve(SCAN_ROOT) + path.sep;
+  const scanRootPrefix = realpathSync(SCAN_ROOT) + path.sep;
 
   // Drop stale entries BEFORE paying tesseract init: a file that moved or changed since it
   // was flagged is dropped — if it's still image-only, the next scan.js run re-flags it
   // against the new statKey.
   const live = [];
   for (const [relPath, entry] of entries) {
-    const absPath = path.resolve(SCAN_ROOT, relPath);
     // The queue file is local state, but keys still must not escape the scan root — a '..'
-    // key would otherwise let a corrupted/tampered queue OCR and index arbitrary files.
-    if (!absPath.startsWith(scanRootPrefix)) {
+    // key or an in-root symlink pointing outside would otherwise let a corrupted/tampered
+    // queue OCR and index arbitrary files. realpath resolves both.
+    let absPath;
+    try {
+      absPath = realpathSync(path.resolve(SCAN_ROOT, relPath));
+    } catch {
+      absPath = null; // missing file — same treatment as a stale entry below
+    }
+    if (absPath && !absPath.startsWith(scanRootPrefix)) {
       console.error(`documents: dropping OCR queue entry outside the scan root: ${relPath}`);
       dropEntry(relPath);
       continue;
     }
     let stat;
     try {
-      stat = statSync(absPath);
+      stat = absPath ? statSync(absPath) : null;
     } catch {
       stat = null;
     }
