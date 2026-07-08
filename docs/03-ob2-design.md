@@ -93,8 +93,11 @@ CREATE TABLE entities (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   kind           TEXT NOT NULL,       -- person | place | org | event | topic
   canonical_name TEXT NOT NULL,
-  attrs_json     TEXT,                -- person: emails[], phones[], birthday,
-                                      -- address, relationship ("sister")
+  attrs_json     TEXT,                -- person: the contact superset below —
+                                      -- emails[], phones[], addresses[], birthday,
+                                      -- dates[], relatedNames[], categories[],
+                                      -- nicknames[], urls[], im[], socialProfiles[],
+                                      -- org/department/title/role, phonetic, isCompany
   created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -119,6 +122,8 @@ CREATE TABLE entity_links (
 ```
 
 **Contacts are the spine.** Your contacts import seeds the `entities` table with high-quality person records (name, emails, phones, birthday, relationship). Every subsequent artifact links to them deterministically: email `From:` header matches an alias → hard link, confidence 1.0. A name mentioned in a document body → NER-inferred link, confidence 0.7. Confidence lets retrieval prefer certain links without discarding fuzzy ones.
+
+**The cross-platform contact superset.** `parseVCards` (`src/connectors/contacts.js`) emits one connector-agnostic shape so that future Google People API / Android ContactsContract connectors map onto the *same* internal model — the three sources converge (esp. relationships = a related **name string** + a type, with no foreign key). The superset: structured + phonetic names, `nicknames[]`, `emails[]`, `phones[]`, `addresses[]` (+ the legacy scalar `address`), `urls[]`, `org`/`department`/`title`/`role`, `birthday`, `dates[] {type, value}` (labeled — anniversary, etc.), `relatedNames[] {type, name}`, `categories[]`, `im[] {service, handle}`, `socialProfiles[] {service, url}`, `note`, `uid`, `isCompany`. Apple 3.0 exports carry labeled properties under an `itemN.` group prefix with an `X-ABLabel` sibling (`item1.X-ABDATE` + `item1.X-ABLabel:_$!<Anniversary>!$_`); the parser strips the group prefix off the property name and pairs each value with its decoded label after the whole card is read, so a label may precede or follow its value. vCard 4.0 equivalents (`ANNIVERSARY`/`RELATED`/`NICKNAME`) are read by property name, so both versions land in the same shape. All of it rides in existing columns — `entities.attrs_json`, `artifacts.extra_json`, and the embedded `text_repr` — no new columns (a field is promoted to a real column only when filtered on). Relationships are captured as text here (folded into `text_repr` as `Spouse: Amy Schneider` and stored in `relatedNames[]`); real entity↔entity graph edges are a separate layer built on this parsed data.
 
 ### 2.3 Search indexes
 
