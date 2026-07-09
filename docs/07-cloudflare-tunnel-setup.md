@@ -142,8 +142,9 @@ Wherever a tool asked for your LifeContext address, swap `http://localhost:3000`
 - **MCP clients** (Claude Code, Claude Desktop, anything MCP): the server URL becomes
   `https://lc.yourdomain.com/mcp`, with the same `x-api-key` header as before. A client that
   can only take a bare URL and no header (some MCP setups, gemini/VS Code extensions) can carry
-  the key as a query param instead: `https://lc.yourdomain.com/mcp?api_key=<your key>`.
-  **Prefer the header.** A key in the URL leaks into access/proxy logs, browser history, and
+  the key as a query param instead: `https://lc.yourdomain.com/mcp?api_key=<your key>`
+  (URL-encode the key if it contains `+`, `/`, `=`, `&`, or `#` — the default generated key is
+  hex and needs no encoding). **Prefer the header.** A key in the URL leaks into access/proxy logs, browser history, and
   `Referer` headers in a way a header does not — if you ever send it as a query param over a
   shared or logged channel, treat that key as exposed and rotate it (regenerate
   `LIFECONTEXT_API_KEY`, restart). The `?api_key=` fallback also does **not** work for the
