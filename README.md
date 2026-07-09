@@ -50,7 +50,7 @@ Upgrading from an earlier version? Migrate your existing memories into the artif
 npm run migrate                   # copies memories -> artifacts (type='note'), reusing vectors
 ```
 
-Seed the entity graph from your contacts (people become searchable and future emails/photos link to them):
+Seed the entity graph from your contacts (people become searchable and future emails/photos link to them). Clean them up first — see [`docs/08-preparing-contacts.md`](docs/08-preparing-contacts.md) for the pre-clean checklist and why it matters:
 
 ```bash
 npm run import:contacts contacts.vcf
