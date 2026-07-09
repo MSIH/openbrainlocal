@@ -79,6 +79,13 @@ const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s |
 const artifactLine = (a) => `- [${a.type}${a.occurred_at ? ` · ${a.occurred_at}` : ""}${a.distance != null ? ` · ${a.distance.toFixed(3)}` : ""}] (#${a.id}) ${snippet(a.text_repr)}`;
 
 // --- AUTH ---
+// Query-param fallback name mirrors the `x-api-key` header so the credential is named the same
+// across channels. Only for clients that can't send a header (a bare MCP connection URL — gemini,
+// some VS Code extensions). NOT for the Claude.ai web connector: the MCP spec forbids tokens in
+// the query string, so web still needs the header (Request-headers beta) or OAuth. It also leaks
+// the key into access/proxy logs, browser history, and Referer — prefer the header (see docs/07).
+const AUTH_QUERY_PARAM = 'api_key';
+
 function secureCompare(input, secret) {
   if (typeof input !== 'string' || typeof secret !== 'string') return false;
   const inputHash = createHash('sha256').update(input).digest();
@@ -86,8 +93,12 @@ function secureCompare(input, secret) {
   return timingSafeEqual(inputHash, secretHash);
 }
 
-function requireHeaderAuth(req, res, next) {
-  const token = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+// Header wins over query param; a duplicated ?api_key= (Express yields an array) is a non-string,
+// which secureCompare rejects as invalid rather than crashing.
+function requireAuth(req, res, next) {
+  const token = req.headers['x-api-key']
+    || req.headers['authorization']?.replace('Bearer ', '')
+    || req.query?.[AUTH_QUERY_PARAM];
   if (!secureCompare(token, LIFECONTEXT_API_KEY)) {
     return res.status(401).json({ error: "Unauthorized: Invalid or missing secret key token." });
   }
@@ -256,42 +267,42 @@ app.use(apiLimiter); // rate-limit every route first, before any body parsing
 // The /api/v1 connector router carries its OWN 256 KB JSON parser (contract §2). Mounting it
 // ahead of the global 32 KB parser lets ingest bodies exceed 32 KB while every legacy route
 // keeps the 32 KB cap — the global parser below no-ops on the ingest body it already parsed.
-app.use('/api/v1', buildIngestRouter({ requireAuth: requireHeaderAuth }));
+app.use('/api/v1', buildIngestRouter({ requireAuth }));
 
 app.use(express.json({ limit: '32kb' }));
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // --- REST ENDPOINTS ---
-app.post('/api/remember', requireHeaderAuth, wrap(async (req, res) => {
+app.post('/api/remember', requireAuth, wrap(async (req, res) => {
   const { content } = RememberSchema.parse(req.body);
   const id = await executeStore(content);
   res.json({ success: true, id });
 }));
 
-app.post('/api/recall', requireHeaderAuth, wrap(async (req, res) => {
+app.post('/api/recall', requireAuth, wrap(async (req, res) => {
   const { query, limit } = RecallSchema.parse(req.body);
   const results = await executeRecall(query, limit);
   res.json({ results });
 }));
 
-app.post('/api/search', requireHeaderAuth, wrap(async (req, res) => {
+app.post('/api/search', requireAuth, wrap(async (req, res) => {
   const { query, types, time_range, entities, limit } = SearchSchema.parse(req.body);
   const results = await hybridSearch(query, { limit: limit ?? 3, types, timeRange: time_range, entities });
   res.json({ results });
 }));
 
-app.post('/api/timeline', requireHeaderAuth, wrap(async (req, res) => {
+app.post('/api/timeline', requireAuth, wrap(async (req, res) => {
   const { start, end, types, limit } = TimelineSchema.parse(req.body);
   res.json({ results: timeline(start, end, types, limit ?? 50) });
 }));
 
-app.post('/api/about_entity', requireHeaderAuth, wrap(async (req, res) => {
+app.post('/api/about_entity', requireAuth, wrap(async (req, res) => {
   const { name, limit } = AboutEntitySchema.parse(req.body);
   res.json(aboutEntity(name, limit ?? 10));
 }));
 
-app.get('/api/artifact/:id', requireHeaderAuth, wrap(async (req, res) => {
+app.get('/api/artifact/:id', requireAuth, wrap(async (req, res) => {
   const { id } = GetArtifactSchema.parse({ id: req.params.id });
   const a = getArtifactById(id);
   if (!a) return res.status(404).json({ error: "Not found" });
@@ -302,14 +313,14 @@ app.get('/api/artifact/:id', requireHeaderAuth, wrap(async (req, res) => {
 // registry connectors self-check against at startup. No streams array — the event lane
 // is deferred, and advertising streams with no POST /api/v1/events behind them would
 // mislead connector authors.
-app.get('/api/v1/ingest/types', requireHeaderAuth, wrap(async (req, res) => {
+app.get('/api/v1/ingest/types', requireAuth, wrap(async (req, res) => {
   res.json({ version: 'v1', types: TYPE_REGISTRY });
 }));
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---
 const activeMcpTransports = new Map();
 
-app.post("/mcp", requireHeaderAuth, wrap(async (req, res) => {
+app.post("/mcp", requireAuth, wrap(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
 
   if (sessionId && activeMcpTransports.has(sessionId)) {
@@ -357,8 +368,8 @@ const handleExistingSession = wrap(async (req, res) => {
   await transport.handleRequest(req, res);
 });
 
-app.get("/mcp", requireHeaderAuth, handleExistingSession);
-app.delete("/mcp", requireHeaderAuth, handleExistingSession);
+app.get("/mcp", requireAuth, handleExistingSession);
+app.delete("/mcp", requireAuth, handleExistingSession);
 
 // --- ERROR MIDDLEWARE ---
 app.use((err, req, res, next) => {
