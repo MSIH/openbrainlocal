@@ -68,6 +68,8 @@ git rev-parse HEAD > "$CLAUDE_PROJECT_DIR/.claude/.pre-pr-review-done"
 ```
 Do NOT write it on `CHANGES-REQUESTED` / `BLOCK` — fix the Blockers, re-run, and it clears. If the user explicitly says "open it anyway", confirm once, then write the marker.
 
+Then check for a governing issue number on record for the branch: `.claude/.draft-issue-done` (local) or `.claude/.cloud-issue-done` (cloud) holds a value, or the branch's commits already carry a `Closes #` / `Refs #` trailer. If found, proceed straight to `gh pr create` (or the `mcp__github__create_pull_request` MCP tool in cloud sessions) using the Step 3 title/body skeleton — no separate ask. If no issue number is on record (ad hoc work), stop here: report the verdict and skeleton, and wait to be asked before opening the PR.
+
 ## Step 5 — Request bot review
 After the PR is created, request a Copilot review (`--reviewer @copilot` at create, or `gh pr edit <n> --add-reviewer @copilot`). Other bots (Greptile/CodeRabbit) auto-trigger if installed. Bot reviews are comment-only — they never block merge. Surface `gh` errors verbatim; don't retry on org/license errors.
 
@@ -116,7 +118,7 @@ Rules:
 - `git branch -D` is correct here only because `gh` confirmed the merge; outside that guard, never force-delete a branch.
 
 ## Rules
-- Do not open the PR yourself in this skill — output + gate-clear only.
+- Open the PR yourself only when a governing issue number is on record for the branch (see Clear the gate). Otherwise, output + gate-clear only — do not open the PR without being asked.
 - Persona findings outrank both the bug-hunt and bot reviews on MSIH/repo conventions.
 - Don't invent findings. "No findings." when a persona is clean.
 - Severity tag required on every Should-fix.
