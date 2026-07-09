@@ -37,8 +37,14 @@ for (const line of lines) {
   // GeoNames cities dump columns (tab-separated): id, name, asciiname, alternatenames, lat,
   // lon, featureClass, featureCode, countryCode, cc2, admin1Code, admin2Code, admin3Code,
   // admin4Code, population, elevation, dem, timezone, modificationDate.
-  const [, name, , , lat, lon, , , countryCode, , admin1Code] = line.split('\t');
-  if (!name || !lat || !lon || !countryCode) {
+  const [, name, , , latRaw, lonRaw, , , countryCode, , admin1Code] = line.split('\t');
+  const lat = Number(latRaw);
+  const lon = Number(lonRaw);
+  // Number.isFinite, not a truthiness check: a malformed/non-numeric field must be SKIPPED,
+  // never silently written as NaN — JSON.stringify(NaN) serializes to `null`, which would sit
+  // at (0,0) once read back by geocode.js's haversine loop (null coerces to 0 in arithmetic)
+  // and could win as the "nearest" match for real queries near the equator/prime meridian.
+  if (!name || !Number.isFinite(lat) || !Number.isFinite(lon) || !countryCode) {
     skipped++;
     continue;
   }
@@ -52,13 +58,13 @@ for (const line of lines) {
     city: name,
     region: countryCode === 'US' && admin1Code ? admin1Code : null,
     country,
-    lat: Number(lat),
-    lon: Number(lon),
+    lat,
+    lon,
   });
 }
 
 // Deterministic, diff-friendly ordering for a ~130k-entry file.
-places.sort((a, b) => (a.country + a.city).localeCompare(b.country + b.city));
+places.sort((a, b) => a.country.localeCompare(b.country) || a.city.localeCompare(b.city));
 
 mkdirSync(dirname(OUT_PATH), { recursive: true });
 writeFileSync(OUT_PATH, `[\n${places.map((p) => `  ${JSON.stringify(p)}`).join(',\n')}\n]\n`);

@@ -18,8 +18,9 @@ const EARTH_RADIUS_KM = 6371;
 const NEARBY_KM = 50; // within this, name the place plainly
 const FAR_KM = 300; // beyond this, the dataset has nothing useful to say
 
+const toRad = (deg) => (deg * Math.PI) / 180;
+
 function haversineKm(lat1, lon1, lat2, lon2) {
-  const toRad = (deg) => (deg * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a = Math.sin(dLat / 2) ** 2
@@ -30,7 +31,10 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 // Returns a place_label string, or null if the dataset has nothing within FAR_KM (an honest
 // "don't know" rather than mislabeling an artifact with a place hundreds of km away).
 export function reverseGeocode(lat, lon) {
-  if (lat == null || lon == null) return null;
+  // IngestPayloadSchema only requires z.number() — out-of-range values (e.g. a malformed
+  // connector payload sending latitude:999) reach here unvalidated; a defined-but-meaningless
+  // haversine distance would otherwise still produce a confidently wrong "nearest" label.
+  if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
   let nearest = null;
   let nearestKm = Infinity;
   for (const place of PLACES) {

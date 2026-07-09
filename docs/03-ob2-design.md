@@ -202,8 +202,14 @@ Notes:
 
 > **Embeddings row superseded by the implementation:** the live stack is local
 > `qwen3-embedding:0.6b` via Ollama (1024-dim, `VECTOR_DIMENSION`), not `text-embedding-3-small`
-> or `nomic-embed-text` — see [`local-llm-setup-guide.md`](local-llm-setup-guide.md). The rest of
-> the table is still the working plan for future enrichers.
+> or `nomic-embed-text` — see [`local-llm-setup-guide.md`](local-llm-setup-guide.md).
+>
+> **Reverse geocoding row superseded by the implementation:** shipped as `src/geocode.js` +
+> a bundled GeoNames-derived dataset (`src/geodata/places.json`, ~135k places, CC BY 4.0) —
+> not the `local-reverse-geocoder` npm package this row originally sketched. Core resolves
+> `place_label` from any connector-submitted `latitude`/`longitude` (issue #67); connectors
+> never bundle their own place dataset. The rest of the table is still the working plan for
+> future enrichers.
 
 | Job | Cloud (via your OpenRouter gateway) | Local (privacy-max) |
 |---|---|---|
@@ -212,7 +218,7 @@ Notes:
 | Speech → text | — | `whisper.cpp` (local is genuinely best here) |
 | NER / entity extraction | Small LLM with JSON-output prompt | Same model via Ollama |
 | Face clustering | ❌ never cloud | `insightface` — embeddings + DBSCAN, cluster IDs you name once |
-| Reverse geocoding | — | Offline dataset (e.g., `local-reverse-geocoder`) — keeps location data local |
+| Reverse geocoding | ❌ never cloud | ~~Offline dataset (e.g., `local-reverse-geocoder`)~~ — shipped, see callout above |
 | EXIF | — | `exifr` (npm) |
 
 **Recommendation:** cloud VLM for the initial photo backlog (fast, cheap, quality), local-only for faces and location. Make the enricher an interface so each job's backend is a config flag.
