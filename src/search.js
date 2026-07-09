@@ -302,4 +302,4 @@ export function aboutEntity(name, limit = 10) {
   return { resolved: true, name, entities };
 }
 
-export { getArtifactById };
+export { getArtifactById, rrf };
