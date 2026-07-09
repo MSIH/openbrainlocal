@@ -9,7 +9,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import piexif from 'piexifjs';
-import { reverseGeocode } from './lib/reverse-geocode.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // import.meta.dirname needs Node 20.11+; this connector declares >=18
 
@@ -58,12 +57,6 @@ function run(script, env) {
   });
 }
 
-test('reverseGeocode: exact, near, and out-of-range', () => {
-  assert.equal(reverseGeocode(30.2672, -97.7431), 'Austin, TX');
-  assert.equal(reverseGeocode(0, -140), null); // mid-Pacific, nothing in the dataset nearby
-  assert.equal(reverseGeocode(null, null), null);
-});
-
 test('scan.js: EXIF + GPS photo, GPS-only photo, no-metadata photo, unchanged-file skip', async () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-test-'));
   writeFileSync(path.join(tmp, 'with-both.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00', lat: 30.2672, lon: -97.7431 }));
@@ -94,15 +87,15 @@ test('scan.js: EXIF + GPS photo, GPS-only photo, no-metadata photo, unchanged-fi
 
   const both = artifacts.find((a) => a.source_id === 'with-both.jpg');
   assert.equal(both.type, 'photo');
-  assert.equal(both.text_repr, 'Photo taken 2019-03-04 in Austin, TX');
+  assert.equal(both.text_repr, 'Photo taken 2019-03-04');
   assert.equal(both.occurred_at, '2019-03-04T14:30:00.000Z');
   assert.equal(both.latitude, 30.2672);
-  assert.equal(both.place_label, 'Austin, TX');
+  assert.equal(both.place_label, undefined); // this connector never resolves place_label; core does (issue #67)
   assert.match(both.content_hash, /^[0-9a-f]{64}$/);
   assert.equal(both.extra.captioned, false);
 
   const gpsOnly = artifacts.find((a) => a.source_id === 'gps-only.jpg');
-  assert.equal(gpsOnly.text_repr, 'Photo taken in London, UK');
+  assert.equal(gpsOnly.text_repr, 'Photo: gps-only.jpg'); // no date, and no place phrase (GPS alone no longer produces one)
   assert.equal(gpsOnly.occurred_at, undefined); // no date -> omitted, never guessed from mtime
 
   const noMeta = artifacts.find((a) => a.source_id === 'no-metadata.jpg');
@@ -202,7 +195,7 @@ test('caption-worker.js: enriches text_repr in place, preserves EXIF fields via 
   assert.equal(ingestRequests.length, 1);
   const payload = ingestRequests[0];
   assert.equal(payload.source_id, 'photo.jpg');
-  assert.equal(payload.text_repr, 'Photo taken 2019-03-04 in Austin, TX two people cooking pasta in a kitchen');
+  assert.equal(payload.text_repr, 'Photo taken 2019-03-04 two people cooking pasta in a kitchen');
   assert.equal(payload.extra.captioned, true);
   // Upsert-only-what-changed: no occurred_at/latitude/place_label/raw_path/content_hash resent —
   // those were already stored by scan.js and must be left untouched (doc 04 §3 merge semantics).

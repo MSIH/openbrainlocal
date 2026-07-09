@@ -104,6 +104,8 @@ Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Author
 
 Feeding the brain is connector-driven: an HTTP ingest contract so anything — a Claude Code hook, an iMessage watcher, a photo-EXIF scan, a document-tree scan — can submit artifacts. The reference connectors live in [`connectors/`](connectors/) (one self-contained folder each; the HTTP contract is their only coupling to core — `npm run check:boundary` enforces it). See the [connector contract](docs/04-connector-contract.md) and the [roadmap](docs/05-roadmap.md).
 
+Location is resolved server-side: a connector submitting raw `latitude`/`longitude` gets a `place_label` filled in automatically, offline, against a bundled dataset (`src/geodata/places.json`, ~135k places) derived from [GeoNames](https://www.geonames.org/), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Regenerate it with `npm run geocode:build -- <path-to-cities1000.txt>` (the `--` forwards the path to the script) after downloading GeoNames' `cities1000.txt` dump (population ≥ 1,000) from <https://download.geonames.org/export/dump/cities1000.zip> — the raw dump isn't committed, only the derived file and `scripts/build-places.js` are.
+
 ## Design documents
 
 | Doc | What it covers |

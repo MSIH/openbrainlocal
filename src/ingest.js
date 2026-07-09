@@ -23,6 +23,7 @@ import { z } from 'zod';
 
 import { upsertArtifactTxn, getArtifactBySource } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
+import { reverseGeocode } from './geocode.js';
 import { isRegisteredType, isExtensionType } from './ingest-types.js';
 
 const JSON_BODY_LIMIT = '256kb'; // contract §2 per-request cap (raw media never travels here)
@@ -121,6 +122,28 @@ export async function executeIngest(payload) {
   const { extra, entity_hints, ...rest } = payload;
   const artifact = { ...rest };
   if (extra !== undefined) artifact.extra_json = JSON.stringify(extra);
+
+  // place_label is schema-optional but not schema-non-empty (unlike e.g. entity_hints' alias,
+  // which is .min(1)) — a "" from a connector means "I don't have one," not "clear it." Treat
+  // it exactly like an absent field: never forward it to upsertArtifactTxn, where a non-null ""
+  // would win the COALESCE and silently wipe an existing value despite the contract's "nothing
+  // can be cleared" rule (that rule only rejects an explicit `null`, not an empty string).
+  if (artifact.place_label === '') delete artifact.place_label;
+
+  // Core resolves place_label from raw coordinates when neither this payload nor the artifact's
+  // current stored row already has one (issue #67) — mirrors the text_repr -> embedding
+  // enrichment just above, but needs no textChanged-style gate: reverseGeocode is a pure local
+  // lookup, not a network call, so it's cheap enough to just always run when eligible. Checking
+  // `existing` (not just this payload) matters: a later upsert wave that resends lat/lon without
+  // place_label must never clobber a value already resolved — whether that value came from a
+  // connector's own explicit label or from this same enrichment on an earlier ingest.
+  if (
+    payload.latitude != null && payload.longitude != null && !payload.place_label
+    && !existing?.place_label
+  ) {
+    const label = reverseGeocode(payload.latitude, payload.longitude);
+    if (label) artifact.place_label = label;
+  }
 
   const result = upsertArtifactTxn(artifact, vector, hints);
   return { result, warnings };

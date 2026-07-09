@@ -86,7 +86,7 @@ async function main() {
     if (captioned.has(relPath)) continue;
     if (vlmDown) break; // the VLM is unreachable; stop rather than fail through the whole library
 
-    const { dateStr, place } = await describePhoto(absPath);
+    const { dateStr } = await describePhoto(absPath);
 
     let base64Image;
     try {
@@ -107,11 +107,12 @@ async function main() {
       break;
     }
 
-    const enrichedText = `${buildTextRepr(dateStr, place, path.basename(absPath))} ${captionText}`;
+    const enrichedText = `${buildTextRepr(dateStr, path.basename(absPath))} ${captionText}`;
     try {
       // Present fields only: text_repr + extra. Per doc 04 §3 upsert merge semantics, everything
-      // scan.js already stored (occurred_at, GPS, place_label, raw_path, content_hash) is left
-      // untouched — this is exactly the "enrichment wave" the contract's upsert exists for.
+      // scan.js already stored (occurred_at, GPS, raw_path, content_hash) — plus whatever core
+      // resolved into place_label from that GPS — is left untouched, since neither is present
+      // in this payload. This is exactly the "enrichment wave" the contract's upsert exists for.
       await postIngest({
         source: 'photo-exif',
         source_id: sourceIdFor(relPath),

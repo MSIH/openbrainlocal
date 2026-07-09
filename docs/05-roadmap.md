@@ -82,7 +82,7 @@ Makes the photo library time/place-queryable with zero inference; proves upsert-
 **Deliverables**
 
 1. Batch scan script: `exifr` over the archive → `DateTimeOriginal`, GPS → `POST /ingest/batch`; `content_hash` for cross-import dedup; minimal `text_repr`
-2. Offline reverse-geocode pass for `place_label` (local dataset, per doc 03 privacy tiering)
+2. ~~Offline reverse-geocode pass for `place_label` (local dataset, per doc 03 privacy tiering)~~ — moved to core: `place_label` is resolved server-side from submitted GPS (`src/geocode.js`, see doc 03 §3.2), not by this connector. Superseded by issue #67.
 3. VLM caption worker (separate process, NSSM service, low priority): queue = `type='photo'` artifacts with minimal `text_repr`; captions one, upserts same `(source, source_id)` with enriched `text_repr`, repeats; kill-safe at any point
 4. Nightly window scheduling for the worker (config, not code)
 5. Path: `connectors/photo-exif/` (worker lives with core or alongside — decide here, it's core enrichment per doc 04's transducer split)
