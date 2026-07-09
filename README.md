@@ -69,11 +69,11 @@ curl -s -X POST localhost:3000/api/remember -H "x-api-key: $KEY" -H "Content-Typ
 curl -s -X POST localhost:3000/api/recall   -H "x-api-key: $KEY" -H "Content-Type: application/json" -d '{"query":"where does my sister live"}'
 ```
 
-Recall returns the stored memory with a similarity score. For AI clients, point an MCP-capable tool (Claude Desktop, Cursor, …) at `http://<host>:3000/mcp` with an `x-api-key` header to get the memory tools.
+Recall returns the stored memory with a similarity score. For AI clients, point an MCP-capable tool (Claude Desktop, Cursor, …) at `http://<host>:3000/mcp` with an `x-api-key` header to get the memory tools. Clients that can only take a bare URL (some MCP setups, gemini/VS Code extensions) can pass the key as a `?api_key=<key>` query param instead (`http://<host>:3000/mcp?api_key=$KEY`) — the header is preferred; the query param leaks the key into logs and history (see [`docs/07`](docs/07-cloudflare-tunnel-setup.md#part-c--point-your-ai-tools-at-it)), and it does **not** work for the Claude.ai web connector (the MCP spec forbids query-string tokens — web needs header auth or OAuth).
 
 ## Interfaces
 
-Every endpoint/tool requires the `x-api-key` header. REST and MCP share one store.
+Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Authorization: Bearer`, or — for clients that can't set headers — an `?api_key=` query param; header preferred, see the caveat above). REST and MCP share one store.
 
 - **REST** — `POST /api/remember`, `POST /api/recall`, `POST /api/search`, `POST /api/timeline`, `POST /api/about_entity`, `GET /api/artifact/:id`
 - **Connector ingest** (`/api/v1`, see [`docs/04-connector-contract.md`](docs/04-connector-contract.md)) — `POST /api/v1/ingest` (submit one artifact; upsert on `(source, source_id)` — 201 create / 200 update, non-destructive issues accepted with a `warnings` array, 256 KB body cap), `POST /api/v1/ingest/batch` (submit 1–100 artifacts in one call; 200 with index-aligned per-item results + a `summary`, per-item isolation — one bad item is reported at its index, never poisons the rest), `GET /api/v1/ingest/types` (the machine-readable type registry, §6). The payload's JSON Schema is published at [`schemas/ingest.v1.json`](schemas/ingest.v1.json) (generated from the zod schema via `npm run schema:ingest`) so connector authors can validate offline, without a live server:
