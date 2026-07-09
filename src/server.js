@@ -388,10 +388,14 @@ app.delete("/mcp", requireAuth, handleExistingSession);
 // Path-token form of the same three routes, header-free, for clients that can only take a
 // bare URL (claude.ai web — issue #63). Explicit two-segment "/:token/mcp" rather than a
 // router mounted at "/:token": the latter would run its guard for "/api/..." too and shadow
-// every REST route. requirePathToken 404s before any of this runs when MCP_URL_TOKEN is unset.
-app.post("/:token/mcp", requirePathToken, wrap(handleMcpPost));
-app.get("/:token/mcp", requirePathToken, handleExistingSession);
-app.delete("/:token/mcp", requirePathToken, handleExistingSession);
+// every REST route. Registered only when MCP_URL_TOKEN is set — otherwise even a wrong-shaped
+// 404 from requirePathToken would be distinguishable from Express's default "no such route"
+// 404, letting a probe learn this feature exists at all. Unset means these routes never exist.
+if (MCP_URL_TOKEN) {
+  app.post("/:token/mcp", requirePathToken, wrap(handleMcpPost));
+  app.get("/:token/mcp", requirePathToken, handleExistingSession);
+  app.delete("/:token/mcp", requirePathToken, handleExistingSession);
+}
 
 // --- ERROR MIDDLEWARE ---
 app.use((err, req, res, next) => {
