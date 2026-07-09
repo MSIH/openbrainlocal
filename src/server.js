@@ -434,3 +434,7 @@ const shutdown = () => {
 };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Test seams (no runtime behavior): the app + its listener for an in-process HTTP smoke test,
+// and the constant-time auth comparator for a direct unit test. Not imported by any src/ module.
+export { app, serverInstance, secureCompare };
