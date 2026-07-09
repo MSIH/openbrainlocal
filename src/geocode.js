@@ -4,7 +4,7 @@
  * a network call. Core owns this (issue #67) so `place_label` resolution happens once, in one
  * place, for every current and future connector that submits raw latitude/longitude — mirrors
  * how core already owns text_repr -> embedding (doc 04 §3: connectors describe, core embeds).
- * Regenerate via `npm run geocode:build`; see scripts/build-places.js.
+ * Regenerate via `npm run geocode:build -- <path-to-cities1000.txt>`; see scripts/build-places.js.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

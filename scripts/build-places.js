@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * `npm run geocode:build` — regenerate src/geodata/places.json (issue #67) from a locally
- * downloaded GeoNames `cities1000.txt` dump (population >= 1000; not committed — download
+ * `npm run geocode:build -- <path-to-cities1000.txt>` (the `--` forwards the path through npm
+ * to this script) — regenerate src/geodata/places.json (issue #67) from a locally downloaded
+ * GeoNames `cities1000.txt` dump (population >= 1000; not committed — download
  * https://download.geonames.org/export/dump/cities1000.zip and unzip it yourself).
  *
  * Country names come from Node's built-in `Intl.DisplayNames` (ICU/CLDR), not GeoNames'
