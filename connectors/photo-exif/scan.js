@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Batch-scans a photo archive: EXIF DateTimeOriginal + GPS, offline reverse-geocode, sha256
-// content_hash, minimal text_repr — POSTed to LifeContext via /api/v1/ingest/batch. Zero
-// inference beyond what EXIF + a local city dataset already know (doc 04's transducer split:
-// this connector describes, core embeds). See README.md for setup and the exit test.
+// Batch-scans a photo archive: EXIF DateTimeOriginal + GPS, sha256 content_hash, minimal
+// text_repr — POSTed to LifeContext via /api/v1/ingest/batch. GPS is submitted raw; core
+// reverse-geocodes it into place_label server-side (issue #67 — doc 04's transducer split:
+// this connector describes, core embeds/resolves). See README.md for setup and the exit test.
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,14 +33,14 @@ function writeManifest(manifest) {
 }
 
 async function buildPayload(absPath, relPath) {
-  const { date, dateStr, place, latitude, longitude } = await describePhoto(absPath);
+  const { date, dateStr, latitude, longitude } = await describePhoto(absPath);
   const contentHash = await contentHashOfFile(absPath);
 
   const payload = {
     source: 'photo-exif',
     source_id: sourceIdFor(relPath),
     type: 'photo',
-    text_repr: buildTextRepr(dateStr, place, path.basename(absPath)),
+    text_repr: buildTextRepr(dateStr, path.basename(absPath)),
     content_hash: contentHash,
     raw_path: absPath,
     extra: { captioned: false },
@@ -53,7 +53,6 @@ async function buildPayload(absPath, relPath) {
     payload.latitude = latitude;
     payload.longitude = longitude;
   }
-  if (place) payload.place_label = place;
   return payload;
 }
 

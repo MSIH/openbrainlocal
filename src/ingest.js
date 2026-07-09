@@ -23,6 +23,7 @@ import { z } from 'zod';
 
 import { upsertArtifactTxn, getArtifactBySource } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
+import { reverseGeocode } from './geocode.js';
 import { isRegisteredType, isExtensionType } from './ingest-types.js';
 
 const JSON_BODY_LIMIT = '256kb'; // contract §2 per-request cap (raw media never travels here)
@@ -121,6 +122,16 @@ export async function executeIngest(payload) {
   const { extra, entity_hints, ...rest } = payload;
   const artifact = { ...rest };
   if (extra !== undefined) artifact.extra_json = JSON.stringify(extra);
+
+  // Core resolves place_label from raw coordinates when a connector didn't already supply one
+  // (issue #67) — mirrors the text_repr -> embedding enrichment just above, but needs no
+  // textChanged-style gate: reverseGeocode is a pure local lookup, not a network call, so
+  // it's cheap enough to just always run when eligible. A connector-supplied place_label
+  // (e.g. a device's own named location) is never overridden.
+  if (payload.latitude != null && payload.longitude != null && payload.place_label == null) {
+    const label = reverseGeocode(payload.latitude, payload.longitude);
+    if (label) artifact.place_label = label;
+  }
 
   const result = upsertArtifactTxn(artifact, vector, hints);
   return { result, warnings };

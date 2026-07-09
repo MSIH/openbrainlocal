@@ -15,7 +15,7 @@ The roadmap flags this as an open question ("worker lives with core or alongside
 ### `scan.js` (deliverables 1–2)
 1. Recursively walks `PHOTO_ROOT` for image files (`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.tif`, `.tiff`).
 2. Extracts `DateTimeOriginal` and GPS coordinates via `exifr`.
-3. Reverse-geocodes GPS **fully offline** against a bundled dataset of ~115 major world cities (`lib/places.json`, haversine nearest-match) — no network call, nothing leaves the machine (doc 03's privacy tiering).
+3. Submits GPS as raw `latitude`/`longitude` — this connector does no geocoding of its own. [LifeContext core](https://github.com/msih/life-context) resolves `place_label` from those coordinates server-side, fully offline (`src/geocode.js`), so every connector with GPS gets place resolution without bundling its own city dataset.
 4. Computes a sha256 `content_hash` of the file bytes (streamed, not loaded fully into memory).
 5. Sends `type='photo'` artifacts via `POST /api/v1/ingest/batch`.
 6. Skips files unchanged since the last scan (mtime+size cache in `PHOTO_EXIF_MANIFEST_PATH`) — repeat scans over a large library only process what's new.
@@ -52,7 +52,7 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 
 ## Known limitations
 
-- **Reverse geocoding is coarse by design** — nearest *major* city from a ~115-entry bundled dataset, not a precise address. A rural photo may resolve to a city 100+ km away (prefixed "near"), or to nothing at all if the nearest dataset entry is beyond 300 km (`lib/reverse-geocode.js`'s `FAR_KM`). This is a deliberate zero-network, zero-third-party-dependency tradeoff, not a bug — a bigger dataset can be swapped into `lib/places.json` later without changing any calling code.
+- **Reverse geocoding happens in LifeContext core, not here** — this connector submits raw `latitude`/`longitude` only. `place_label` resolution (coarseness, the "near" prefix, the distance cutoff beyond which nothing is labeled) is core's behavior now (`src/geocode.js` in [`msih/life-context`](https://github.com/msih/life-context)), not this connector's.
 - **`occurred_at` is never guessed from file mtime.** A photo with no `DateTimeOriginal` gets no `occurred_at` (and the core server's own warning), never an approximation — an import-time mtime would make a 2019 photo sort as "today," which is worse than an honest gap (doc 04 §3).
 - **Source ID is the relative file path.** Reorganizing the photo library after the first scan orphans history for moved files (a fresh `source_id` looks like a new artifact) — the same tradeoff every connector's `source`/`source_id` stability rule implies (doc 04 §3).
 - **The caption worker has no real vision model to test against in this repo's CI/dev environment** — `test.mjs` verifies the full flow (state tracking, upsert-only-what-changed, VLM-down handling) against a mock Ollama server, but the actual caption quality/latency of a real `llava` (or similar) model is unverified here.
@@ -66,7 +66,6 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 - `scan.js` — the EXIF batch scanner
 - `caption-worker.js` — the VLM enrichment worker
 - `lib/shared.js` — env loading, directory walk, shared `source_id` computation, ingest client
-- `lib/describe.js` — shared EXIF+place description logic (used by both scripts, so they can never drift)
-- `lib/reverse-geocode.js` + `lib/places.json` — the offline reverse geocoder
+- `lib/describe.js` — shared EXIF description logic (used by both scripts, so they can never drift)
 - `test.mjs` — `node --test` suite
 - `.env.example` — copy to `.env`
