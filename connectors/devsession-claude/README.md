@@ -69,6 +69,8 @@ The default provider spawns `claude -p` to do the summarizing — and that spawn
 
 The `claude-cli` provider works unchanged in a Claude Code web/cloud container — the spawned `claude` binary inherits whatever credentials the outer session already has.
 
+> **For a click-by-click walkthrough** of the Claude Code web environment settings below (with fake examples of exactly what to enter and where), see [`docs/08-claude-code-web-setup.md`](../../docs/08-claude-code-web-setup.md). The summary here is the reference; that doc is the tutorial.
+
 **This repo already ships the wiring for its own cloud sessions.** `.claude/settings.json` registers this connector under both `SessionEnd` and `PreCompact`, guarded so it runs *only* in cloud containers:
 
 ```json
