@@ -73,7 +73,7 @@ The `claude-cli` provider works unchanged in a Claude Code web/cloud container �
 
 ```json
 { "type": "command", "shell": "bash", "timeout": 120,
-  "command": "[ \"$CLAUDE_CODE_REMOTE\" = \"true\" ] && node \"$CLAUDE_PROJECT_DIR/connectors/devsession-claude/index.js\" || true" }
+  "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" = \"true\" ] && node \"$CLAUDE_PROJECT_DIR/connectors/devsession-claude/index.js\" || true" }
 ```
 
 The `CLAUDE_CODE_REMOTE=true` guard is the point: capturing *local* sessions stays the job of a user-level `~/.claude/settings.json` registration (which covers all your repos, not just this one), so the committed hook stands down locally — the guard short-circuits to `|| true` and node is never spawned. Without it, project + user hooks would both fire on every local session and summarize it twice (the upsert dedupes the artifact, but the summarizer would run twice). For contributors who don't run LifeContext, the committed hook is doubly inert: skipped locally by the guard, and a no-op in their own cloud sessions because the connector exits early when `LIFECONTEXT_API_KEY` is unset. **You do not register anything manually for this repo's cloud sessions** — you only set the environment variables below. (Other repos still need their own wiring plus the connector script on disk.)
