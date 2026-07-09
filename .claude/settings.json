@@ -16,6 +16,20 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" = \"true\" ] && node \"$CLAUDE_PROJECT_DIR/connectors/devsession-claude/index.js\" || true", "shell": "bash", "timeout": 120 }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" = \"true\" ] && node \"$CLAUDE_PROJECT_DIR/connectors/devsession-claude/index.js\" || true", "shell": "bash", "timeout": 120 }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash(gh issue create*)",

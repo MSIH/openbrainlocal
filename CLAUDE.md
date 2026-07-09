@@ -30,7 +30,7 @@ src/server.js            — the server: REST + MCP tools, auth, transport (impo
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
 src/contacts.js          — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
 connectors/              — external HTTP connectors, one self-contained folder each (doc 04; NEVER import src/ — `npm run check:boundary`)
-docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap, 06 consolidation, 07 Cloudflare Tunnel remote access)
+docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap, 06 consolidation, 07 Cloudflare Tunnel remote access, 08 Claude Code web session capture)
 .env.example             — required env template (copy to .env; never commit .env)
 .claude/rules/           — coding standards, data-model, connector-conventions, design-philosophy (read before editing)
 ```
@@ -88,7 +88,7 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 ## Workflow tooling & local settings
 The mandatory-workflow tooling is committed in `.claude/` so it travels with the repo — cloud/remote agents get only the git checkout, never `~/.claude`:
 - **Skills** (`.claude/commands/`): `/draft-issue`, `/pre-pr-review`, `/pre-doc-review`. **Agent** (`.claude/agents/`): `/planning` (Opus — issue + plan + worktree).
-- **Hooks** (`.claude/hooks/`): `draft-issue-gate` + `pre-pr-review-gate` (deny), `worktree-gate` (advisory), `worktree-edit-gate` (deny `.js` edits outside a worktree; stands down in cloud sessions), `cloud-issue-gate` (deny ALL repo edits in cloud sessions until an issue number is in `.claude/.cloud-issue-done`), `session-start` (bootstrap Node deps on cloud/remote). Wired + an `rm` deny in `.claude/settings.json`; direct-invocation tests in `hooks/test-gates.sh`.
+- **Hooks** (`.claude/hooks/`): `draft-issue-gate` + `pre-pr-review-gate` (deny), `worktree-gate` (advisory), `worktree-edit-gate` (deny `.js` edits outside a worktree; stands down in cloud sessions), `cloud-issue-gate` (deny ALL repo edits in cloud sessions until an issue number is in `.claude/.cloud-issue-done`), `session-start` (bootstrap Node deps on cloud/remote). Wired + an `rm` deny in `.claude/settings.json`; direct-invocation tests in `hooks/test-gates.sh`. `settings.json` also registers the cloud-gated `devsession-claude` `SessionEnd`/`PreCompact` session-capture hook — it runs only when `CLAUDE_CODE_REMOTE=true` (no-op locally, where a user-level hook handles capture) and no-ops without `LIFECONTEXT_API_KEY`; see `connectors/devsession-claude/README.md`.
 Personal Claude Code settings (model, permission mode, extra hooks) go in **`.claude/settings.local.json`** (gitignored) — never commit those to this public repo.
 
 </rules>
