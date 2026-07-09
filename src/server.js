@@ -25,7 +25,7 @@ import { z } from "zod";
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER } from './config.js';
+import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN } from './config.js';
 import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES } from './search.js';
@@ -106,6 +106,15 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: "Unauthorized: Invalid or missing secret key token." });
   }
   next();
+}
+
+// Capability-URL auth for the claude.ai web MCP connector (issue #63): the token lives in the
+// path, e.g. https://host/<token>/mcp. 404 (never 401) on mismatch/unset so the endpoint's
+// existence is never confirmed by probing — the same reasoning as returning a generic 404 for
+// any unknown route, but here it also has to hide behind MCP_URL_TOKEN being unset entirely.
+function requirePathToken(req, res, next) {
+  if (MCP_URL_TOKEN && secureCompare(req.params.token, MCP_URL_TOKEN)) return next();
+  res.status(404).end();
 }
 
 // --- MCP SERVER FACTORY ---
@@ -323,7 +332,7 @@ app.get('/api/v1/ingest/types', requireAuth, wrap(async (req, res) => {
 // --- STREAMABLE HTTP MCP TRANSPORT ---
 const activeMcpTransports = new Map();
 
-app.post("/mcp", requireAuth, wrap(async (req, res) => {
+async function handleMcpPost(req, res) {
   const sessionId = req.headers["mcp-session-id"];
 
   if (sessionId && activeMcpTransports.has(sessionId)) {
@@ -358,7 +367,9 @@ app.post("/mcp", requireAuth, wrap(async (req, res) => {
     error: { code: -32000, message: "Bad Request: No valid session ID provided" },
     id: null
   });
-}));
+}
+
+app.post("/mcp", requireAuth, wrap(handleMcpPost));
 
 // GET opens the server-initiated notification stream; DELETE explicitly ends a session.
 // Both need an existing, valid session — neither should ever create one.
@@ -373,6 +384,14 @@ const handleExistingSession = wrap(async (req, res) => {
 
 app.get("/mcp", requireAuth, handleExistingSession);
 app.delete("/mcp", requireAuth, handleExistingSession);
+
+// Path-token form of the same three routes, header-free, for clients that can only take a
+// bare URL (claude.ai web — issue #63). Explicit two-segment "/:token/mcp" rather than a
+// router mounted at "/:token": the latter would run its guard for "/api/..." too and shadow
+// every REST route. requirePathToken 404s before any of this runs when MCP_URL_TOKEN is unset.
+app.post("/:token/mcp", requirePathToken, wrap(handleMcpPost));
+app.get("/:token/mcp", requirePathToken, handleExistingSession);
+app.delete("/:token/mcp", requirePathToken, handleExistingSession);
 
 // --- ERROR MIDDLEWARE ---
 app.use((err, req, res, next) => {
