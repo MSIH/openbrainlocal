@@ -94,10 +94,13 @@ function secureCompare(input, secret) {
 }
 
 // Header wins over query param; a duplicated ?api_key= (Express yields an array) is a non-string,
-// which secureCompare rejects as invalid rather than crashing.
+// which secureCompare rejects as invalid rather than crashing. The Authorization scheme is
+// case-insensitive per RFC 7235, so match `Bearer` loosely and only when it's a well-formed string.
 function requireAuth(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const bearer = typeof authHeader === 'string' ? authHeader.match(/^Bearer\s+(.+)$/i)?.[1] : undefined;
   const token = req.headers['x-api-key']
-    || req.headers['authorization']?.replace('Bearer ', '')
+    || bearer
     || req.query?.[AUTH_QUERY_PARAM];
   if (!secureCompare(token, LIFECONTEXT_API_KEY)) {
     return res.status(401).json({ error: "Unauthorized: Invalid or missing secret key token." });
