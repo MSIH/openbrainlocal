@@ -67,10 +67,22 @@ The default provider spawns `claude -p` to do the summarizing — and that spawn
 
 ### Running on Claude Code web / cloud sessions
 
-The `claude-cli` provider works unchanged in a Claude Code web/cloud container — the spawned `claude` binary inherits whatever credentials the outer session already has. Two things differ from a local setup:
+The `claude-cli` provider works unchanged in a Claude Code web/cloud container — the spawned `claude` binary inherits whatever credentials the outer session already has.
 
-- **No `.env` file reaches the container.** Cloud sessions only get the git checkout — configure `LIFECONTEXT_URL` / `LIFECONTEXT_API_KEY` (and `CHAT_PROVIDER`/`CHAT_MODEL` if overriding the default) as real environment variables in the environment's own settings; the existing `.env` loader already prefers real env vars over the file, so no code change is needed.
-- **`LIFECONTEXT_URL` must be reachable from the container**, not `localhost` — point it at wherever LifeContext is actually exposed (a tunnel, a public host, etc.).
+**This repo already ships the wiring for its own cloud sessions.** `.claude/settings.json` registers this connector under both `SessionEnd` and `PreCompact`, guarded so it runs *only* in cloud containers:
+
+```json
+{ "type": "command", "shell": "bash", "timeout": 120,
+  "command": "[ \"$CLAUDE_CODE_REMOTE\" = \"true\" ] && node \"$CLAUDE_PROJECT_DIR/connectors/devsession-claude/index.js\" || true" }
+```
+
+The `CLAUDE_CODE_REMOTE=true` guard is the point: capturing *local* sessions stays the job of a user-level `~/.claude/settings.json` registration (which covers all your repos, not just this one), so the committed hook stands down locally — the guard short-circuits to `|| true` and node is never spawned. Without it, project + user hooks would both fire on every local session and summarize it twice (the upsert dedupes the artifact, but the summarizer would run twice). For contributors who don't run LifeContext, the committed hook is doubly inert: skipped locally by the guard, and a no-op in their own cloud sessions because the connector exits early when `LIFECONTEXT_API_KEY` is unset. **You do not register anything manually for this repo's cloud sessions** — you only set the environment variables below. (Other repos still need their own wiring plus the connector script on disk.)
+
+What differs from a local setup:
+
+- **No `.env` file reaches the container.** Cloud sessions only get the git checkout — configure `LIFECONTEXT_URL` / `LIFECONTEXT_API_KEY` (and `CHAT_PROVIDER`/`CHAT_MODEL` if overriding the default) as real environment variables in the [environment's own settings](https://code.claude.com/docs/en/claude-code-on-the-web); the existing `.env` loader already prefers real env vars over the file, so no code change is needed. Note the docs' warning: env vars are visible to anyone who can edit the environment config — treat `LIFECONTEXT_API_KEY` as a rotatable secret.
+- **`LIFECONTEXT_URL` must be reachable from the container**, not `localhost` — point it at wherever LifeContext is actually exposed (the Cloudflare Tunnel from [`docs/07-cloudflare-tunnel-setup.md`](../../docs/07-cloudflare-tunnel-setup.md), or another public host).
+- **The environment's network policy must allow that host.** The default "Trusted" allowlist won't include your personal tunnel domain — use a Custom allowlist (defaults + your domain) or Full access, or the ingest POST is blocked (and the payload only spools, which won't survive the container anyway).
 - **The spool is best-effort only.** If ingest fails, the payload is written to `DEVSESSION_SPOOL_PATH` for retry on the next run — but a cloud container is ephemeral, so a spooled payload does not survive container reclaim. Acceptable for a best-effort hook; there's no durable fix without a persistent volume.
 
 ## Known limitations
