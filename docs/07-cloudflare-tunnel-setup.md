@@ -154,6 +154,35 @@ Wherever a tool asked for your LifeContext address, swap `http://localhost:3000`
   this is exactly the "public/tunnel URL" their READMEs mention for cloud sessions.
 - **REST scripts**: same paths as always (`/api/remember`, `/api/recall`, …), new host.
 
+### Connecting claude.ai web (capability URL)
+
+The **claude.ai web/mobile** connector is the one client this whole guide can't get to with a
+header or a query param: its "Advanced settings" only offers an OAuth Client ID/Secret, with
+no field for a custom header or a static API key
+([anthropics/claude-ai-mcp #112](https://github.com/anthropics/claude-ai-mcp/issues/112),
+closed "not planned"). It *does* accept an arbitrary endpoint URL, though — so the credential
+has to ride in the URL path instead.
+
+1. Generate a token (this is a **separate** secret from `LIFECONTEXT_API_KEY` — see why below):
+
+   ```powershell
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+   ```
+
+2. Add it to `.env` as `MCP_URL_TOKEN=<the value>` and restart the server. Leaving it unset
+   keeps this feature off — every `/:token/mcp` request 404s, identical to before.
+3. In claude.ai's connector settings, use `https://lc.yourdomain.com/<token>/mcp` as the
+   server URL — no header, no OAuth. A wrong or missing token 404s (not 401), so a probe of
+   the plain `/mcp` path — or of `/<guess>/mcp` — never confirms an MCP endpoint exists there.
+
+**Why a second secret instead of reusing `LIFECONTEXT_API_KEY`?** A token in the URL path
+lands in Cloudflare's edge access logs (and any proxy in front of your server) in a way a
+header never does — it's structurally lower-trust. Keeping it separate means a leak of the
+URL token doesn't compromise the header key every other client (CLI, Desktop, connectors)
+relies on. **Rotate it** the same way you'd rotate any secret: generate a new value, update
+`MCP_URL_TOKEN`, restart, and update the URL in claude.ai's connector settings — the header
+key is untouched throughout.
+
 ---
 
 ## Part D — Optional extra locks (recommended, still free)

@@ -56,3 +56,11 @@ export const DIGEST_TIMELINE_DAYS = int(process.env.DIGEST_TIMELINE_DAYS, 14); /
 // --- Auth --- (raw value; the server validates it — scripts don't need it)
 export const LIFECONTEXT_API_KEY = process.env.LIFECONTEXT_API_KEY;
 export const LIFECONTEXT_API_KEY_PLACEHOLDER = 'change-this-to-a-long-secure-token';
+
+// Optional capability-URL token for the claude.ai web MCP connector, which offers no header
+// field (anthropics/claude-ai-mcp #112). Distinct from LIFECONTEXT_API_KEY — it rides in the
+// URL path, so it lands in Cloudflare edge/proxy access logs and must be rotatable on its own
+// without invalidating the header key CLI/Desktop clients use. Unset (undefined) = feature off:
+// every /:token/mcp request 404s exactly like today. Generate with:
+//   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+export const MCP_URL_TOKEN = process.env.MCP_URL_TOKEN;
