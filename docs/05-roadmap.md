@@ -146,7 +146,7 @@ additive core index) against the frozen contract — sequence them by the same v
 rule when their turn comes:
 
 - **Email** (Takeout mbox first, IMAP later) — highest-density relationship data; deterministic entity links at volume (doc 03 §3.1)
-- **Documents + filesystem watcher** — pdf-parse/mammoth extraction, NER-inferred links
+- **Documents + filesystem watcher** — the batch-scan half shipped as [`connectors/documents/`](../connectors/documents/) (#56 — pdfjs/mammoth/exceljs extraction + tesseract OCR worker); still open: the live filesystem watcher trigger and NER-inferred links
 - **Location visits** — Google Timeline / Owntracks pings segmented into visits via the event lane (doc 04 §5)
 - **Video/audio** — Whisper transcripts + keyframe captions; **social-media exports** (Takeout, X archive)
 - **Face clustering** (local-only, `insightface`), **CLIP visual-similarity second index** (doc 03 §3.3), **`merge_entities` admin endpoint** (doc 03 §7), cross-device sync, temporal knowledge graph
