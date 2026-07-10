@@ -50,7 +50,17 @@ A Claude Code `SessionEnd` (and, optionally, `PreCompact`) hook that turns every
 
 No `matcher` on either — `SessionEnd` fires for every reason (`clear`, `logout`, `prompt_input_exit`, …) and `PreCompact` fires for both `manual` (`/compact`) and `auto` (context-limit) triggers. Give both a generous `timeout`; the summarizer call can take a while (the `claude-cli` provider caps itself at `SUMMARIZE_TIMEOUT_MS`, ~90s, so a 120s hook timeout leaves headroom) and there's nothing to gain by cutting it off early (see Known Limitations below).
 
-4. End a real coding session, then the next morning try `search("where did I leave off")` over LifeContext's MCP or `POST /api/search` — it should return the session artifact with the right project context. That's the roadmap's exit test for this connector.
+4. End a real coding session — the hook pushes it to LifeContext as a `dev_session` artifact. See "Recalling these sessions in Claude Code" below to actually get it back.
+
+### Recalling these sessions in Claude Code
+
+This hook only **pushes** sessions into LifeContext (`POST /api/v1/ingest`) — it is not itself the memory/recall path, and installing it doesn't make Claude Code recall anything. Recall is a separate MCP integration you register once, on the Claude Code side:
+
+```bash
+claude mcp add -s user --transport http lifecontext "$LIFECONTEXT_URL/mcp" --header "x-api-key: $LIFECONTEXT_API_KEY"
+```
+
+Once registered, the next morning try asking Claude Code "where did I leave off" — it should call the `search` tool and return the session artifact with the right project context. That's the roadmap's exit test for this connector. See [Claude Code's MCP docs](https://docs.claude.com/en/docs/claude-code/mcp) for the `claude mcp add` command itself, and the [LifeContext README](https://github.com/msih/life-context/blob/2.0/README.md#interfaces) for the authoritative MCP/REST endpoint details.
 
 ### Why also register `PreCompact`
 
