@@ -125,11 +125,21 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS ingest_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved
+    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved|entity_merged
     actor       TEXT,
     details     TEXT                    -- JSON
   );
 `);
+
+// Guarded migration (#75): CREATE TABLE IF NOT EXISTS above won't add a column to an
+// entities table that already existed pre-upgrade — check PRAGMA table_info and ALTER once.
+// merged_into NULL = a live entity; non-NULL = a tombstone redirecting to its merge survivor
+// (mergeEntities never deletes the absorbed row — design-philosophy.md §1). Back up
+// life-context.db before upgrading, same as any schema change (data-model.md "Migrations").
+if (!db.prepare("PRAGMA table_info(entities)").all().some((c) => c.name === 'merged_into')) {
+  db.exec('ALTER TABLE entities ADD COLUMN merged_into INTEGER REFERENCES entities(id)');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_entities_merged_into ON entities(merged_into)');
 
 // --- PREPARED STATEMENTS (compiled once) ---
 const insertArtifactStmt = db.prepare(`
@@ -369,13 +379,30 @@ export function logEvent(eventType, actor, details) {
 export const normalizeName = (s) => s.trim().toLowerCase();
 export const normalizePhone = (s) => s.replace(/\D/g, '');
 
+// A merge (#75) tombstones the absorbed entity (merged_into = survivor) rather than deleting
+// it, so any id resolved via an alias is already the survivor in the normal case (mergeEntities
+// re-points entity_aliases rows). This follows merged_into defensively for any stale reference
+// that wasn't repointed. Capped hop count: merges only ever tombstone forward, never create a
+// cycle, but a bound protects against corrupt data looping forever.
+const getMergedIntoStmt = db.prepare('SELECT merged_into FROM entities WHERE id = ?');
+const MAX_MERGE_HOPS = 20;
+function resolveLiveEntityId(id) {
+  let current = id;
+  for (let i = 0; i < MAX_MERGE_HOPS; i++) {
+    const row = getMergedIntoStmt.get(current);
+    if (!row || row.merged_into == null) return current;
+    current = row.merged_into;
+  }
+  return current;
+}
+
 // Resolve a free-text name/email/phone into entity ids via the alias table. Name/email
 // aliases are stored lowercased; phone aliases digits-only — so try both normalizations.
 export function resolveEntityIds(term) {
   const ids = new Set(resolveAliasStmt.all(normalizeName(term)).map((r) => r.entity_id));
   const digits = normalizePhone(term);
   if (digits.length >= 7) for (const r of resolveAliasStmt.all(digits)) ids.add(r.entity_id);
-  return [...ids];
+  return [...new Set([...ids].map(resolveLiveEntityId))];
 }
 
 // Deterministic alias types earn confidence 1.0 outright (connector-supplied value ignored);
@@ -492,6 +519,191 @@ export function getEntity(id) {
   const e = getEntityStmt.get(id);
   if (e && e.attrs_json) e.attrs = safeJson(e.attrs_json);
   return e;
+}
+
+// --- Entity merge & duplicate detection (#75) ---
+// Identity resolution is the hard unsolved-in-general problem (doc 03 §7) — this is the
+// "accept occasional manual merges" admin surface, not auto-resolution.
+const getLiveEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ? AND merged_into IS NULL');
+const tombstoneEntityStmt = db.prepare('UPDATE entities SET merged_into = ? WHERE id = ?');
+// entity_aliases has no unique key on entity_id, and (alias, alias_type) is globally unique
+// across the WHOLE table (not per-entity) — so re-pointing entity_id can never collide with
+// an existing row; a plain UPDATE (no OR IGNORE) is correct and complete.
+const repointAliasesStmt = db.prepare('UPDATE entity_aliases SET entity_id = ? WHERE entity_id = ?');
+const countAliasesStmt = db.prepare('SELECT COUNT(*) AS n FROM entity_aliases WHERE entity_id = ?');
+// entity_links' PK is (artifact_id, entity_id, role) — repointing CAN collide when the
+// survivor already has a link for the same artifact+role (e.g. both entities were separately
+// hinted as "mentioned" on the same artifact before being recognized as one person). OR IGNORE
+// drops that specific row; the survivor already carries an equivalent link for that exact
+// artifact+role, so no link is actually lost — see docs/03-ob2-design.md §7.
+const repointLinksStmt = db.prepare('UPDATE OR IGNORE entity_links SET entity_id = ? WHERE entity_id = ?');
+const countLinksStmt = db.prepare('SELECT COUNT(*) AS n FROM entity_links WHERE entity_id = ?');
+// A direct keep<->absorb relation edge is meaningless once they're recognized as one person —
+// drop it before repointing so the repoint below can never produce a from=to self-loop.
+const deleteSelfRelationsStmt = db.prepare(`
+  DELETE FROM entity_relations
+  WHERE (from_entity_id = @keep AND to_entity_id = @absorb) OR (from_entity_id = @absorb AND to_entity_id = @keep)
+`);
+// entity_relations is UNIQUE(from_entity_id, to_entity_id, relation_type) on both edge columns —
+// repoint each side separately; OR IGNORE drops a row that would duplicate one the survivor
+// already has (same reasoning as entity_links above).
+const repointRelationsFromStmt = db.prepare('UPDATE OR IGNORE entity_relations SET from_entity_id = ? WHERE from_entity_id = ?');
+const repointRelationsToStmt = db.prepare('UPDATE OR IGNORE entity_relations SET to_entity_id = ? WHERE to_entity_id = ?');
+const countRelationsStmt = db.prepare('SELECT COUNT(*) AS n FROM entity_relations WHERE from_entity_id = ? OR to_entity_id = ?');
+
+/**
+ * Merge two entities: tombstone `absorbId` (merged_into = keepId, row never deleted —
+ * design-philosophy.md §1) and re-point its aliases/links/relations to `keepId`. All-or-nothing
+ * in one transaction. Throws (never silently no-ops) when either id is missing/already merged,
+ * or when keepId === absorbId — callers map these to 404/422. Returns
+ * { keep_id, absorb_id, moved: { aliases, links, relations } } — the pre-merge counts on the
+ * absorbed entity (a row dropped by an OR IGNORE repoint was already represented on the
+ * survivor, so counting "moved" this way over- rather than under-reports, never hides a loss).
+ */
+export const mergeEntities = db.transaction((keepId, absorbId) => {
+  if (keepId === absorbId) {
+    const err = new Error('mergeEntities: keep_id and absorb_id must differ');
+    err.code = 'SELF_MERGE';
+    throw err;
+  }
+  const keep = getLiveEntityStmt.get(keepId);
+  const absorb = getLiveEntityStmt.get(absorbId);
+  if (!keep || !absorb) {
+    const err = new Error('mergeEntities: keep_id or absorb_id not found (or already merged)');
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  const moved = {
+    aliases: countAliasesStmt.get(absorbId).n,
+    links: countLinksStmt.get(absorbId).n,
+    relations: countRelationsStmt.get(absorbId, absorbId).n,
+  };
+  deleteSelfRelationsStmt.run({ keep: keepId, absorb: absorbId });
+  repointAliasesStmt.run(keepId, absorbId);
+  repointLinksStmt.run(keepId, absorbId);
+  repointRelationsFromStmt.run(keepId, absorbId);
+  repointRelationsToStmt.run(keepId, absorbId);
+  tombstoneEntityStmt.run(keepId, absorbId);
+  logEvent('entity_merged', 'entities', {
+    keep_id: keepId, absorb_id: absorbId, moved,
+    absorbed_attrs: absorb.attrs_json ? safeJson(absorb.attrs_json) : null,
+  });
+  return { keep_id: keepId, absorb_id: absorbId, moved };
+});
+
+// Cheap token-overlap-free string similarity for typo/spelling near-duplicates ("Jon Smith" vs
+// "John Smith") — NOT nickname resolution ("Bob" vs "Robert" needs a name dictionary, out of
+// scope; see #75 Out of Scope). 1 - (Levenshtein distance / longer string's length).
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j - 1], prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+function nameSimilarity(a, b) {
+  const na = normalizeName(a), nb = normalizeName(b);
+  const maxLen = Math.max(na.length, nb.length);
+  return maxLen ? 1 - levenshtein(na, nb) / maxLen : 0;
+}
+const NAME_SIMILARITY_THRESHOLD = 0.6;
+
+const listLivePersonEntitiesStmt = db.prepare(
+  `SELECT id, canonical_name, attrs_json FROM entities WHERE kind = 'person' AND merged_into IS NULL`
+);
+// The contact's own artifact (role='self') — used as the embedding-distance tie-breaker signal.
+const getSelfArtifactVecStmt = db.prepare(`
+  SELECT v.embedding FROM entity_links el JOIN vec_artifacts v ON v.artifact_id = el.artifact_id
+  WHERE el.entity_id = ? AND el.role = 'self' LIMIT 1
+`);
+
+function cosineSimilarity(bufA, bufB) {
+  const a = new Float32Array(bufA.buffer, bufA.byteOffset, bufA.byteLength / 4);
+  const b = new Float32Array(bufB.buffer, bufB.byteOffset, bufB.byteLength / 4);
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0;
+}
+
+/**
+ * Rank candidate duplicate PERSON entities never merged into each other, by cheap signals:
+ * a shared normalized phone/email in their contact attrs (strong — contacts.js only
+ * auto-merges on shared email/exact name at import, NEVER on phone, so two records sharing a
+ * phone number is a real, common residue) and name similarity (typo-level; NOT nicknames).
+ * Embedding distance between each pair's own contact artifact enriches the reason as a
+ * tie-breaker rather than a standalone O(n²) sweep over the whole corpus. Read-only — never
+ * merges; a human (via merge_entities) decides. O(n²) over live person entities, acceptable at
+ * contact-book scale (hundreds to low thousands) for this on-demand admin call, not the search
+ * hot path. Returns pairs sorted by score desc, capped at `limit`.
+ */
+export function listProbableDuplicates(limit = 20) {
+  const entities = listLivePersonEntitiesStmt.all();
+  const nameById = new Map(entities.map((e) => [e.id, e.canonical_name]));
+  const byPhone = new Map();
+  const byEmail = new Map();
+  for (const e of entities) {
+    const attrs = e.attrs_json ? safeJson(e.attrs_json) ?? {} : {};
+    for (const p of attrs.phones ?? []) {
+      const norm = normalizePhone(p);
+      if (norm.length < 7) continue;
+      if (!byPhone.has(norm)) byPhone.set(norm, []);
+      byPhone.get(norm).push(e.id);
+    }
+    for (const em of attrs.emails ?? []) {
+      const norm = normalizeName(em);
+      if (!norm) continue;
+      if (!byEmail.has(norm)) byEmail.set(norm, []);
+      byEmail.get(norm).push(e.id);
+    }
+  }
+
+  const pairs = new Map(); // "minId:maxId" -> { a, b, score, reasons: [] }
+  const addPair = (idA, idB, score, reason) => {
+    if (idA === idB) return;
+    const a = Math.min(idA, idB), b = Math.max(idA, idB);
+    const key = `${a}:${b}`;
+    const existing = pairs.get(key) ?? { a, b, score: 0, reasons: [] };
+    existing.score = Math.max(existing.score, score);
+    existing.reasons.push(reason);
+    pairs.set(key, existing);
+  };
+  for (const [phone, ids] of byPhone) {
+    for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) addPair(ids[i], ids[j], 0.9, `shared phone ${phone}`);
+  }
+  for (const [email, ids] of byEmail) {
+    for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) addPair(ids[i], ids[j], 0.95, `shared email ${email}`);
+  }
+  for (let i = 0; i < entities.length; i++) {
+    for (let j = i + 1; j < entities.length; j++) {
+      const sim = nameSimilarity(entities[i].canonical_name, entities[j].canonical_name);
+      if (sim >= NAME_SIMILARITY_THRESHOLD) {
+        addPair(entities[i].id, entities[j].id, sim, `similar name ("${entities[i].canonical_name}" vs "${entities[j].canonical_name}")`);
+      }
+    }
+  }
+
+  return [...pairs.values()]
+    .map((p) => {
+      const vecA = getSelfArtifactVecStmt.get(p.a)?.embedding;
+      const vecB = getSelfArtifactVecStmt.get(p.b)?.embedding;
+      let reason = p.reasons.join('; ');
+      if (vecA && vecB) reason += `; contact text ${Math.round(cosineSimilarity(vecA, vecB) * 100)}% similar`;
+      return {
+        a: { id: p.a, name: nameById.get(p.a) },
+        b: { id: p.b, name: nameById.get(p.b) },
+        score: Math.round(p.score * 100) / 100,
+        reason,
+      };
+    })
+    .sort((x, y) => y.score - x.score)
+    .slice(0, limit);
 }
 
 export function getArtifactById(id) {

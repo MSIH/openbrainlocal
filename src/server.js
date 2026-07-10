@@ -28,7 +28,7 @@ import rateLimit from 'express-rate-limit';
 import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN } from './config.js';
 import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
-import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES } from './search.js';
+import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates } from './search.js';
 import { TYPE_REGISTRY } from './ingest-types.js';
 import { buildIngestRouter } from './ingest.js';
 
@@ -73,6 +73,11 @@ const TimelineSchema = z.object({
 });
 const AboutEntitySchema = z.object({ name: z.string().min(1), limit: LimitSchema.optional() });
 const GetArtifactSchema = z.object({ id: z.coerce.number().int().positive() });
+// Entity merge + duplicate detection (#75) — the curation admin surface, distinct from the
+// connector ingest lane. keep_id === absorb_id is a 422 the app layer raises (mergeEntities),
+// not a zod .refine() — that error must map to 422, not the ZodError middleware's 400.
+const MergeEntitiesSchema = z.object({ keep_id: z.coerce.number().int().positive(), absorb_id: z.coerce.number().int().positive() });
+const DuplicatesQuerySchema = z.object({ limit: z.coerce.number().int().positive().max(100).optional() });
 
 // --- OUTPUT FORMATTERS (MCP tools return text) ---
 const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
@@ -259,6 +264,59 @@ function buildMcpServer() {
     }
   );
 
+  server.registerTool(
+    "list_probable_duplicates",
+    {
+      title: "List probable duplicate contacts",
+      description:
+        "Rank likely-duplicate person entities (contacts imported from multiple sources rarely dedup " +
+        "perfectly) by shared phone/email and name similarity, so a human can review and merge them with " +
+        "merge_entities. Read-only — never merges anything itself.",
+      inputSchema: {
+        limit: z.coerce.number().int().positive().max(100).optional().describe("Max pairs to return (default 20)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ limit = 20 }) => {
+      const pairs = listProbableDuplicates(limit);
+      if (pairs.length === 0) return { content: [{ type: "text", text: "No probable duplicates found." }] };
+      const txt = pairs
+        .map((p) => `- [score ${p.score}] (#${p.a.id}) "${p.a.name}" <-> (#${p.b.id}) "${p.b.name}" — ${p.reason}`)
+        .join("\n");
+      return { content: [{ type: "text", text: txt }] };
+    }
+  );
+
+  server.registerTool(
+    "merge_entities",
+    {
+      title: "Merge two entities",
+      description:
+        "Merge two person entities that are the same real-world person (surfaced by list_probable_duplicates, " +
+        "or already known). The absorbed entity is tombstoned, never deleted; its aliases, artifact links, and " +
+        "relations move to the kept entity.",
+      inputSchema: {
+        keep_id: z.coerce.number().int().positive().describe("Entity id to keep (the survivor)."),
+        absorb_id: z.coerce.number().int().positive().describe("Entity id to merge into keep_id (tombstoned, not deleted)."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ keep_id, absorb_id }) => {
+      try {
+        const result = mergeEntities(keep_id, absorb_id);
+        return {
+          content: [{
+            type: "text",
+            text: `Merged entity #${absorb_id} into #${keep_id}. Moved: ${result.moved.aliases} aliases, ` +
+              `${result.moved.links} links, ${result.moved.relations} relations.`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Merge failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
   return server;
 }
 
@@ -327,6 +385,26 @@ app.get('/api/artifact/:id', requireAuth, wrap(async (req, res) => {
 // mislead connector authors.
 app.get('/api/v1/ingest/types', requireAuth, wrap(async (req, res) => {
   res.json({ version: 'v1', types: TYPE_REGISTRY });
+}));
+
+// Entity merge + duplicate detection (#75): the core-owned curation admin surface (doc
+// 03 §7's "accept occasional manual merges" — connectors may never merge/assert entities,
+// contract §1.2, so this exists in core, separate from the /api/v1/ingest connector lane).
+app.get('/api/v1/entities/duplicates', requireAuth, wrap(async (req, res) => {
+  const { limit } = DuplicatesQuerySchema.parse(req.query);
+  res.json({ pairs: listProbableDuplicates(limit ?? 20) });
+}));
+
+app.post('/api/v1/entities/merge', requireAuth, wrap(async (req, res) => {
+  const { keep_id, absorb_id } = MergeEntitiesSchema.parse(req.body);
+  try {
+    const result = mergeEntities(keep_id, absorb_id);
+    res.json({ merged: true, ...result });
+  } catch (err) {
+    if (err.code === 'SELF_MERGE') return res.status(422).json({ error: err.message });
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+    throw err; // unexpected — let the generic error middleware handle it
+  }
 }));
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---

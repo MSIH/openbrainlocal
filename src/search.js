@@ -8,7 +8,7 @@
  * Search never throws just because Ollama is offline.
  */
 import { z } from 'zod';
-import { db, resolveEntityIds, getEntity, getArtifactById, getRelations } from './db.js';
+import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, mergeEntities, listProbableDuplicates } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS } from './config.js';
 import { ARTIFACT_TYPES, TYPE_REGISTRY } from './ingest-types.js';
@@ -294,7 +294,11 @@ export function timeline(start, end, types, limit = 50) {
 }
 
 // Graph-only recall: no embedding. Resolve name -> entity -> recent linked artifacts +
-// person<->person relations (issue #37). `relations` is [] when the person has none.
+// person<->person relations (issue #37). `relations` is [] when the person has none. Merge
+// redirect (#75) is inherited from resolveEntityIds — a name that used to resolve to an
+// absorbed entity now resolves straight to the survivor, so no extra redirect logic is needed
+// here; the survivor's `aboutStmt` results already include the absorbed entity's re-pointed
+// links (the merge).
 export function aboutEntity(name, limit = 10) {
   const ids = resolveEntityIds(name);
   if (!ids.length) return { resolved: false, name, entities: [] };
@@ -302,4 +306,4 @@ export function aboutEntity(name, limit = 10) {
   return { resolved: true, name, entities };
 }
 
-export { getArtifactById, rrf };
+export { getArtifactById, rrf, mergeEntities, listProbableDuplicates };
