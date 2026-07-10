@@ -24,8 +24,12 @@ export function fixtureDetector(fixturePath) {
 // covered by the fixture detector, model quality/latency is a manual, on-device concern.
 export async function loadModelDetector(modelsPath) {
   if (!modelsPath) throw new Error('FACE_MODELS_PATH not set (required for face detection)');
-  const faceapi = await import('@vladmandic/face-api');
-  const { Canvas, Image, ImageData, loadImage } = await import('canvas');
+  // These are CJS packages; a dynamic import wraps their module.exports under `.default`, so fall
+  // back to the namespace only if there's no default (keeps working whichever way Node resolves it).
+  const faceapiMod = await import('@vladmandic/face-api');
+  const faceapi = faceapiMod.default ?? faceapiMod;
+  const canvasMod = await import('canvas');
+  const { Canvas, Image, ImageData, loadImage } = canvasMod.default ?? canvasMod;
   await import('@tensorflow/tfjs-node'); // registers the native backend as a side effect
   faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
   await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath);

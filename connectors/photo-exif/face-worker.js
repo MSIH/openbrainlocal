@@ -174,7 +174,11 @@ async function scan() {
       }
       entry = { statKey, faces: faces.length, clusters: [...new Set(clusterIds)], dateStr, ingestedSig: null };
       faceState[relPath] = entry;
-      saveClusters(clustersState); // persist clustering progress before the network step (kill-safe)
+      // Persist BOTH the clusters and the face-state entry before the network step, together, so a
+      // crash here can't leave clusters updated but the entry missing (which would re-detect this
+      // photo next run and double-count its centroids).
+      saveClusters(clustersState);
+      writeJson(FACE_STATE_PATH, faceState);
       detected++;
     }
 

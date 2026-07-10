@@ -74,7 +74,7 @@ async function main() {
   let vlmDown = false;
 
   for await (const { absPath, relPath } of walkImageFiles(PHOTO_ROOT)) {
-    if (relPath in captionCache) continue;
+    if (Object.hasOwn(captionCache, relPath)) continue; // own-key check (a relPath could be "constructor")
     if (vlmDown) break; // the VLM is unreachable; stop rather than fail through the whole library
 
     const { dateStr } = await describePhoto(absPath);
