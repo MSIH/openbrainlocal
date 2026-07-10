@@ -299,7 +299,9 @@ function buildMcpServer() {
         keep_id: z.coerce.number().int().positive().describe("Entity id to keep (the survivor)."),
         absorb_id: z.coerce.number().int().positive().describe("Entity id to merge into keep_id (tombstoned, not deleted)."),
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      // destructiveHint: true — tombstones an entity and repoints/deletes graph edges; there
+      // is no unmerge yet (#75 Out of Scope), so a client should treat this as hard to undo.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ keep_id, absorb_id }) => {
       try {

@@ -79,6 +79,16 @@ test('persistContactPhoto: external URI is recorded but never fetched (no raw_pa
   assert.deepEqual(result, { photo_url: 'https://example.com/p.jpg', media_type: 'image/jpeg' });
 });
 
+test('persistContactPhoto: a malicious ext (path traversal) is rejected, falls back to a safe extension', () => {
+  // This function is exported and takes a raw descriptor — parsePhoto always hands it a
+  // sanitized ext, but persistContactPhoto must not trust that on its own (a future/direct
+  // caller could pass anything). "../../x" must never escape CONTACTS_RAW_DIR.
+  const result = persistContactPhoto({ kind: 'base64', data: PHOTO_B64, mediaType: 'image/jpeg', ext: '../../../../etc/passwd' });
+  assert.ok(result.raw_path.startsWith(rawDir), 'the written path must stay inside CONTACTS_RAW_DIR');
+  assert.ok(result.raw_path.endsWith('.jpg'), 'an invalid ext falls back to the safe default');
+  assert.ok(existsSync(result.raw_path));
+});
+
 test('persistContactPhoto: malformed base64 logs and returns null, never throws', () => {
   const originalError = console.error;
   let logged = false;

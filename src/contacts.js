@@ -18,7 +18,7 @@
  * whole card is read (order-independent). vCard 4.0 equivalents (ANNIVERSARY/RELATED/NICKNAME)
  * are read by property name too, so both versions land in the same shape.
  */
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -147,9 +147,21 @@ export function persistContactPhoto(photo) {
     if (photo.kind === 'base64') {
       const bytes = decodeBase64Strict(photo.data);
       if (!bytes || !bytes.length) throw new Error('undecodable or empty PHOTO data');
-      const rawPath = path.join(CONTACTS_RAW_DIR, `${sha256(bytes)}.${photo.ext || 'jpg'}`);
+      // This function is exported and takes a raw descriptor — never trust photo.ext as a
+      // filename fragment even though the only current caller (parsePhoto) already sanitizes
+      // it: a short alnum-only allowlist is what stands between this and a path-traversal
+      // write outside CONTACTS_RAW_DIR (e.g. ext="../../x") for any future/direct caller.
+      const safeExt = /^[a-z0-9]{1,10}$/i.test(photo.ext ?? '') ? photo.ext : 'jpg';
+      const rawPath = path.join(CONTACTS_RAW_DIR, `${sha256(bytes)}.${safeExt}`);
       mkdirSync(CONTACTS_RAW_DIR, { recursive: true });
-      if (!existsSync(rawPath)) writeFileSync(rawPath, bytes);
+      try {
+        // Exclusive create, not existsSync-then-write: avoids a check-then-act race under
+        // concurrent imports. Content-addressed by sha256, so EEXIST always means identical
+        // bytes are already there — safe to treat as success, not a real conflict.
+        writeFileSync(rawPath, bytes, { flag: 'wx' });
+      } catch (writeErr) {
+        if (writeErr.code !== 'EEXIST') throw writeErr;
+      }
       return { raw_path: rawPath, media_type: photo.mediaType ?? null };
     }
   } catch (err) {
