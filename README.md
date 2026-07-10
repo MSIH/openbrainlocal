@@ -56,6 +56,8 @@ Seed the entity graph from your contacts (people become searchable and future em
 npm run import:contacts contacts.vcf
 ```
 
+Any embedded contact photo is decoded and preserved to `CONTACTS_RAW_DIR` (default `raw/contacts`, override in `.env`) — the future seed for face-recognition-based photo↔contact linking.
+
 Consolidate each day's artifacts into one searchable daily digest (schedule it nightly — see [`docs/06-consolidation.md`](docs/06-consolidation.md)):
 
 ```bash

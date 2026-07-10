@@ -27,6 +27,10 @@ export const TRUST_PROXY = int(process.env.TRUST_PROXY, 1);
 // Local file store. Overridable via DB_PATH — set it in .env to point at an existing DB.
 export const DB_PATH = process.env.DB_PATH || 'life-context.db';
 
+// Where contacts.js writes decoded vCard PHOTO bytes (raw_path target). Relative to cwd by
+// default so a fresh install just works; override to keep raw originals on a bigger disk.
+export const CONTACTS_RAW_DIR = process.env.CONTACTS_RAW_DIR || 'raw/contacts';
+
 // --- Embedding / LLM gateway (local Ollama, OpenAI-compatible) ---
 export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1';
 export const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'qwen3-embedding:0.6b';

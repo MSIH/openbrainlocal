@@ -1,0 +1,134 @@
+// Contacts import (#74): vCard PHOTO preservation. Covers the pure parser (parsePhoto), the
+// I/O layer (persistContactPhoto — decode/write, idempotency, malformed-input handling), and
+// the end-to-end importContacts path (raw_path/extra_json on the stored artifact, no
+// regression for photo-less cards). DB_PATH, OLLAMA_BASE_URL, and CONTACTS_RAW_DIR are all set
+// BEFORE contacts.js (which imports db.js/config.js/embeddings.js) is loaded.
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { useTempDb, startFakeOllama } from './helpers.mjs';
+
+const { cleanup } = useTempDb();
+const fake = await startFakeOllama();
+process.env.OLLAMA_BASE_URL = fake.baseUrl;
+const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-test-contacts-raw-'));
+process.env.CONTACTS_RAW_DIR = rawDir;
+
+const { parsePhoto, persistContactPhoto, importContacts } = await import('../src/contacts.js');
+const { db, getArtifactById } = await import('../src/db.js');
+
+after(async () => { db.close(); await fake.close(); cleanup(); rmSync(rawDir, { recursive: true, force: true }); });
+
+const PHOTO_BYTES = Buffer.from('hello-world-photo-bytes');
+const PHOTO_B64 = PHOTO_BYTES.toString('base64');
+
+const vcard = (body) => `BEGIN:VCARD\nVERSION:3.0\n${body}\nEND:VCARD\n`;
+
+test('parsePhoto: vCard 3.0 inline base64 (ENCODING=b + TYPE)', () => {
+  const p = parsePhoto(PHOTO_B64, [{ key: 'ENCODING', value: 'b' }, { key: 'TYPE', value: 'JPEG' }]);
+  assert.deepEqual(p, { kind: 'base64', data: PHOTO_B64, mediaType: 'image/jpeg', ext: 'jpg' });
+});
+
+test('parsePhoto: vCard 4.0 data: URI', () => {
+  const p = parsePhoto(`data:image/png;base64,${PHOTO_B64}`, []);
+  assert.equal(p.kind, 'base64');
+  assert.equal(p.data, PHOTO_B64);
+  assert.equal(p.ext, 'png');
+});
+
+test('parsePhoto: external http(s) URI', () => {
+  const p = parsePhoto('https://example.com/photo.jpg', [{ key: 'TYPE', value: 'JPEG' }]);
+  assert.deepEqual(p, { kind: 'uri', url: 'https://example.com/photo.jpg', mediaType: 'image/jpeg' });
+});
+
+test('parsePhoto: unrecognized shape returns null (photo silently absent)', () => {
+  assert.equal(parsePhoto('some-unrecognized-value', []), null);
+});
+
+test('persistContactPhoto: base64 -> content-addressed file under CONTACTS_RAW_DIR', () => {
+  const result = persistContactPhoto({ kind: 'base64', data: PHOTO_B64, mediaType: 'image/jpeg', ext: 'jpg' });
+  assert.ok(result.raw_path.startsWith(rawDir));
+  assert.ok(existsSync(result.raw_path));
+  assert.deepEqual(readFileSync(result.raw_path), PHOTO_BYTES);
+});
+
+test('persistContactPhoto: idempotent — same bytes write the same path, second call is a no-op write', () => {
+  const a = persistContactPhoto({ kind: 'base64', data: PHOTO_B64, mediaType: 'image/jpeg', ext: 'jpg' });
+  const b = persistContactPhoto({ kind: 'base64', data: PHOTO_B64, mediaType: 'image/jpeg', ext: 'jpg' });
+  assert.equal(a.raw_path, b.raw_path);
+});
+
+test('persistContactPhoto: external URI is recorded but never fetched (no raw_path)', () => {
+  const result = persistContactPhoto({ kind: 'uri', url: 'https://example.com/p.jpg', mediaType: 'image/jpeg' });
+  assert.deepEqual(result, { photo_url: 'https://example.com/p.jpg', media_type: 'image/jpeg' });
+});
+
+test('persistContactPhoto: malformed base64 logs and returns null, never throws', () => {
+  const originalError = console.error;
+  let logged = false;
+  console.error = () => { logged = true; };
+  try {
+    const result = persistContactPhoto({ kind: 'base64', data: '!!!not-valid-base64!!!', ext: 'jpg' });
+    assert.equal(result, null);
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(logged, true, 'a decode failure is logged, never swallowed');
+});
+
+test('persistContactPhoto: null descriptor (no PHOTO) is a no-op', () => {
+  assert.equal(persistContactPhoto(null), null);
+});
+
+test('importContacts: inline base64 PHOTO ends up as the contact artifact raw_path + extra_json.photo', async () => {
+  const text = vcard(`FN:Photo Person\nEMAIL:photo.person@example.com\nPHOTO;ENCODING=b;TYPE=JPEG:${PHOTO_B64}`);
+  const summary = await importContacts(text);
+  assert.equal(summary.artifacts, 1);
+  assert.equal(summary.photos, 1);
+
+  const row = db.prepare("SELECT id FROM artifacts WHERE source = 'vcard' AND text_repr LIKE 'Photo Person%'").get();
+  const artifact = getArtifactById(row.id);
+  assert.ok(artifact.raw_path && existsSync(artifact.raw_path));
+  assert.deepEqual(readFileSync(artifact.raw_path), PHOTO_BYTES);
+  assert.equal(artifact.extra.photo.media_type, 'image/jpeg');
+  assert.equal(artifact.extra.photo.raw_path, artifact.raw_path);
+});
+
+test('importContacts: card with no PHOTO imports unchanged (no regression)', async () => {
+  const text = vcard('FN:No Photo Person\nEMAIL:no.photo@example.com');
+  const summary = await importContacts(text);
+  assert.equal(summary.artifacts, 1);
+  assert.equal(summary.photos, 0);
+
+  const row = db.prepare("SELECT id FROM artifacts WHERE source = 'vcard' AND text_repr LIKE 'No Photo Person%'").get();
+  const artifact = getArtifactById(row.id);
+  assert.equal(artifact.raw_path, null);
+  assert.equal(artifact.extra.photo, undefined);
+});
+
+test('importContacts: malformed PHOTO does not abort the contact import', async () => {
+  const text = vcard(`FN:Bad Photo Person\nEMAIL:bad.photo@example.com\nPHOTO;ENCODING=b;TYPE=JPEG:!!!not-valid-base64!!!`);
+  const originalError = console.error;
+  console.error = () => {};
+  let summary;
+  try { summary = await importContacts(text); } finally { console.error = originalError; }
+  assert.equal(summary.artifacts, 1, 'contact still imports despite the bad photo');
+  assert.equal(summary.photos, 0);
+
+  const row = db.prepare("SELECT id FROM artifacts WHERE source = 'vcard' AND text_repr LIKE 'Bad Photo Person%'").get();
+  assert.equal(getArtifactById(row.id).raw_path, null);
+});
+
+test('importContacts: re-import is idempotent — no duplicate artifact, no duplicate photo write', async () => {
+  const text = vcard(`FN:Repeat Person\nEMAIL:repeat.person@example.com\nPHOTO;ENCODING=b;TYPE=JPEG:${PHOTO_B64}`);
+  const first = await importContacts(text);
+  const second = await importContacts(text);
+  assert.equal(first.artifacts, 1);
+  assert.equal(second.artifacts, 0);
+  assert.equal(second.skipped, 1);
+
+  const rows = db.prepare("SELECT id FROM artifacts WHERE source = 'vcard' AND text_repr LIKE 'Repeat Person%'").all();
+  assert.equal(rows.length, 1, 'no duplicate artifact on re-import');
+});
