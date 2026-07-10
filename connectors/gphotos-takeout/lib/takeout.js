@@ -101,7 +101,15 @@ export async function* walkTakeout(root) {
 }
 
 async function* walkDir(dir, gphotosRoot) {
-  const entries = await readdir(dir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    // An unreadable subdirectory (permissions, broken symlink, transient IO) must skip just that
+    // directory, not abort the whole scan — mirrors index.js's per-file tolerance.
+    console.error(`gphotos-takeout: skipping unreadable directory ${dir}`, err);
+    return;
+  }
   const jsonNames = new Set(entries.filter((e) => e.isFile() && isSidecarJson(e.name)).map((e) => e.name));
   const albumMeta = entries.find((e) => e.isFile() && e.name.toLowerCase() === 'metadata.json');
   const album = albumForDir(dir, gphotosRoot);

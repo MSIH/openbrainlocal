@@ -74,9 +74,14 @@ function canonicalPath(copies) {
 
 // Signature of the derived record — re-send only when something core would store changed
 // (adding a photo to a new person-album on a later run re-sends, so its links grow additively).
+// Includes type and raw_path: if the canonical copy changes (e.g. the year-bucket original is
+// deleted but an album copy remains), raw_path changes and the upsert must fire so core doesn't
+// keep a raw_path that no longer exists.
 function signatureOf(payload) {
   return JSON.stringify({
     t: payload.text_repr,
+    ty: payload.type,
+    r: payload.raw_path ?? null,
     o: payload.occurred_at ?? null,
     la: payload.latitude ?? null,
     lo: payload.longitude ?? null,
@@ -102,9 +107,15 @@ async function main() {
   manifest.sent ??= {};
 
   // Deliver anything a prior server-down run spooled, before scanning the current tree (§7).
+  // Best-effort: a spool failure must never block the scan from making progress on new files.
   // Mark flushed payloads sent so phase 2 doesn't redundantly re-send them (a later change to
   // the same photo still re-sends: phase 2 recomputes a fresh signature that won't match).
-  const flushResult = await flushSpool();
+  let flushResult = { flushed: [], remaining: 0 };
+  try {
+    flushResult = await flushSpool();
+  } catch (err) {
+    console.error('gphotos-takeout: spool flush failed, continuing with scan', err);
+  }
   for (const p of flushResult.flushed) manifest.sent[p.source_id] = signatureOf(p);
   if (flushResult.flushed.length || flushResult.remaining) {
     console.error(`gphotos-takeout: spool flushed ${flushResult.flushed.length}, ${flushResult.remaining} still pending`);

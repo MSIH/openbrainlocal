@@ -200,6 +200,36 @@ test('index.js: server down spools payloads, next run flushes them without dupli
   assert.equal(new Set(allSent).size, 5);
 });
 
+test('index.js: retries on 429 then delivers without spooling', async () => {
+  const { root, tmp } = makeTakeout();
+  const configPath = writeConfig(tmp);
+  const spoolPath = path.join(tmp, 'gphotos-takeout-spool.jsonl');
+  let calls = 0;
+  const { server, port } = await startMockServer((req, body, res) => {
+    calls++;
+    if (calls === 1) { // first attempt rate-limited; Retry-After keeps the backoff short
+      res.statusCode = 429;
+      res.setHeader('retry-after', '1');
+      res.end(JSON.stringify({ error: 'rate_limited' }));
+      return;
+    }
+    okBatch(req, body, res);
+  });
+  const result = await run({
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    TAKEOUT_ROOT: root,
+    GPHOTOS_PEOPLE_CONFIG: configPath,
+    GPHOTOS_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
+    GPHOTOS_SPOOL_PATH: spoolPath,
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(calls >= 2, 'connector retried after the 429');
+  assert.ok(!existsSync(spoolPath), 'succeeded on retry, so nothing was spooled');
+});
+
 test('index.js: manifest prunes entries for files removed from the tree', async () => {
   const { root, tmp } = makeTakeout();
   const configPath = writeConfig(tmp);

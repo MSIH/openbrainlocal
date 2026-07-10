@@ -54,23 +54,36 @@ export function writeJson(filePath, value) {
   writeFileSync(filePath, JSON.stringify(value));
 }
 
+// Retry only on rate-limit / transient-unavailable; everything else (4xx, network error) is a
+// hard failure the caller spools. Exponential backoff 2s→4s→8s→16s, honoring Retry-After when
+// the server sends one (connector-conventions.md / doc 04 §7: "Respect 429s with backoff").
+const RETRY_STATUSES = new Set([429, 503]);
+const MAX_RETRIES = 4;
+const BASE_BACKOFF_MS = 2000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchWithRetry(target, options) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(target, options);
+    if (!RETRY_STATUSES.has(res.status) || attempt >= MAX_RETRIES) return res;
+    const retryAfter = Number(res.headers.get('retry-after'));
+    const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : BASE_BACKOFF_MS * 2 ** attempt;
+    await res.arrayBuffer().catch(() => {}); // drain so the socket is reusable
+    await sleep(delay);
+  }
+}
+
 export function ingestClient({ url, apiKey }) {
+  const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
+
   async function postIngest(payload) {
-    const res = await fetch(`${url}/api/v1/ingest`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
-      body: JSON.stringify(payload),
-    });
+    const res = await fetchWithRetry(`${url}/api/v1/ingest`, { method: 'POST', headers, body: JSON.stringify(payload) });
     if (!res.ok) throw new Error(`ingest returned ${res.status}`);
     return res.json();
   }
 
   async function postIngestBatch(payloads) {
-    const res = await fetch(`${url}/api/v1/ingest/batch`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
-      body: JSON.stringify({ artifacts: payloads }),
-    });
+    const res = await fetchWithRetry(`${url}/api/v1/ingest/batch`, { method: 'POST', headers, body: JSON.stringify({ artifacts: payloads }) });
     if (!res.ok) throw new Error(`ingest batch returned ${res.status}`);
     return res.json();
   }
@@ -96,7 +109,16 @@ export function spoolClient({ spoolPath, postIngestBatch, batchMax }) {
     } catch {
       return { flushed: [], remaining: 0 }; // no spool file yet
     }
-    const payloads = lines.map((l) => JSON.parse(l));
+    // Parse per line: a single truncated/corrupt spool line (e.g. from a killed write) must not
+    // prevent flushing every other payload. Skip and log the bad line, keep the rest.
+    const payloads = [];
+    for (const line of lines) {
+      try {
+        payloads.push(JSON.parse(line));
+      } catch {
+        console.error('gphotos-takeout: skipping corrupt spool line');
+      }
+    }
     const remaining = [];
     const flushed = []; // returned so the caller can mark them sent and skip re-sending in phase 2
     for (const group of chunk(payloads, batchMax)) {

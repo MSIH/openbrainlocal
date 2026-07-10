@@ -51,7 +51,9 @@ export function hintsForAlbums(albumTitles, config) {
       role: opts.role ?? config.defaults.role,
       confidence: opts.confidence ?? config.defaults.confidence,
     };
-    byKey.set(`${hint.alias} ${hint.role}`, hint);
+    // Delimiter-free composite key (a JSON tuple) so no alias/role value can collide with the
+    // separator — clearer and safer than concatenating with a sentinel character.
+    byKey.set(JSON.stringify([hint.alias, hint.role]), hint);
   };
 
   for (const title of albumTitles) {
