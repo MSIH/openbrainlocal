@@ -284,7 +284,12 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   const applyGeo = (sqlSet, geo) => {
     if (geo == null) return sqlSet;
     if (sqlSet == null) return geo;
-    return new Set([...sqlSet].filter((id) => geo.has(id)));
+    // Intersect by scanning the smaller set and probing the larger — avoids materializing an
+    // intermediate array from the (possibly large) SQL candidate set.
+    const [small, big] = sqlSet.size <= geo.size ? [sqlSet, geo] : [geo, sqlSet];
+    const out = new Set();
+    for (const id of small) if (big.has(id)) out.add(id);
+    return out;
   };
 
   const hasSqlFilter = effTypes.length || entityIds.length || t0 || t1 || place;

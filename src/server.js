@@ -62,7 +62,7 @@ const RememberSchema = z.object({ content: ContentSchema });
 const RecallSchema = z.object({ query: z.string().min(1, "Query cannot be empty"), limit: LimitSchema });
 // Geo-radius center (#68): a place name (resolved to a center point via the bundled gazetteer)
 // or explicit coordinates. Shared by the REST schema and the MCP search tool.
-const NearSchema = z.union([z.string().min(1), z.object({ lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180) })]);
+const NearSchema = z.union([z.string().trim().min(1), z.object({ lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180) })]);
 const RadiusSchema = z.number().positive();
 const SearchSchema = z.object({
   query: z.string().min(1, "Query cannot be empty"),

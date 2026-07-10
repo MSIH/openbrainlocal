@@ -102,6 +102,18 @@ test('/api/search: near + radius_km geo-filters by coordinate (#68)', async () =
   assert.ok(nameIds.includes(sf.id), 'the SF photo is within 50km of San Francisco');
   assert.ok(!nameIds.includes(ny.id), 'the NY photo is excluded by the radius');
 
+  // Omitting radius_km falls back to GEO_RADIUS_DEFAULT_KM (25km): SF stays in, NY (~4100km) out.
+  const byDefault = await post('/api/search', { query: 'afternoon photo', near: 'San Francisco', limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(byDefault.status, 200);
+  const defaultIds = (await byDefault.json()).results.map((r) => r.id);
+  assert.ok(defaultIds.includes(sf.id) && !defaultIds.includes(ny.id), 'default radius keeps SF and still excludes NY');
+
+  // An absurd radius_km is clamped to GEO_RADIUS_MAX_KM (500km), so NY (~4100km away) stays excluded.
+  const clamped = await post('/api/search', { query: 'afternoon photo', near: 'San Francisco', radius_km: 999999, limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(clamped.status, 200);
+  const clampedIds = (await clamped.json()).results.map((r) => r.id);
+  assert.ok(clampedIds.includes(sf.id) && !clampedIds.includes(ny.id), 'radius_km is clamped to the max; NY stays excluded');
+
   const byCoord = await post('/api/search', { query: 'afternoon photo', near: { lat: 40.71, lon: -74.0 }, radius_km: 50, limit: 10 }, { 'x-api-key': API_KEY });
   assert.equal(byCoord.status, 200);
   const coordIds = (await byCoord.json()).results.map((r) => r.id);
@@ -115,6 +127,10 @@ test('/api/search: near + radius_km geo-filters by coordinate (#68)', async () =
   // Out-of-range explicit coordinates are rejected at the schema (400), not silently ignored.
   const badCoord = await post('/api/search', { query: 'afternoon photo', near: { lat: 999, lon: 999 } }, { 'x-api-key': API_KEY });
   assert.equal(badCoord.status, 400, 'garbage coordinates 400 rather than disabling the filter silently');
+
+  // A whitespace-only place name is rejected at the schema (trim().min(1)), not a silent no-op.
+  const blankNear = await post('/api/search', { query: 'afternoon photo', near: '   ' }, { 'x-api-key': API_KEY });
+  assert.equal(blankNear.status, 400, 'whitespace-only near is rejected rather than silently ignored');
 });
 
 test('/api/v1/entities/duplicates + /api/v1/entities/merge (#75): surfaces, merges, and rejects bad merges', async () => {
