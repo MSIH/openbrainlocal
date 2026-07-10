@@ -8,13 +8,14 @@
 // Nightly-window scheduling is config, not code (roadmap deliverable 4) — this script does a
 // single pass and exits; start/stop it on a schedule with cron, launchd, or Task Scheduler.
 // See README.md for a scheduling snippet.
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadDotEnvIfPresent, walkImageFiles, sourceIdFor, ingestClient } from './lib/shared.js';
 import { describePhoto, buildTextRepr } from './lib/describe.js';
+import { readCaptionCache, writeCaptionCache } from './lib/caption-cache.js';
 
 loadDotEnvIfPresent(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -31,19 +32,6 @@ const rawThrottle = Number(process.env.VLM_THROTTLE_MS);
 const VLM_THROTTLE_MS = Number.isFinite(rawThrottle) ? rawThrottle : 2000;
 const STATE_PATH = process.env.PHOTO_EXIF_CAPTION_STATE_PATH
   || path.join(os.homedir(), '.life-context', 'photo-exif-captions.json');
-
-function readState() {
-  try {
-    return new Set(JSON.parse(readFileSync(STATE_PATH, 'utf8')));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeState(captioned) {
-  mkdirSync(path.dirname(STATE_PATH), { recursive: true });
-  writeFileSync(STATE_PATH, JSON.stringify([...captioned]));
-}
 
 async function caption(base64Image) {
   const res = await fetch(`${VLM_BASE_URL}/api/generate`, {
@@ -78,12 +66,15 @@ async function main() {
   }
 
   const { postIngest } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
-  const captioned = readState();
+  // relPath -> caption text, so the face worker can reconstruct base+caption before appending
+  // "Pictured: ..." (lib/caption-cache.js). A present key means "already captioned" — same
+  // skip semantics as the old Set, but the text is retained now.
+  const captionCache = readCaptionCache(STATE_PATH);
   let done = 0;
   let vlmDown = false;
 
   for await (const { absPath, relPath } of walkImageFiles(PHOTO_ROOT)) {
-    if (captioned.has(relPath)) continue;
+    if (relPath in captionCache) continue;
     if (vlmDown) break; // the VLM is unreachable; stop rather than fail through the whole library
 
     const { dateStr } = await describePhoto(absPath);
@@ -120,8 +111,8 @@ async function main() {
         text_repr: enrichedText,
         extra: { captioned: true },
       });
-      captioned.add(relPath);
-      writeState(captioned); // after every success, not batched — kill-safe at any point
+      captionCache[relPath] = captionText;
+      writeCaptionCache(STATE_PATH, captionCache); // after every success, not batched — kill-safe
       done++;
     } catch (err) {
       console.error(`photo-exif: ingest failed for ${relPath}, will retry next run`, err);
