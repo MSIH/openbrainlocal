@@ -18,7 +18,8 @@
  * whole card is read (order-independent). vCard 4.0 equivalents (ANNIVERSARY/RELATED/NICKNAME)
  * are read by property name too, so both versions land in the same shape.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   db, storeArtifactTxn, sha256, logEvent,
@@ -26,6 +27,7 @@ import {
   canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
+import { CONTACTS_RAW_DIR } from './config.js';
 
 const findBySource = db.prepare('SELECT id FROM artifacts WHERE source = ? AND source_id = ?');
 const findByHash = db.prepare('SELECT id FROM artifacts WHERE content_hash = ? LIMIT 1');
@@ -86,6 +88,88 @@ function parseImpp(value, params) {
   return { service: paramValue(params, 'X-SERVICE-TYPE') || scheme, handle };
 }
 
+const PHOTO_EXT_BY_MEDIA = [[/PNG/i, 'png'], [/GIF/i, 'gif'], [/JPE?G/i, 'jpg']];
+// Falls back to the MIME subtype itself (e.g. "image/heic" -> "heic") when it isn't one of the
+// three canonicalized aliases above, rather than defaulting every unrecognized type to '.jpg' —
+// a HEIC/WEBP/etc. photo's file extension should match what its bytes actually are.
+function extForPhotoType(t) {
+  const known = PHOTO_EXT_BY_MEDIA.find(([re]) => re.test(t ?? ''))?.[1];
+  if (known) return known;
+  const subtype = String(t ?? '').match(/^image\/([a-z0-9.+-]+)$/i)?.[1];
+  return subtype ? subtype.toLowerCase().replace(/[^a-z0-9]/g, '') || null : null;
+}
+
+// Parse a vCard PHOTO property into a pure descriptor — no I/O here (finalizeCard stays a
+// pure parser; decode/write happens in persistContactPhoto). Three shapes: vCard 4.0 inline
+// `data:` URI (tolerating extra ;param=value segments per RFC 2397, e.g. ";charset=binary"
+// before ";base64,"), an external http(s) URI (never fetched — see persistContactPhoto), and
+// vCard 3.0 `ENCODING=b`/`BASE64` + `TYPE=`. Unrecognized shapes return null (photo silently
+// absent, same as no PHOTO property at all — this is optional data, not a required field).
+export function parsePhoto(value, params) {
+  const typeParam = paramValue(params, 'TYPE');
+  const mediaTypeParam = paramValue(params, 'MEDIATYPE');
+  const dataUri = value.match(/^data:([^;,]*)(?:;[a-zA-Z0-9.-]+=[^;,]*)*;base64,(.*)$/is);
+  if (dataUri) {
+    const mediaType = dataUri[1] || mediaTypeParam || 'image/jpeg';
+    return { kind: 'base64', data: dataUri[2], mediaType, ext: extForPhotoType(mediaType) || extForPhotoType(typeParam) || 'jpg' };
+  }
+  if (/^https?:\/\//i.test(value)) {
+    return { kind: 'uri', url: value, mediaType: mediaTypeParam || (typeParam ? `image/${typeParam.toLowerCase()}` : null) };
+  }
+  const encoding = (paramValue(params, 'ENCODING') || '').toUpperCase();
+  if (encoding === 'B' || encoding === 'BASE64') {
+    const mediaType = mediaTypeParam || (typeParam ? `image/${typeParam.toLowerCase()}` : 'image/jpeg');
+    return { kind: 'base64', data: value, mediaType, ext: extForPhotoType(typeParam) || extForPhotoType(mediaTypeParam) || 'jpg' };
+  }
+  return null;
+}
+
+// Strict base64 decode: rejects anything containing non-base64 characters, or a length that
+// isn't a multiple of 4 (a truncated/corrupted payload), rather than Node's lenient
+// Buffer.from (which silently skips invalid chars and decodes a truncated group anyway,
+// returning non-empty-but-corrupt bytes). A vCard PHOTO worth keeping should decode cleanly;
+// garbage or truncated input becomes a logged skip, not a corrupt image file.
+function decodeBase64Strict(raw) {
+  const cleaned = raw.replace(/\s+/g, '');
+  if (!cleaned || cleaned.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(cleaned)) return null;
+  return Buffer.from(cleaned, 'base64');
+}
+
+// Decode/write a photo descriptor (I/O layer — called before the transaction, like the embed
+// call). Inline base64 -> content-addressed file under CONTACTS_RAW_DIR (idempotent: same
+// bytes -> same path, skip-if-exists). External URI -> record the URL only, never fetched
+// (contacts import must not make arbitrary network requests). Returns null (and logs) on any
+// decode/write failure so one bad photo never aborts the rest of the import.
+export function persistContactPhoto(photo) {
+  if (!photo) return null;
+  try {
+    if (photo.kind === 'uri') return { photo_url: photo.url, media_type: photo.mediaType ?? null };
+    if (photo.kind === 'base64') {
+      const bytes = decodeBase64Strict(photo.data);
+      if (!bytes || !bytes.length) throw new Error('undecodable or empty PHOTO data');
+      // This function is exported and takes a raw descriptor — never trust photo.ext as a
+      // filename fragment even though the only current caller (parsePhoto) already sanitizes
+      // it: a short alnum-only allowlist is what stands between this and a path-traversal
+      // write outside CONTACTS_RAW_DIR (e.g. ext="../../x") for any future/direct caller.
+      const safeExt = /^[a-z0-9]{1,10}$/i.test(photo.ext ?? '') ? photo.ext : 'jpg';
+      const rawPath = path.join(CONTACTS_RAW_DIR, `${sha256(bytes)}.${safeExt}`);
+      mkdirSync(CONTACTS_RAW_DIR, { recursive: true });
+      try {
+        // Exclusive create, not existsSync-then-write: avoids a check-then-act race under
+        // concurrent imports. Content-addressed by sha256, so EEXIST always means identical
+        // bytes are already there — safe to treat as success, not a real conflict.
+        writeFileSync(rawPath, bytes, { flag: 'wx' });
+      } catch (writeErr) {
+        if (writeErr.code !== 'EEXIST') throw writeErr;
+      }
+      return { raw_path: rawPath, media_type: photo.mediaType ?? null };
+    }
+  } catch (err) {
+    console.error('contacts: failed to persist contact photo', err);
+  }
+  return null;
+}
+
 // Build the connector-agnostic contact object from a card's parsed property lines. Labels are
 // resolved first (a group's X-ABLabel may precede OR follow its value line), then each line is
 // routed. New list fields default to []; scalar fields are absent unless present. `address`,
@@ -131,6 +215,10 @@ function finalizeCard(lines, raw) {
       case 'X-PHONETIC-LAST-NAME': (c.phonetic ??= {}).family = value; break;
       case 'X-ABSHOWAS': if (value.toUpperCase() === 'COMPANY') c.isCompany = true; break;
       case 'KIND': if (value.toLowerCase() === 'org') c.isCompany = true; break;
+      // A card with more than one PHOTO line (e.g. a full photo plus a thumbnail variant) keeps
+      // only the last one successfully parsed — deliberate, not a bug: `c` is a scalar `photo`
+      // field (one preserved image per contact), matching every other scalar vCard field here.
+      case 'PHOTO': { const p = parsePhoto(value, params); if (p) c.photo = p; break; }
       default:
         if (LEGACY_IM_PROPS.has(prop)) c.im.push({ service: prop.replace(/^X-/, '').replace(/-USERNAME$/, ''), handle: value });
         break;
@@ -145,7 +233,7 @@ function finalizeCard(lines, raw) {
  * prefix, and multi-valued properties. Returns the connector-agnostic superset objects
  * (see finalizeCard): { fn, name, emails[], phones[], addresses[], address, org, title, role,
  * birthday, dates[], relatedNames[], categories[], nicknames[], urls[], im[], socialProfiles[],
- * phonetic, isCompany, note, uid, raw }.
+ * phonetic, isCompany, note, uid, photo, raw }.
  */
 export function parseVCards(text) {
   // Unfold folded lines, then normalize line endings.
@@ -227,8 +315,10 @@ function linkRelations(fromEntityId, artifactId, relatedNames) {
   resolveRelationHints(fromEntityId);
 }
 
-// One contact -> entity(+aliases) + contact artifact + self link, atomically.
-const importOneTxn = db.transaction((c, textRepr, contentHash, vec) => {
+// One contact -> entity(+aliases) + contact artifact + self link, atomically. `photo` is the
+// already-persisted-to-disk result of persistContactPhoto (or null) — I/O happens before this
+// transaction opens, same as the embed call.
+const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
   let entityId = resolveExistingEntity(c);
   let entityCreated = false;
   if (entityId == null) {
@@ -247,9 +337,10 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec) => {
   for (const e of c.emails) insertAliasStmt.run(entityId, normalizeName(e), 'email');
   for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasStmt.run(entityId, d, 'phone'); }
 
+  const extra = photo ? { ...structuredFields(c), photo } : structuredFields(c);
   const res = storeArtifactTxn(
     { type: 'contact', source: 'vcard', source_id: c.uid ?? null, content_hash: contentHash,
-      text_repr: textRepr, extra_json: JSON.stringify(structuredFields(c)) },
+      text_repr: textRepr, raw_path: photo?.raw_path ?? null, extra_json: JSON.stringify(extra) },
     vec,
     [{ entity_id: entityId, role: 'self', confidence: 1.0 }]
   );
@@ -261,7 +352,7 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec) => {
 
 export async function importContacts(text) {
   const cards = parseVCards(text);
-  let entitiesCreated = 0, artifacts = 0, skipped = 0;
+  let entitiesCreated = 0, artifacts = 0, skipped = 0, photos = 0;
   for (const c of cards) {
     const textRepr = contactTextRepr(c);
     const contentHash = sha256(c.raw);
@@ -270,11 +361,17 @@ export async function importContacts(text) {
     if (exists) { skipped++; continue; }
 
     const vec = await embedToFloat32(textRepr); // enrich BEFORE the transaction
-    const r = importOneTxn(c, textRepr, contentHash, vec);
+    const photo = persistContactPhoto(c.photo); // I/O BEFORE the transaction, same reasoning
+    const r = importOneTxn(c, textRepr, contentHash, vec, photo);
     if (r.deduped) skipped++; else artifacts++;
     if (r.entityCreated) entitiesCreated++;
+    // Only count a photo actually attached to a newly-stored artifact — on the rare dedup race
+    // (a concurrent import commits the same (source, source_id) between this loop's pre-check
+    // and the transaction), storeArtifactTxn returns the pre-existing row untouched and the
+    // file persistContactPhoto just wrote is orphaned, not attached; don't claim it as counted.
+    if (photo && !r.deduped) photos++;
   }
-  const summary = { cards: cards.length, entitiesCreated, artifacts, skipped };
+  const summary = { cards: cards.length, entitiesCreated, artifacts, skipped, photos };
   logEvent('import_contacts', 'contacts.js', summary);
   return summary;
 }
@@ -289,7 +386,8 @@ async function main() {
   const summary = await importContacts(readFileSync(file, 'utf8'));
   console.log(
     `Contacts import complete: ${summary.artifacts} contacts added ` +
-    `(${summary.entitiesCreated} new entities), ${summary.skipped} skipped, of ${summary.cards} vCards.`
+    `(${summary.entitiesCreated} new entities, ${summary.photos} photos preserved), ` +
+    `${summary.skipped} skipped, of ${summary.cards} vCards.`
   );
   db.close();
 }

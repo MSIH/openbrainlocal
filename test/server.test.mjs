@@ -16,7 +16,7 @@ process.env.OLLAMA_BASE_URL = fake.baseUrl;
 process.env.PORT = '0'; // ephemeral port — avoids collisions with a real running server
 
 const { app, serverInstance, secureCompare } = await import('../src/server.js');
-const { db } = await import('../src/db.js');
+const { db, insertEntityStmt, insertAliasStmt } = await import('../src/db.js');
 
 if (!serverInstance.listening) await once(serverInstance, 'listening');
 const { port } = serverInstance.address();
@@ -38,6 +38,8 @@ const post = (path, body, headers = {}) =>
     headers: { 'content-type': 'application/json', ...headers },
     body: JSON.stringify(body),
   });
+
+const get = (path, headers = {}) => fetch(`${base}${path}`, { headers });
 
 test('secureCompare: rejects non-strings and mismatches, accepts an exact match', () => {
   assert.equal(secureCompare(undefined, API_KEY), false);
@@ -82,4 +84,33 @@ test('/api/search: filter-then-rank path (planner + prefiltered KNN/FTS) returns
   assert.ok(Array.isArray(results) && results.length >= 1, 'search returns results');
   assert.ok(results.every((r) => r.type === 'note'), 'the type filter is applied via the SQL prefilter');
   assert.ok(results.some((r) => /penguins/.test(r.text_repr)), 'the matching artifact is returned');
+});
+
+test('/api/v1/entities/duplicates + /api/v1/entities/merge (#75): surfaces, merges, and rejects bad merges', async () => {
+  // Two entities sharing a phone number — the residue contacts.js's own auto-merge (email/exact
+  // name only) never catches, and exactly the gap list_probable_duplicates exists to surface.
+  const a = Number(insertEntityStmt.run('person', 'REST Dup One', JSON.stringify({ phones: ['5559990001'] })).lastInsertRowid);
+  const b = Number(insertEntityStmt.run('person', 'REST Dup Two', JSON.stringify({ phones: ['5559990001'] })).lastInsertRowid);
+  insertAliasStmt.run(a, 'rest dup one', 'name');
+  insertAliasStmt.run(b, 'rest dup two', 'name');
+
+  const dupRes = await get('/api/v1/entities/duplicates?limit=50', { 'x-api-key': API_KEY });
+  assert.equal(dupRes.status, 200);
+  const { pairs } = await dupRes.json();
+  assert.ok(
+    pairs.some((p) => [p.a.id, p.b.id].includes(a) && [p.a.id, p.b.id].includes(b)),
+    'the shared-phone pair is surfaced over REST'
+  );
+
+  const mergeRes = await post('/api/v1/entities/merge', { keep_id: a, absorb_id: b }, { 'x-api-key': API_KEY });
+  assert.equal(mergeRes.status, 200);
+  const merged = await mergeRes.json();
+  assert.equal(merged.merged, true);
+  assert.equal(merged.absorb_id, b);
+
+  const selfRes = await post('/api/v1/entities/merge', { keep_id: a, absorb_id: a }, { 'x-api-key': API_KEY });
+  assert.equal(selfRes.status, 422, 'self-merge is rejected');
+
+  const reMergeRes = await post('/api/v1/entities/merge', { keep_id: a, absorb_id: b }, { 'x-api-key': API_KEY });
+  assert.equal(reMergeRes.status, 404, 're-merging an already-tombstoned entity is rejected');
 });
