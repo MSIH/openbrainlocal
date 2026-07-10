@@ -3,12 +3,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import piexif from 'piexifjs';
+import { euclideanDistance, assignCluster, parseClustersFile, serializeClustersFile } from './lib/face-cluster.js';
+import { readCaptionCache, writeCaptionCache, currentTextRepr } from './lib/caption-cache.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // import.meta.dirname needs Node 20.11+; this connector declares >=18
 
@@ -44,9 +46,9 @@ function startMockServer(handler) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, requests })));
 }
 
-function run(script, env) {
+function run(script, env, args = []) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [path.join(__dirname, script)], {
+    const child = spawn(process.execPath, [path.join(__dirname, script), ...args], {
       env: { ...process.env, ...env },
     });
     let stdout = '';
@@ -203,7 +205,7 @@ test('caption-worker.js: enriches text_repr in place, preserves EXIF fields via 
   assert.equal(payload.latitude, undefined);
   assert.equal(payload.place_label, undefined);
 
-  assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), ['photo.jpg']);
+  assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), { 'photo.jpg': 'two people cooking pasta in a kitchen' });
 
   // Re-run: already captioned, VLM should not be called again.
   const rerun = await run('caption-worker.js', {
@@ -216,6 +218,45 @@ test('caption-worker.js: enriches text_repr in place, preserves EXIF fields via 
   });
   assert.equal(rerun.status, 0, rerun.stderr);
   assert.equal(vlmRequests.length, 1, 'already-captioned photo is not re-sent to the VLM');
+});
+
+test('caption-worker.js: legacy array-format state entries are re-captioned to populate the text map', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-legacy-caption-'));
+  writeFileSync(path.join(tmp, 'photo.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00' }));
+  const statePath = path.join(tmp, 'captions.json');
+  writeFileSync(statePath, JSON.stringify(['photo.jpg'])); // legacy array -> loaded as { 'photo.jpg': null }
+
+  const ingestRequests = [];
+  const { server: ingestServer, port: ingestPort } = await startMockServer((req, body, res) => {
+    ingestRequests.push(body);
+    res.end(JSON.stringify({ id: 1, created: false }));
+  });
+  const vlmRequests = [];
+  const vlmServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      vlmRequests.push(JSON.parse(body));
+      res.end(JSON.stringify({ response: 'a dog on a beach' }));
+    });
+  });
+  const vlmPort = await new Promise((resolve) => vlmServer.listen(0, '127.0.0.1', () => resolve(vlmServer.address().port)));
+
+  const result = await run('caption-worker.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${ingestPort}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp,
+    PHOTO_EXIF_CAPTION_STATE_PATH: statePath,
+    VLM_BASE_URL: `http://127.0.0.1:${vlmPort}`,
+    VLM_THROTTLE_MS: '0',
+  });
+  ingestServer.closeAllConnections();
+  ingestServer.close();
+  vlmServer.close();
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(vlmRequests.length, 1, 'a legacy (text-less) entry is re-captioned, not skipped');
+  assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), { 'photo.jpg': 'a dog on a beach' }, 'map now holds the caption text');
 });
 
 test('caption-worker.js: VLM unreachable stops the run without marking anything captioned', async () => {
@@ -234,4 +275,150 @@ test('caption-worker.js: VLM unreachable stops the run without marking anything 
 
   assert.equal(result.status, 0, result.stderr); // stops cleanly, not a crash
   assert.throws(() => readFileSync(statePath, 'utf8')); // nothing was captioned
+});
+
+// --- #53: face worker ------------------------------------------------------------------------
+
+test('face-cluster: euclidean + nearest-centroid grouping and new-cluster creation', () => {
+  assert.equal(euclideanDistance([0, 0, 0], [0, 0, 0]), 0);
+  assert.ok(Math.abs(euclideanDistance([0, 0, 0], [3, 4, 0]) - 5) < 1e-9);
+
+  const clusters = [];
+  const a = assignCluster([0, 0, 0], clusters, 0.6);
+  const b = assignCluster([0.05, 0, 0], clusters, 0.6); // within threshold -> same cluster
+  const c = assignCluster([9, 9, 9], clusters, 0.6); // far -> new cluster
+  assert.equal(a, b, 'nearby descriptors share a cluster');
+  assert.notEqual(a, c, 'distant descriptor starts a new cluster');
+  assert.equal(clusters.length, 2);
+  assert.equal(clusters.find((x) => x.id === a).count, 2);
+
+  // serialize round-trips version + clusters
+  const round = parseClustersFile(serializeClustersFile(3, clusters));
+  assert.equal(round.version, 3);
+  assert.equal(round.clusters.length, 2);
+  assert.deepEqual(parseClustersFile('not json'), { version: 0, clusters: [] });
+});
+
+test('caption-cache: legacy array read, map round-trip, currentTextRepr', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'caption-cache-'));
+  const p = path.join(tmp, 'captions.json');
+
+  writeFileSync(p, JSON.stringify(['2019/a.jpg', '2019/b.jpg'])); // legacy array
+  assert.deepEqual(readCaptionCache(p), { '2019/a.jpg': null, '2019/b.jpg': null });
+
+  writeCaptionCache(p, { 'x.jpg': 'a cat on a sofa' });
+  assert.deepEqual(readCaptionCache(p), { 'x.jpg': 'a cat on a sofa' });
+  assert.deepEqual(readCaptionCache(path.join(tmp, 'missing.json')), {}); // absent -> empty
+
+  assert.equal(currentTextRepr('2019-03-04', 'a.jpg', null), 'Photo taken 2019-03-04');
+  assert.equal(currentTextRepr('2019-03-04', 'a.jpg', 'a cat'), 'Photo taken 2019-03-04 a cat');
+  assert.equal(currentTextRepr(null, 'a.jpg', null), 'Photo: a.jpg');
+});
+
+test('face-worker: scan clusters + records faces, label emits pictured hints preserving caption, re-scan is idempotent', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'face-worker-'));
+  // Plain files — the fixture detector supplies descriptors; describePhoto tolerates non-EXIF.
+  writeFileSync(path.join(tmp, 'a.jpg'), 'aaaa');
+  writeFileSync(path.join(tmp, 'b.jpg'), 'bbbb');
+  writeFileSync(path.join(tmp, 'c.jpg'), 'cccc');
+  const fixturePath = path.join(tmp, 'faces-fixture.json');
+  writeFileSync(fixturePath, JSON.stringify({
+    'a.jpg': [[0, 0, 0]],
+    'b.jpg': [[0.05, 0, 0]], // same person as a
+    'c.jpg': [[9, 9, 9]], // different person
+  }));
+  // Pre-seed a caption for a.jpg so we can prove the "Pictured" append keeps the caption text.
+  const captionState = path.join(tmp, 'captions.json');
+  writeFileSync(captionState, JSON.stringify({ 'a.jpg': 'a sunny beach' }));
+
+  const faceState = path.join(tmp, 'faces.json');
+  const clustersState = path.join(tmp, 'clusters.json');
+  const env = {
+    LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp,
+    PHOTO_EXIF_FACE_FIXTURE: fixturePath,
+    PHOTO_EXIF_FACE_STATE_PATH: faceState,
+    PHOTO_EXIF_FACE_CLUSTERS_PATH: clustersState,
+    PHOTO_EXIF_CAPTION_STATE_PATH: captionState,
+    FACE_THROTTLE_MS: '0',
+    FACE_HINT_CONFIDENCE: '0.6',
+  };
+
+  // --- scan ---
+  const scanReqs = [];
+  const { server, port } = await startMockServer((req, body, res) => {
+    scanReqs.push(body);
+    res.end(JSON.stringify({ id: 1, created: false, resolved_entities: 0, unresolved_aliases: 0 }));
+  });
+  const scan = await run('face-worker.js', { ...env, LIFECONTEXT_URL: `http://127.0.0.1:${port}` });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(scan.status, 0, scan.stderr);
+  assert.equal(scanReqs.length, 3, 'one upsert per photo');
+  for (const r of scanReqs) {
+    assert.equal(r.type, 'photo');
+    assert.equal(typeof r.extra.faces_detected, 'number');
+    assert.equal(r.entity_hints, undefined, 'no hints while every cluster is unlabeled');
+    assert.equal(typeof r.text_repr, 'string', 'text_repr is required by the contract and always sent');
+    assert.doesNotMatch(r.text_repr, /Pictured:/, 'no Pictured sentence while unlabeled');
+  }
+  // Caption preserved through the unlabeled scan (reconstructed from the cache, not clobbered).
+  assert.equal(scanReqs.find((r) => r.source_id === 'a.jpg').text_repr, 'Photo: a.jpg a sunny beach');
+  assert.equal(scanReqs.find((r) => r.source_id === 'b.jpg').text_repr, 'Photo: b.jpg');
+  const clusters = parseClustersFile(readFileSync(clustersState, 'utf8')).clusters;
+  assert.equal(clusters.length, 2, 'a+b cluster, c alone');
+  const person = clusters.find((c) => c.count === 2); // the a+b cluster (id independent of walk order)
+  assert.ok(person, 'the two same-person photos formed one cluster');
+  assert.ok(existsSync(faceState), 'face state written (kill-safe)');
+
+  // --- label the a+b cluster ---
+  const labelReqs = [];
+  const { server: s2, port: p2 } = await startMockServer((req, body, res) => {
+    labelReqs.push(body);
+    res.end(JSON.stringify({ id: 1, created: false, resolved_entities: 1, unresolved_aliases: 0 }));
+  });
+  const lab = await run('face-worker.js', { ...env, LIFECONTEXT_URL: `http://127.0.0.1:${p2}` }, ['label', String(person.id), 'Sarah Jones']);
+  s2.closeAllConnections();
+  s2.close();
+  assert.equal(lab.status, 0, lab.stderr);
+  assert.equal(labelReqs.length, 2, 'only the two photos in the labeled cluster are re-emitted');
+  for (const r of labelReqs) {
+    assert.deepEqual(r.entity_hints, [{ alias: 'Sarah Jones', alias_type: 'name', role: 'pictured', confidence: 0.6 }]);
+    assert.match(r.text_repr, /Pictured: Sarah Jones\.$/);
+    assert.deepEqual(r.extra.pictured, ['Sarah Jones']);
+  }
+  const aReq = labelReqs.find((r) => r.source_id === 'a.jpg');
+  assert.equal(aReq.text_repr, 'Photo: a.jpg a sunny beach Pictured: Sarah Jones.', 'caption preserved, Pictured appended');
+
+  // --- re-scan: nothing changed on disk or in labels -> no new upserts ---
+  const reReqs = [];
+  const { server: s3, port: p3 } = await startMockServer((req, body, res) => {
+    reReqs.push(body);
+    res.end(JSON.stringify({ id: 1, created: false }));
+  });
+  const rescan = await run('face-worker.js', { ...env, LIFECONTEXT_URL: `http://127.0.0.1:${p3}` });
+  s3.closeAllConnections();
+  s3.close();
+  assert.equal(rescan.status, 0, rescan.stderr);
+  assert.equal(reReqs.length, 0, 'idempotent: unchanged photos + labels re-emit nothing');
+});
+
+test('face-worker: export-thumbnails writes a sample per cluster + index.json', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'face-export-'));
+  writeFileSync(path.join(tmp, 'a.jpg'), 'aaaa');
+  const clustersState = path.join(tmp, 'clusters.json');
+  writeFileSync(clustersState, serializeClustersFile(1, [
+    { id: 1, centroid: [0, 0, 0], count: 2, label: 'Sarah Jones', sample: 'a.jpg' },
+    { id: 2, centroid: [9, 9, 9], count: 1, label: null, sample: 'a.jpg' },
+  ]));
+  const outDir = path.join(tmp, 'faces-out');
+  const res = await run('face-worker.js', {
+    PHOTO_ROOT: tmp,
+    PHOTO_EXIF_FACE_CLUSTERS_PATH: clustersState,
+  }, ['export-thumbnails', outDir]);
+  assert.equal(res.status, 0, res.stderr);
+  const index = JSON.parse(readFileSync(path.join(outDir, 'index.json'), 'utf8'));
+  assert.equal(index['1'].label, 'Sarah Jones');
+  assert.equal(index['2'].label, null);
+  assert.ok(existsSync(path.join(outDir, '1.jpg')), 'sample image copied per cluster');
 });

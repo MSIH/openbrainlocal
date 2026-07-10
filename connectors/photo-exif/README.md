@@ -28,12 +28,38 @@ The roadmap flags this as an open question ("worker lives with core or alongside
 5. Stops the whole run (rather than failing through the entire library) if the VLM itself is unreachable; per-item ingest failures are logged and retried on the next run.
 6. Does its own scheduling for **nothing** — one pass, then exits. Nightly-window scheduling is config, not code (see below).
 
+### `face-worker.js` (issue #53)
+
+A third, local-first enrichment pass that links photos to *who is in them* via the contract's `pictured` `entity_hints` role (doc 04 §4). Detection runs entirely on-device — no cloud face API (Prime Directive: local-first).
+
+1. Detects faces in each photo (local `@vladmandic/face-api` + `@tensorflow/tfjs-node`, models loaded from `FACE_MODELS_PATH`).
+2. Clusters the 128-d face descriptors into anonymous groups by nearest-centroid (`FACE_MATCH_THRESHOLD`). **Descriptors never leave the machine** — they live only in the local clusters file; doc 04 §11 forbids connectors sending embeddings.
+3. Records `extra.faces_detected` on every scanned photo. A photo whose faces are all in *unlabeled* clusters gets **no** `pictured` hint (its `text_repr` is re-sent as base + caption, reconstructed from the caption cache, so captioning is preserved, not extended).
+4. Once you name a cluster (`label`), every photo containing it upserts `entity_hints: [{alias, alias_type:"name", role:"pictured", confidence}]` and a `text_repr` with a "Pictured: …" sentence appended to the base + caption text.
+
+Commands:
+```bash
+node face-worker.js                         # scan: detect + cluster + emit hints for any labeled faces
+node face-worker.js export-thumbnails ./faces   # one sample image per cluster + index.json, to eyeball who's who
+node face-worker.js label 7 "Sarah Jones"   # name cluster 7; re-emits its photos' hints immediately
+```
+
+Nothing is sent for a cluster until you name it — an unnamed cluster is just an anonymous bucket, so no fabricated aliases pollute the entity graph. Naming is a deliberate, local trust decision; alias→entity resolution stays core's job.
+
 ## Setup
 
 1. `cp .env.example .env` and fill in `LIFECONTEXT_URL` / `LIFECONTEXT_API_KEY` / `PHOTO_ROOT`.
-2. `npm install` (real dependency: `exifr`).
+2. `npm install` (real dependency: `exifr`; the face worker additionally needs `@vladmandic/face-api`, `@tensorflow/tfjs-node`, and `canvas` — native modules, only required if you run `face-worker.js`).
 3. Backfill: `node scan.js`.
 4. Optionally, once you have a vision model pulled in Ollama (`ollama pull llava`): `node caption-worker.js`.
+5. Optionally, for face → contact linking: download the face-api model weights into `FACE_MODELS_PATH` (the `ssdMobilenetv1`, `faceLandmark68Net`, and `faceRecognitionNet` weight files from the `@vladmandic/face-api` model repo — one-time, offline after), then `node face-worker.js`, browse clusters with `export-thumbnails`, and `label` the ones you recognize.
+
+### Wave order matters
+
+Run **scan → caption → face** for each photo. The ingest contract requires `text_repr` on every upsert and replaces it (and `extra`) wholesale — there is no deep-merge (doc 04 §3). The face worker therefore reconstructs `text_repr` as *base + caption + "Pictured: …"* by reading the caption cache, so it preserves a caption rather than dropping it. Two ordering caveats follow from the wholesale replace:
+
+- If the face worker runs on a photo whose caption isn't in its local cache yet (e.g. the caption was written on a different machine), it will write base-only text and overwrite the server-side caption. Keep the caption cache co-located with the face worker.
+- A caption run that lands *after* a face `label` on the same photo drops the "Pictured: …" sentence (the entity link itself is unaffected — that's the primary recall path). In practice each worker processes a photo once (file-state gated), so this only bites if a photo is labeled before it is ever captioned.
 
 ### Nightly-window scheduling (config, not code)
 
@@ -61,11 +87,22 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 
 `test.mjs` (`npm test`) synthesizes JPEGs with injected EXIF via `piexifjs` (analogous to how the `imessage` connector's tests use `bplist-creator`) and runs both scripts against mock ingest/VLM HTTP servers. Covers: EXIF+GPS, GPS-only, and no-metadata photos; unchanged-file skipping on re-scan; caption enrichment preserving EXIF-sourced fields via upsert semantics; kill-safe per-photo state; and VLM-unreachable handling.
 
+## Known limitations (face worker)
+
+- **Clustering is approximate** — nearest-centroid with a fixed Euclidean threshold, not a trained recognizer. Expect occasional split clusters (same person, two buckets) or, rarely, a merged one; `export-thumbnails` + re-`label` is the correction path.
+- **`export-thumbnails` writes the sample *image*, not a tight face crop** — a real crop would pull in the native image-processing stack at export time. Per-face bounding boxes aren't persisted today (the clusters file stores only centroid/count/label/sample), so a future cropped version would need to re-detect the sample image or start persisting boxes.
+- **The ML stack is unverified in this repo's CI** — `test.mjs` covers the full clustering/label/ingest pipeline with an injected fixture detector (no models), so the wire behavior is tested, but real `face-api` detection quality/latency is a manual, on-device concern (same posture as the VLM caption worker).
+- **Native dependencies** — `@tensorflow/tfjs-node` and `canvas` are native modules; they're only loaded (via dynamic import) when you actually run a scan, so the other two scripts and the test suite need none of them.
+
 ## Files
 
 - `scan.js` — the EXIF batch scanner
 - `caption-worker.js` — the VLM enrichment worker
+- `face-worker.js` — the local face-detection/clustering worker (`scan` / `label` / `export-thumbnails`)
 - `lib/shared.js` — env loading, directory walk, shared `source_id` computation, ingest client
-- `lib/describe.js` — shared EXIF description logic (used by both scripts, so they can never drift)
+- `lib/describe.js` — shared EXIF description logic (used by every script, so they can never drift)
+- `lib/caption-cache.js` — caption state (relPath→text map) + `currentTextRepr`, shared by caption + face workers
+- `lib/face-cluster.js` — pure, IO-free descriptor clustering (euclidean, nearest-centroid, (de)serialization)
+- `lib/face-detect.js` — lazy ML-model detector + the test fixture detector
 - `test.mjs` — `node --test` suite
 - `.env.example` — copy to `.env`
