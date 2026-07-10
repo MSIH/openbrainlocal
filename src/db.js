@@ -751,6 +751,28 @@ export function listProbableDuplicates(limit = 20) {
     .slice(0, limit);
 }
 
+// The reference-face input for photo-exif's face-worker `suggest-labels` command (#84): live
+// person entities whose own contact artifact has a preserved photo (raw_path, from #74's vCard
+// PHOTO persistence). Company entities and photo-less contacts are excluded at the query level.
+const listContactPhotosStmt = db.prepare(`
+  SELECT e.id AS entity_id, e.canonical_name AS name, a.raw_path AS raw_path
+  FROM entities e
+  JOIN entity_links el ON el.entity_id = e.id AND el.role = 'self'
+  JOIN artifacts a ON a.id = el.artifact_id
+  WHERE e.kind = 'person' AND e.merged_into IS NULL AND a.raw_path IS NOT NULL
+  ORDER BY e.id
+  LIMIT ?
+`);
+
+/**
+ * List photographed contacts for reference-face matching. Read-only; core never computes or
+ * compares face descriptors itself — that stays connector-local (doc 04 §11 rejects
+ * connector-supplied embeddings, and the inverse holds too: core doesn't do connector-side ML).
+ */
+export function listContactPhotos(limit = 100) {
+  return listContactPhotosStmt.all(limit);
+}
+
 export function getArtifactById(id) {
   const a = getArtifactStmt.get(id);
   if (!a) return null;

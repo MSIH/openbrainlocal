@@ -90,3 +90,15 @@ export function ingestClient({ url, apiKey }) {
 
   return { postIngest, postIngestBatch };
 }
+
+// #84 — photographed contacts (entity_id/name/raw_path) for face-worker's suggest-labels
+// reference-face matching. Read-only GET, mirrors the ingestClient fetch-wrapper style above.
+export async function fetchContactPhotos({ url, apiKey, limit }) {
+  const qs = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+  const res = await fetch(`${url}/api/v1/entities/photos${qs}`, {
+    headers: { 'x-api-key': apiKey },
+  });
+  if (!res.ok) throw new Error(`entities/photos returned ${res.status}`);
+  const { contacts } = await res.json();
+  return contacts;
+}

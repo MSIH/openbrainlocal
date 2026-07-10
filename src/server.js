@@ -28,7 +28,7 @@ import rateLimit from 'express-rate-limit';
 import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN } from './config.js';
 import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
-import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates } from './search.js';
+import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
 import { TYPE_REGISTRY } from './ingest-types.js';
 import { buildIngestRouter } from './ingest.js';
 
@@ -78,6 +78,9 @@ const GetArtifactSchema = z.object({ id: z.coerce.number().int().positive() });
 // not a zod .refine() — that error must map to 422, not the ZodError middleware's 400.
 const MergeEntitiesSchema = z.object({ keep_id: z.coerce.number().int().positive(), absorb_id: z.coerce.number().int().positive() });
 const DuplicatesQuerySchema = z.object({ limit: z.coerce.number().int().positive().max(100).optional() });
+// #84 — reference-face input for photo-exif's suggest-labels; a connector concern, hence no
+// MCP tool (unlike duplicates/merge, which a human drives conversationally).
+const ContactPhotosQuerySchema = z.object({ limit: z.coerce.number().int().positive().max(500).optional() });
 
 // --- OUTPUT FORMATTERS (MCP tools return text) ---
 const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
@@ -408,6 +411,13 @@ app.post('/api/v1/entities/merge', requireAuth, wrap(async (req, res) => {
     if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
     throw err; // unexpected — let the generic error middleware handle it
   }
+}));
+
+// #84 — photographed contacts, for photo-exif's face-worker suggest-labels command to use as
+// reference faces. Read-only; core never touches face descriptors (doc 04 §11, both directions).
+app.get('/api/v1/entities/photos', requireAuth, wrap(async (req, res) => {
+  const { limit } = ContactPhotosQuerySchema.parse(req.query);
+  res.json({ contacts: listContactPhotos(limit ?? 100) });
 }));
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---

@@ -6,7 +6,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { useTempDb, startFakeOllama } from './helpers.mjs';
+import { useTempDb, startFakeOllama, f32 } from './helpers.mjs';
 
 const API_KEY = 'test-key-0123456789-not-the-placeholder';
 const { cleanup } = useTempDb();
@@ -16,7 +16,7 @@ process.env.OLLAMA_BASE_URL = fake.baseUrl;
 process.env.PORT = '0'; // ephemeral port — avoids collisions with a real running server
 
 const { app, serverInstance, secureCompare } = await import('../src/server.js');
-const { db, insertEntityStmt, insertAliasStmt } = await import('../src/db.js');
+const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn } = await import('../src/db.js');
 
 if (!serverInstance.listening) await once(serverInstance, 'listening');
 const { port } = serverInstance.address();
@@ -113,4 +113,29 @@ test('/api/v1/entities/duplicates + /api/v1/entities/merge (#75): surfaces, merg
 
   const reMergeRes = await post('/api/v1/entities/merge', { keep_id: a, absorb_id: b }, { 'x-api-key': API_KEY });
   assert.equal(reMergeRes.status, 404, 're-merging an already-tombstoned entity is rejected');
+});
+
+test('/api/v1/entities/photos (#84): only photographed live person entities, for face-worker reference matching', async () => {
+  const photographed = Number(insertEntityStmt.run('person', 'REST Photo Person', JSON.stringify({})).lastInsertRowid);
+  insertAliasStmt.run(photographed, 'rest photo person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: 'rest-photo-test', source_id: `contact-${photographed}`, text_repr: 'REST Photo Person contact card', raw_path: '/raw/contacts/rest-photo.jpg' },
+    f32(0.5),
+    [{ entity_id: photographed, role: 'self', confidence: 1.0 }],
+  );
+  const noPhoto = Number(insertEntityStmt.run('person', 'REST No Photo Person', JSON.stringify({})).lastInsertRowid);
+  insertAliasStmt.run(noPhoto, 'rest no photo person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: 'rest-photo-test', source_id: `contact-${noPhoto}`, text_repr: 'REST No Photo Person contact card' },
+    f32(0.5),
+    [{ entity_id: noPhoto, role: 'self', confidence: 1.0 }],
+  );
+
+  const res = await get('/api/v1/entities/photos?limit=50', { 'x-api-key': API_KEY });
+  assert.equal(res.status, 200);
+  const { contacts } = await res.json();
+  const found = contacts.find((c) => c.entity_id === photographed);
+  assert.ok(found, 'the photographed contact is returned');
+  assert.equal(found.raw_path, '/raw/contacts/rest-photo.jpg');
+  assert.ok(!contacts.some((c) => c.entity_id === noPhoto), 'a contact with no preserved photo is excluded');
 });

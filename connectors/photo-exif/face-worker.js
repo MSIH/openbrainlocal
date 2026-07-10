@@ -10,6 +10,8 @@
 //   node face-worker.js                      scan: detect + cluster + emit hints for labeled faces
 //   node face-worker.js label <id> "<name>"  name a cluster and re-emit its photos' hints
 //   node face-worker.js export-thumbnails <dir>  write one sample image per cluster + index.json
+//   node face-worker.js suggest-labels       print (never apply) name suggestions for unlabeled
+//                                             clusters, matched against contact photos (#84)
 //
 // Kill-safe: state is saved after every photo. Nightly-window scheduling is config, not code —
 // see README.md (same posture as caption-worker.js).
@@ -17,10 +19,10 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statS
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDotEnvIfPresent, walkImageFiles, sourceIdFor, ingestClient } from './lib/shared.js';
+import { loadDotEnvIfPresent, walkImageFiles, sourceIdFor, ingestClient, fetchContactPhotos } from './lib/shared.js';
 import { describePhoto } from './lib/describe.js';
 import { readCaptionCache, currentTextRepr } from './lib/caption-cache.js';
-import { assignCluster, parseClustersFile, serializeClustersFile } from './lib/face-cluster.js';
+import { assignCluster, euclideanDistance, parseClustersFile, serializeClustersFile } from './lib/face-cluster.js';
 import { resolveDetector } from './lib/face-detect.js';
 
 const CONNECTOR_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +44,13 @@ const confRaw = Number(process.env.FACE_HINT_CONFIDENCE);
 const FACE_HINT_CONFIDENCE = Number.isFinite(confRaw) ? confRaw : 0.6;
 const throttleRaw = Number(process.env.FACE_THROTTLE_MS);
 const FACE_THROTTLE_MS = Number.isFinite(throttleRaw) ? throttleRaw : 0;
+// #84 — distance threshold for matching a contact's reference photo against an unlabeled
+// cluster centroid. Separate from FACE_MATCH_THRESHOLD (intra-camera-roll clustering): a posed
+// contact photo and a candid camera-roll photo differ enough in framing/lighting that
+// cross-source matching may warrant a different threshold. Defaults to the same value so
+// behavior is a pure addition until tuned.
+const seedRaw = Number(process.env.FACE_SEED_THRESHOLD);
+const FACE_SEED_THRESHOLD = Number.isFinite(seedRaw) ? seedRaw : FACE_MATCH_THRESHOLD;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const requireApiKey = () => {
@@ -237,6 +246,65 @@ async function label(clusterIdArg, name) {
   console.error(`photo-exif: labeled cluster ${clusterId} "${name}", re-emitted ${reingested} photo(s)`);
 }
 
+// #84 — suggest names for unlabeled clusters using each contact's own preserved photo (#74) as a
+// reference face. NEVER writes cluster.label and NEVER emits a hint — only prints candidate
+// matches; a human still confirms via the existing `label <id> "<name>"` command. Requires this
+// connector's process to be able to read the raw_path core returns (same filesystem/shared
+// volume as core — see README); an unreadable/undetectable reference photo is skipped, not
+// fatal to the run.
+async function suggestLabels() {
+  requireApiKey();
+  let detectFaces;
+  try {
+    detectFaces = await resolveDetector({ modelsPath: FACE_MODELS_PATH, fixturePath: FACE_FIXTURE });
+  } catch (err) {
+    console.error('photo-exif: face detector unavailable (check FACE_MODELS_PATH)', err);
+    process.exit(1);
+  }
+
+  const clustersState = loadClusters();
+  const unlabeled = clustersState.clusters.filter((c) => !c.label);
+
+  let contacts;
+  try {
+    contacts = await fetchContactPhotos({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY, limit: 500 });
+  } catch (err) {
+    console.error('photo-exif: suggest-labels — could not fetch contact photos from LifeContext', err);
+    process.exit(1);
+  }
+
+  let checked = 0;
+  let suggested = 0;
+  for (const contact of contacts) {
+    checked++;
+    let faces;
+    try {
+      // Second arg is the fixture detector's lookup key (see lib/face-detect.js); the real
+      // detector uses only the first arg (the actual file path) and ignores the second.
+      faces = await detectFaces(contact.raw_path, contact.raw_path);
+    } catch (err) {
+      console.error(`photo-exif: suggest-labels — skipping "${contact.name}" (entity #${contact.entity_id}): reference photo unreadable/undetectable`, err);
+      continue;
+    }
+    if (faces.length !== 1) {
+      console.error(`photo-exif: suggest-labels — skipping "${contact.name}" (entity #${contact.entity_id}): detected ${faces.length} faces, expected exactly 1`);
+      continue;
+    }
+    const [{ descriptor }] = faces;
+    for (const cluster of unlabeled) {
+      const dist = euclideanDistance(descriptor, cluster.centroid);
+      if (dist <= FACE_SEED_THRESHOLD) {
+        console.error(
+          `photo-exif: suggest — cluster ${cluster.id} (${cluster.count} photo(s)) possibly "${contact.name}" ` +
+          `(entity #${contact.entity_id}, distance ${dist.toFixed(2)} <= threshold ${FACE_SEED_THRESHOLD})`
+        );
+        suggested++;
+      }
+    }
+  }
+  console.error(`photo-exif: suggest-labels — checked ${checked} contact photo(s), ${suggested} cluster(s) suggested`);
+}
+
 // Write one representative SAMPLE image per cluster (whole image, not a tight face crop — a crop
 // would pull in the native image stack, and per-face boxes aren't persisted today, only
 // centroid/count/label/sample) plus index.json, so a human can eyeball who each anonymous cluster
@@ -274,7 +342,8 @@ async function main() {
   if (!cmd || cmd === 'scan') return scan();
   if (cmd === 'label') return label(rest[0], rest[1]);
   if (cmd === 'export-thumbnails') return exportThumbnails(rest[0]);
-  console.error(`photo-exif: unknown command "${cmd}" (expected: scan | label | export-thumbnails)`);
+  if (cmd === 'suggest-labels') return suggestLabels();
+  console.error(`photo-exif: unknown command "${cmd}" (expected: scan | label | export-thumbnails | suggest-labels)`);
   process.exit(1);
 }
 

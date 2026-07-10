@@ -422,3 +422,56 @@ test('face-worker: export-thumbnails writes a sample per cluster + index.json', 
   assert.equal(index['2'].label, null);
   assert.ok(existsSync(path.join(outDir, '1.jpg')), 'sample image copied per cluster');
 });
+
+test('face-worker: suggest-labels (#84) matches unlabeled clusters against contact reference photos, never writes labels', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'face-suggest-'));
+  const clustersState = path.join(tmp, 'clusters.json');
+  writeFileSync(clustersState, serializeClustersFile(1, [
+    { id: 1, centroid: [0, 0, 0], count: 2, label: null, sample: 'a.jpg' },                // unlabeled, near Sarah's reference
+    { id: 2, centroid: [9, 9, 9], count: 1, label: null, sample: 'c.jpg' },                // unlabeled, far from every reference
+    { id: 3, centroid: [0.01, 0, 0], count: 3, label: 'Already Named', sample: 'd.jpg' },  // labeled — must be excluded even though it's the closest match
+  ]));
+
+  const fixturePath = path.join(tmp, 'faces-fixture.json');
+  writeFileSync(fixturePath, JSON.stringify({
+    '/fake/raw/sarah.jpg': [[0.02, 0, 0]],              // one face, close to cluster 1
+    '/fake/raw/ambiguous.jpg': [[1, 1, 1], [2, 2, 2]],  // two faces -> ambiguous reference, skip
+  }));
+
+  const env = {
+    LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_EXIF_FACE_FIXTURE: fixturePath,
+    PHOTO_EXIF_FACE_CLUSTERS_PATH: clustersState,
+    FACE_SEED_THRESHOLD: '0.6',
+  };
+  const beforeClusters = readFileSync(clustersState, 'utf8');
+
+  const { server, port } = await startMockServer((req, body, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url.startsWith('/api/v1/entities/photos')) {
+      res.end(JSON.stringify({
+        contacts: [
+          { entity_id: 10, name: 'Sarah Jones', raw_path: '/fake/raw/sarah.jpg' },
+          { entity_id: 11, name: 'Ambiguous Contact', raw_path: '/fake/raw/ambiguous.jpg' },
+        ],
+      }));
+      return;
+    }
+    res.end(JSON.stringify({})); // any other route (e.g. an accidental ingest) — never expected here
+  });
+  const res = await run('face-worker.js', { ...env, LIFECONTEXT_URL: `http://127.0.0.1:${port}` }, ['suggest-labels']);
+  server.closeAllConnections();
+  server.close();
+
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stderr, /suggest — cluster 1 \(2 photo\(s\)\) possibly "Sarah Jones" \(entity #10/, 'cluster 1 is suggested as Sarah Jones');
+  assert.equal(
+    (res.stderr.match(/suggest — cluster/g) || []).length, 1,
+    'exactly one suggestion — the far cluster and the already-labeled cluster (despite being the closest match) are not suggested'
+  );
+  assert.match(
+    res.stderr, /skipping "Ambiguous Contact".*detected 2 faces, expected exactly 1/,
+    'a multi-face reference photo is skipped, never treated as a match'
+  );
+  assert.equal(readFileSync(clustersState, 'utf8'), beforeClusters, 'suggest-labels never writes cluster.label — clusters file is byte-identical');
+});
