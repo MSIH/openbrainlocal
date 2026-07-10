@@ -90,3 +90,28 @@ export function ingestClient({ url, apiKey }) {
 
   return { postIngest, postIngestBatch };
 }
+
+// #84 — photographed contacts (entity_id/name/raw_path) for face-worker's suggest-labels
+// reference-face matching. Read-only GET, mirrors the ingestClient fetch-wrapper style above.
+export async function fetchContactPhotos({ url, apiKey, limit }) {
+  // The server's ContactPhotosQuerySchema requires a POSITIVE integer (src/server.js) — 0 or
+  // negative isn't "no limit", it's a 400. Omit the param for anything that isn't a valid value
+  // rather than sending it and letting the server reject it.
+  const qs = Number.isInteger(limit) && limit > 0 ? `?limit=${encodeURIComponent(limit)}` : '';
+  const res = await fetch(`${url}/api/v1/entities/photos${qs}`, {
+    headers: { 'x-api-key': apiKey },
+  });
+  if (!res.ok) throw new Error(`entities/photos returned ${res.status}`);
+  const body = await res.json();
+  if (!Array.isArray(body.contacts)) throw new Error('entities/photos returned an unexpected response shape');
+  // Per-entry shape check too, not just "is it an array" — an unexpected payload (schema drift,
+  // a proxy/error page that still happens to parse as JSON) should fail loudly here with a clear
+  // message, not surface later as `undefined` fed into face detection.
+  const malformed = body.contacts.filter(
+    (c) => !c || typeof c.raw_path !== 'string' || typeof c.entity_id !== 'number' || typeof c.name !== 'string'
+  );
+  if (malformed.length) {
+    throw new Error(`entities/photos returned ${malformed.length} malformed contact entr${malformed.length === 1 ? 'y' : 'ies'}`);
+  }
+  return body.contacts;
+}

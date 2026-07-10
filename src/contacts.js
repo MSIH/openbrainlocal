@@ -152,8 +152,13 @@ export function persistContactPhoto(photo) {
       // it: a short alnum-only allowlist is what stands between this and a path-traversal
       // write outside CONTACTS_RAW_DIR (e.g. ext="../../x") for any future/direct caller.
       const safeExt = /^[a-z0-9]{1,10}$/i.test(photo.ext ?? '') ? photo.ext : 'jpg';
-      const rawPath = path.join(CONTACTS_RAW_DIR, `${sha256(bytes)}.${safeExt}`);
-      mkdirSync(CONTACTS_RAW_DIR, { recursive: true });
+      // path.resolve, not path.join: CONTACTS_RAW_DIR defaults to a relative value, and this
+      // path gets read back by a LATER process (the server, possibly started from a different
+      // cwd, or a connector on another machine) — resolving to absolute NOW, against this
+      // import's own cwd, is the only time the correct base directory is unambiguous. Storing a
+      // relative path would leave every future reader guessing which cwd it was relative to.
+      const rawPath = path.resolve(CONTACTS_RAW_DIR, `${sha256(bytes)}.${safeExt}`);
+      mkdirSync(path.dirname(rawPath), { recursive: true });
       try {
         // Exclusive create, not existsSync-then-write: avoids a check-then-act race under
         // concurrent imports. Content-addressed by sha256, so EEXIST always means identical

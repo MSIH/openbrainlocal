@@ -5,12 +5,13 @@
 // db.js is imported (it opens the DB at module load), so db.js is loaded dynamically here.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { useTempDb, f32 } from './helpers.mjs';
 
 const { cleanup } = useTempDb();
 const {
   db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById,
-  insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates,
+  insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates, listContactPhotos,
   resolveEntityIds, getEntity, upsertEntityRelation,
 } = await import('../src/db.js');
 
@@ -153,14 +154,15 @@ const getRawEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const lastMergeLogStmt = db.prepare("SELECT * FROM ingest_log WHERE event_type = 'entity_merged' ORDER BY id DESC LIMIT 1");
 
 // A minimal person entity + its own self-linked contact artifact, mirroring what contacts.js
-// produces (attrs carry emails[]/phones[] the same way structuredFields() does).
-function makePerson(name, { emails = [], phones = [] } = {}) {
+// produces (attrs carry emails[]/phones[] the same way structuredFields() does). `rawPath`
+// mirrors #74's vCard PHOTO persistence (artifacts.raw_path) for #84's listContactPhotos tests.
+function makePerson(name, { emails = [], phones = [], rawPath = null } = {}) {
   const entityId = Number(insertEntityStmt.run('person', name, JSON.stringify({ emails, phones })).lastInsertRowid);
   insertAliasStmt.run(entityId, name.toLowerCase(), 'name');
   for (const e of emails) insertAliasStmt.run(entityId, e.toLowerCase(), 'email');
   for (const p of phones) insertAliasStmt.run(entityId, p.replace(/\D/g, ''), 'phone');
   const { id: artifactId } = storeArtifactTxn(
-    { type: 'contact', source: uniqueSource(), source_id: `contact-${entityId}`, text_repr: `${name} contact card` },
+    { type: 'contact', source: uniqueSource(), source_id: `contact-${entityId}`, text_repr: `${name} contact card`, raw_path: rawPath },
     f32(0.5),
     [{ entity_id: entityId, role: 'self', confidence: 1.0 }],
   );
@@ -288,4 +290,47 @@ test('listProbableDuplicates: surfaces a shared-phone pair (contacts.js never au
   mergeEntities(a.entityId, b.entityId);
   const after = listProbableDuplicates(50);
   assert.ok(!after.some((p) => p.a.id === b.entityId || p.b.id === b.entityId), 'the tombstoned entity is excluded from future duplicate listings');
+});
+
+test('listContactPhotos: only live person entities with a preserved contact photo (#84)', () => {
+  const photographed = makePerson('Photographed Person', { rawPath: '/raw/contacts/aaa.jpg' });
+  const noPhoto = makePerson('No Photo Person', {});
+  const company = Number(insertEntityStmt.run('org', 'Acme Corp', JSON.stringify({})).lastInsertRowid);
+  storeArtifactTxn(
+    { type: 'contact', source: uniqueSource(), source_id: `contact-${company}`, text_repr: 'Acme Corp contact card', raw_path: '/raw/contacts/company.jpg' },
+    f32(0.5),
+    [{ entity_id: company, role: 'self', confidence: 1.0 }],
+  );
+
+  const photos = listContactPhotos(100);
+  assert.ok(photos.some((p) => p.entity_id === photographed.entityId && p.raw_path === '/raw/contacts/aaa.jpg'));
+  assert.ok(!photos.some((p) => p.entity_id === noPhoto.entityId), 'a contact with no preserved photo is excluded');
+  assert.ok(!photos.some((p) => p.entity_id === company), 'a company entity is excluded even with a raw_path');
+
+  // A merged-away (tombstoned) entity's photo must not be offered as a reference face either.
+  const absorbTarget = makePerson('Merge Absorb Target', { rawPath: '/raw/contacts/bbb.jpg' });
+  mergeEntities(photographed.entityId, absorbTarget.entityId);
+  const afterMerge = listContactPhotos(100);
+  assert.ok(!afterMerge.some((p) => p.entity_id === absorbTarget.entityId), 'a tombstoned entity is excluded from contact-photo listings');
+});
+
+test('listContactPhotos: dedups an entity with two self-linked photographed artifacts to one row, and resolves a relative raw_path to absolute (#84)', () => {
+  // The ordinary multi-source-consolidation case: the same person imported from a second vCard
+  // source under a different UID resolves to the same entity (contacts.js's resolveExistingEntity)
+  // but creates a NEW self-linked contact artifact — this entity now has two role='self' links.
+  const entityId = Number(insertEntityStmt.run('person', 'Multi Source Person', JSON.stringify({})).lastInsertRowid);
+  insertAliasStmt.run(entityId, 'multi source person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: uniqueSource(), source_id: 'first-import', text_repr: 'Multi Source Person (first)', raw_path: 'raw/contacts/first.jpg' },
+    f32(0.5), [{ entity_id: entityId, role: 'self', confidence: 1.0 }],
+  );
+  storeArtifactTxn(
+    { type: 'contact', source: uniqueSource(), source_id: 'second-import', text_repr: 'Multi Source Person (second)', raw_path: 'raw/contacts/second.jpg' },
+    f32(0.5), [{ entity_id: entityId, role: 'self', confidence: 1.0 }],
+  );
+
+  const rows = listContactPhotos(100).filter((p) => p.entity_id === entityId);
+  assert.equal(rows.length, 1, 'exactly one row per entity, even with two self-linked photographed artifacts');
+  assert.ok(rows[0].raw_path.endsWith('raw/contacts/second.jpg'), 'the most recently created contact artifact\'s photo wins');
+  assert.ok(path.isAbsolute(rows[0].raw_path), 'a relative raw_path (CONTACTS_RAW_DIR default) is resolved to an absolute path');
 });

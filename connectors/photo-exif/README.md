@@ -42,9 +42,22 @@ Commands:
 node face-worker.js                         # scan: detect + cluster + emit hints for any labeled faces
 node face-worker.js export-thumbnails ./faces   # one sample image per cluster + index.json, to eyeball who's who
 node face-worker.js label 7 "Sarah Jones"   # name cluster 7; re-emits its photos' hints immediately
+node face-worker.js suggest-labels          # print (never apply) name suggestions for unlabeled clusters
 ```
 
 Nothing is sent for a cluster until you name it — an unnamed cluster is just an anonymous bucket, so no fabricated aliases pollute the entity graph. Naming is a deliberate, local trust decision; alias→entity resolution stays core's job.
+
+#### `suggest-labels` — pre-name clusters from contact photos (#84)
+
+Speeds up labeling by using each contact's own preserved photo (core's vCard `PHOTO` import, #74) as a reference face. It only ever **prints** candidate matches to stderr — it never writes `cluster.label` and never emits an ingest hint. You still confirm with the existing `label <id> "<name>"` command; a wrong auto-label would be worse than an anonymous cluster.
+
+```bash
+node face-worker.js suggest-labels
+# photo-exif: suggest — cluster 7 (12 photo(s)) possibly "Sarah Jones" (entity #42, distance 0.31 <= threshold 0.6)
+# photo-exif: suggest-labels — checked 18 contact photo(s), 1 cluster(s) suggested
+```
+
+**Requires this connector's process to be able to read the file path LifeContext core returns** (`raw_path`, under core's `CONTACTS_RAW_DIR`) — i.e., this connector and core must share a filesystem (same machine, or a mounted/synced volume). There is no endpoint to fetch the raw bytes over HTTP; a `raw_path` this process can't read is skipped and logged, not fatal to the run. If `CONTACTS_RAW_DIR` is a relative path in core's `.env`, set it to an **absolute** path there for reliable resolution — a relative path resolves against whatever directory core's own process happened to start from, which this connector has no way to know. Already-labeled clusters are never re-suggested, and a reference photo with zero or multiple detected faces is skipped as ambiguous. Tune the match distance with `FACE_SEED_THRESHOLD` (defaults to `FACE_MATCH_THRESHOLD`) — see `.env.example`.
 
 ## Setup
 
@@ -93,13 +106,14 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 - **`export-thumbnails` writes the sample *image*, not a tight face crop** — a real crop would pull in the native image-processing stack at export time. Per-face bounding boxes aren't persisted today (the clusters file stores only centroid/count/label/sample), so a future cropped version would need to re-detect the sample image or start persisting boxes.
 - **The ML stack is unverified in this repo's CI** — `test.mjs` covers the full clustering/label/ingest pipeline with an injected fixture detector (no models), so the wire behavior is tested, but real `face-api` detection quality/latency is a manual, on-device concern (same posture as the VLM caption worker).
 - **Native dependencies** — `@tensorflow/tfjs-node` and `canvas` are native modules; they're only loaded (via dynamic import) when you actually run a scan, so the other two scripts and the test suite need none of them.
+- **`suggest-labels` requires a shared filesystem with core (#84)** — it reads `raw_path` values LifeContext core returns; there's no HTTP endpoint to fetch those bytes, so this connector must be able to read the same disk (or a mounted/synced volume) core wrote contact photos to. Cross-machine setups (this connector on a different host than core, e.g. the Mac Mini/Windows-server iMessage topology) aren't supported for this command specifically — everything else in this connector works unchanged in that topology.
 
 ## Files
 
 - `scan.js` — the EXIF batch scanner
 - `caption-worker.js` — the VLM enrichment worker
-- `face-worker.js` — the local face-detection/clustering worker (`scan` / `label` / `export-thumbnails`)
-- `lib/shared.js` — env loading, directory walk, shared `source_id` computation, ingest client
+- `face-worker.js` — the local face-detection/clustering worker (`scan` / `label` / `export-thumbnails` / `suggest-labels`)
+- `lib/shared.js` — env loading, directory walk, shared `source_id` computation, ingest client, contact-photos fetch (`suggest-labels`)
 - `lib/describe.js` — shared EXIF description logic (used by every script, so they can never drift)
 - `lib/caption-cache.js` — caption state (relPath→text map) + `currentTextRepr`, shared by caption + face workers
 - `lib/face-cluster.js` — pure, IO-free descriptor clustering (euclidean, nearest-centroid, (de)serialization)
