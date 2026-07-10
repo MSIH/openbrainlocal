@@ -16,7 +16,8 @@ process.env.OLLAMA_BASE_URL = fake.baseUrl;
 process.env.PORT = '0'; // ephemeral port — avoids collisions with a real running server
 
 const { app, serverInstance, secureCompare } = await import('../src/server.js');
-const { db, insertEntityStmt, insertAliasStmt } = await import('../src/db.js');
+const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn } = await import('../src/db.js');
+const { embedToFloat32 } = await import('../src/embeddings.js');
 
 if (!serverInstance.listening) await once(serverInstance, 'listening');
 const { port } = serverInstance.address();
@@ -84,6 +85,36 @@ test('/api/search: filter-then-rank path (planner + prefiltered KNN/FTS) returns
   assert.ok(Array.isArray(results) && results.length >= 1, 'search returns results');
   assert.ok(results.every((r) => r.type === 'note'), 'the type filter is applied via the SQL prefilter');
   assert.ok(results.some((r) => /penguins/.test(r.text_repr)), 'the matching artifact is returned');
+});
+
+test('/api/search: near + radius_km geo-filters by coordinate (#68)', async () => {
+  // Two coord-bearing photos ~4100km apart; a `near` search with a tight radius must return only
+  // the one inside the circle. Stored straight through storeArtifactTxn (the fake Ollama embeds)
+  // since /api/remember only makes coordinate-less notes.
+  const sfVec = await embedToFloat32('a sunny afternoon photo by the bay');
+  const nyVec = await embedToFloat32('a rainy afternoon photo in the city');
+  const sf = storeArtifactTxn({ type: 'photo', source: 'geo-test', source_id: 'sf', text_repr: 'a sunny afternoon photo by the bay', latitude: 37.7749, longitude: -122.4194, place_label: 'San Francisco, CA' }, sfVec, []);
+  const ny = storeArtifactTxn({ type: 'photo', source: 'geo-test', source_id: 'ny', text_repr: 'a rainy afternoon photo in the city', latitude: 40.7128, longitude: -74.006, place_label: 'New York, NY' }, nyVec, []);
+
+  const byName = await post('/api/search', { query: 'afternoon photo', near: 'San Francisco', radius_km: 50, limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(byName.status, 200);
+  const nameIds = (await byName.json()).results.map((r) => r.id);
+  assert.ok(nameIds.includes(sf.id), 'the SF photo is within 50km of San Francisco');
+  assert.ok(!nameIds.includes(ny.id), 'the NY photo is excluded by the radius');
+
+  const byCoord = await post('/api/search', { query: 'afternoon photo', near: { lat: 40.71, lon: -74.0 }, radius_km: 50, limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(byCoord.status, 200);
+  const coordIds = (await byCoord.json()).results.map((r) => r.id);
+  assert.ok(coordIds.includes(ny.id) && !coordIds.includes(sf.id), 'explicit {lat,lon} filters to NY');
+
+  // Demote-never-drop: an unresolvable place name must not empty the search.
+  const bogus = await post('/api/search', { query: 'afternoon photo', near: 'Xyzzyville Nowhere Land', limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(bogus.status, 200);
+  assert.ok((await bogus.json()).results.length > 0, 'an unresolvable near folds into search text, not an empty result');
+
+  // Out-of-range explicit coordinates are rejected at the schema (400), not silently ignored.
+  const badCoord = await post('/api/search', { query: 'afternoon photo', near: { lat: 999, lon: 999 } }, { 'x-api-key': API_KEY });
+  assert.equal(badCoord.status, 400, 'garbage coordinates 400 rather than disabling the filter silently');
 });
 
 test('/api/v1/entities/duplicates + /api/v1/entities/merge (#75): surfaces, merges, and rejects bad merges', async () => {
