@@ -74,7 +74,12 @@ async function main() {
   let vlmDown = false;
 
   for await (const { absPath, relPath } of walkImageFiles(PHOTO_ROOT)) {
-    if (Object.hasOwn(captionCache, relPath)) continue; // own-key check (a relPath could be "constructor")
+    // Skip only photos that already have caption TEXT cached. A legacy null entry (from the old
+    // array-format state) means "captioned once, text not retained" — re-caption it to populate the
+    // map so the face worker can reconstruct base+caption instead of overwriting it with base-only
+    // text. Object.hasOwn guards against prototype keys (a relPath could be "constructor").
+    const cachedCaption = Object.hasOwn(captionCache, relPath) ? captionCache[relPath] : undefined;
+    if (cachedCaption != null) continue;
     if (vlmDown) break; // the VLM is unreachable; stop rather than fail through the whole library
 
     const { dateStr } = await describePhoto(absPath);

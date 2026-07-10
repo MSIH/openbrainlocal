@@ -238,8 +238,9 @@ async function label(clusterIdArg, name) {
 }
 
 // Write one representative SAMPLE image per cluster (whole image, not a tight face crop — a crop
-// would pull in the native image stack; the face box is in the clusters file for a future tight
-// version) plus index.json, so a human can eyeball who each anonymous cluster is before labeling.
+// would pull in the native image stack, and per-face boxes aren't persisted today, only
+// centroid/count/label/sample) plus index.json, so a human can eyeball who each anonymous cluster
+// is before labeling.
 function exportThumbnails(outDir) {
   if (!outDir) {
     console.error('photo-exif: usage: face-worker.js export-thumbnails <dir>');

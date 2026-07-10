@@ -90,7 +90,7 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 ## Known limitations (face worker)
 
 - **Clustering is approximate** — nearest-centroid with a fixed Euclidean threshold, not a trained recognizer. Expect occasional split clusters (same person, two buckets) or, rarely, a merged one; `export-thumbnails` + re-`label` is the correction path.
-- **`export-thumbnails` writes the sample *image*, not a tight face crop** — a real crop would pull in the native image-processing stack at export time; the face bounding box is stored in the clusters file for a future cropped version.
+- **`export-thumbnails` writes the sample *image*, not a tight face crop** — a real crop would pull in the native image-processing stack at export time. Per-face bounding boxes aren't persisted today (the clusters file stores only centroid/count/label/sample), so a future cropped version would need to re-detect the sample image or start persisting boxes.
 - **The ML stack is unverified in this repo's CI** — `test.mjs` covers the full clustering/label/ingest pipeline with an injected fixture detector (no models), so the wire behavior is tested, but real `face-api` detection quality/latency is a manual, on-device concern (same posture as the VLM caption worker).
 - **Native dependencies** — `@tensorflow/tfjs-node` and `canvas` are native modules; they're only loaded (via dynamic import) when you actually run a scan, so the other two scripts and the test suite need none of them.
 

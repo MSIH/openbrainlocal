@@ -220,6 +220,45 @@ test('caption-worker.js: enriches text_repr in place, preserves EXIF fields via 
   assert.equal(vlmRequests.length, 1, 'already-captioned photo is not re-sent to the VLM');
 });
 
+test('caption-worker.js: legacy array-format state entries are re-captioned to populate the text map', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-legacy-caption-'));
+  writeFileSync(path.join(tmp, 'photo.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00' }));
+  const statePath = path.join(tmp, 'captions.json');
+  writeFileSync(statePath, JSON.stringify(['photo.jpg'])); // legacy array -> loaded as { 'photo.jpg': null }
+
+  const ingestRequests = [];
+  const { server: ingestServer, port: ingestPort } = await startMockServer((req, body, res) => {
+    ingestRequests.push(body);
+    res.end(JSON.stringify({ id: 1, created: false }));
+  });
+  const vlmRequests = [];
+  const vlmServer = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      vlmRequests.push(JSON.parse(body));
+      res.end(JSON.stringify({ response: 'a dog on a beach' }));
+    });
+  });
+  const vlmPort = await new Promise((resolve) => vlmServer.listen(0, '127.0.0.1', () => resolve(vlmServer.address().port)));
+
+  const result = await run('caption-worker.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${ingestPort}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp,
+    PHOTO_EXIF_CAPTION_STATE_PATH: statePath,
+    VLM_BASE_URL: `http://127.0.0.1:${vlmPort}`,
+    VLM_THROTTLE_MS: '0',
+  });
+  ingestServer.closeAllConnections();
+  ingestServer.close();
+  vlmServer.close();
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(vlmRequests.length, 1, 'a legacy (text-less) entry is re-captioned, not skipped');
+  assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), { 'photo.jpg': 'a dog on a beach' }, 'map now holds the caption text');
+});
+
 test('caption-worker.js: VLM unreachable stops the run without marking anything captioned', async () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-caption-down-'));
   writeFileSync(path.join(tmp, 'photo.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00' }));
