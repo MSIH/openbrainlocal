@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -86,6 +86,10 @@ function makeTakeout() {
   writeFileSync(path.join(mom, 'IMG_0004(1).jpg'), 'DDDD');
   writeFileSync(path.join(mom, 'IMG_0004.jpg(1).json'), sidecar({ ts: 1554302400 }));
 
+  // E: a video in the Mom album — must be typed 'video', not 'photo', and still get the hint.
+  writeFileSync(path.join(mom, 'VID_0005.mp4'), 'EEEE');
+  writeFileSync(path.join(mom, 'VID_0005.mp4.json'), sidecar({ ts: 1554302400 }));
+
   return { root: path.join(tmp, 'Takeout'), tmp };
 }
 
@@ -116,14 +120,15 @@ test('index.js: dedups copies by content, attaches person hints, parses sidecar 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(requests.length, 1);
   const artifacts = requests[0].body.artifacts;
-  assert.equal(artifacts.length, 4, 'A,B,C,D are 4 unique photos despite year+album duplication');
+  assert.equal(artifacts.length, 5, 'A,B,C,D,E are 5 unique items despite year+album duplication');
 
   const byId = Object.fromEntries(artifacts.map((a) => [a.source_id, a]));
   const A = byId[`gphotos:${sha256('AAAA')}`];
   const B = byId[`gphotos:${sha256('BBBB')}`];
   const C = byId[`gphotos:${sha256('CCCC')}`];
   const D = byId[`gphotos:${sha256('DDDD')}`];
-  assert.ok(A && B && C && D, 'source_id is gphotos:<sha256 of bytes>');
+  const E = byId[`gphotos:${sha256('EEEE')}`];
+  assert.ok(A && B && C && D && E, 'source_id is gphotos:<sha256 of bytes>');
 
   // A: Family album is not a person album → no pictured hint; date + GPS from sidecar.
   assert.equal(A.type, 'photo');
@@ -147,6 +152,11 @@ test('index.js: dedups copies by content, attaches person hints, parses sidecar 
   // D: duplicate-counter sidecar was found and parsed.
   assert.equal(D.occurred_at, '2019-04-03T14:40:00.000Z');
   assert.equal(D.entity_hints[0].alias, 'Jane Doe');
+
+  // E: a video is typed 'video' (not 'photo'), described as a video, and still gets the hint.
+  assert.equal(E.type, 'video');
+  assert.match(E.text_repr, /^Video taken 2019-04-03/);
+  assert.equal(E.entity_hints[0].alias, 'Jane Doe');
 
   // Re-run: nothing changed on disk → nothing re-sent.
   requests.length = 0;
@@ -176,7 +186,7 @@ test('index.js: server down spools payloads, next run flushes them without dupli
   assert.equal(down.status, 0, down.stderr);
   assert.ok(existsSync(spoolPath), 'payloads spooled when server unreachable');
   const spooledLines = readFileSync(spoolPath, 'utf8').split('\n').filter(Boolean);
-  assert.equal(spooledLines.length, 4, 'all 4 unique photos spooled');
+  assert.equal(spooledLines.length, 5, 'all 5 unique items spooled');
 
   // Run 2: server up → spool flushes, and phase 2 does NOT re-send the same photos.
   const { server, port, requests } = await startMockServer(okBatch);
@@ -186,6 +196,37 @@ test('index.js: server down spools payloads, next run flushes them without dupli
   assert.equal(up.status, 0, up.stderr);
   assert.ok(!existsSync(spoolPath), 'spool cleared after successful flush');
   const allSent = requests.flatMap((r) => r.body.artifacts.map((a) => a.source_id));
-  assert.equal(allSent.length, 4, 'each photo delivered exactly once on recovery, no duplicate send');
-  assert.equal(new Set(allSent).size, 4);
+  assert.equal(allSent.length, 5, 'each item delivered exactly once on recovery, no duplicate send');
+  assert.equal(new Set(allSent).size, 5);
+});
+
+test('index.js: manifest prunes entries for files removed from the tree', async () => {
+  const { root, tmp } = makeTakeout();
+  const configPath = writeConfig(tmp);
+  const manifestPath = path.join(tmp, 'manifest.json');
+  const env = {
+    LIFECONTEXT_API_KEY: 'test-key',
+    TAKEOUT_ROOT: root,
+    GPHOTOS_PEOPLE_CONFIG: configPath,
+    GPHOTOS_MANIFEST_PATH: manifestPath,
+    GPHOTOS_SPOOL_PATH: path.join(tmp, 'gphotos-takeout-spool.jsonl'),
+  };
+
+  const { server, port } = await startMockServer(okBatch);
+  await run({ ...env, LIFECONTEXT_URL: `http://127.0.0.1:${port}` });
+  const first = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const cOnlyCopy = path.join(root, 'Google Photos', 'Mom', 'IMG_0003.jpg');
+  assert.ok(first.hashes[cOnlyCopy], 'C is cached after the first run');
+  assert.ok(first.sent[`gphotos:${sha256('CCCC')}`], 'C recorded as sent');
+
+  // Remove C entirely and re-run: its stale hash + sent entries must be pruned.
+  rmSync(cOnlyCopy);
+  rmSync(path.join(root, 'Google Photos', 'Mom', 'IMG_0003.jpg.json'));
+  await run({ ...env, LIFECONTEXT_URL: `http://127.0.0.1:${port}` });
+  server.closeAllConnections();
+  server.close();
+  const second = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert.equal(second.hashes[cOnlyCopy], undefined, 'removed file dropped from hash cache');
+  assert.equal(second.sent[`gphotos:${sha256('CCCC')}`], undefined, 'removed photo dropped from sent map');
+  assert.ok(second.sent[`gphotos:${sha256('AAAA')}`], 'surviving photo kept in sent map');
 });

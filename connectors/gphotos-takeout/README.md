@@ -1,6 +1,6 @@
 # gphotos-takeout
 
-Ingests a **Google Takeout** "Google Photos" export into [LifeContext](https://github.com/msih/life-context) as `type='photo'` artifacts, and — for the people you've named in the Google Photos UI — reuses Google's face matching as `pictured` entity hints. Batch connector; zero runtime dependencies.
+Ingests a **Google Takeout** "Google Photos" export into [LifeContext](https://github.com/msih/life-context) as `type='photo'` (and `type='video'`) artifacts, and — for the people you've named in the Google Photos UI — reuses Google's face matching as `pictured` entity hints. Batch connector; zero runtime dependencies.
 
 ## Why Takeout, not the API
 
@@ -55,7 +55,7 @@ node index.js
 
 ## What it does
 
-1. Walks the export; pairs each media file with its JSON sidecar (handles the classic `<name>.json`, the newer `<name>.supplemental-metadata.json`, and the `name(1).jpg → name.jpg(1).json` duplicate-counter shift).
+1. Walks the export; pairs each media file (images **and** videos — `.mp4`/`.mov`/`.m4v`/`.3gp` are ingested as `type='video'`, everything else as `type='photo'`) with its JSON sidecar (handles the classic `<name>.json`, the newer `<name>.supplemental-metadata.json`, and the `name(1).jpg → name.jpg(1).json` duplicate-counter shift).
 2. Reads `photoTakenTime` → `occurred_at` and `geoData` → raw `latitude`/`longitude` (submitted raw; **core** reverse-geocodes `place_label`, issue #67). Takeout's `(0,0)` "unknown location" is treated as absent.
 3. **Collapses Takeout's duplication**: the same photo appears in its year bucket and in every album it belongs to. All byte-identical copies are merged into **one** artifact (keyed by `content_hash`), carrying the union of its albums' person hints.
 4. `source_id` is `gphotos:<sha256>` — reproducible from the bytes, so it dedups across folders and survives album/folder renames and re-exports.
@@ -77,7 +77,7 @@ After a run, "photos of Mom" (`about_entity` for the mapped contact, once that c
 
 ## Testing without a real Takeout export
 
-`test.mjs` (`npm test`) synthesizes a Takeout tree (year bucket + albums, duplicated photos, sidecar-name variants, `(0,0)` geo) and runs `index.js` against a mock ingest server. Covers: content-hash dedup across folders, person-hint attachment (and non-person albums getting none), sidecar date/geo parsing, unchanged-file skipping on re-run, and server-down spool → next-run flush without duplicate sends.
+`test.mjs` (`npm test`) synthesizes a Takeout tree (year bucket + albums, duplicated photos, a video, sidecar-name variants, `(0,0)` geo) and runs `index.js` against a mock ingest server. Covers: content-hash dedup across folders, person-hint attachment (and non-person albums getting none), video vs. photo typing, sidecar date/geo parsing, unchanged-file skipping on re-run, manifest pruning of removed files, and server-down spool → next-run flush without duplicate sends.
 
 ## Files
 

@@ -6,17 +6,22 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-const MEDIA_EXTENSIONS = new Set([
-  '.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff', '.gif', '.webp',
-  '.mp4', '.mov', '.m4v', '.3gp',
-]);
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff', '.gif', '.webp']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.3gp']);
 
 // Google's year buckets ("Photos from 2019"), NOT user albums. English default only — a
 // non-English Takeout names these differently; documented as a known limitation (README).
 const YEAR_BUCKET_RE = /^Photos from \d{4}$/;
 
 export function isMediaFile(name) {
-  return MEDIA_EXTENSIONS.has(path.extname(name).toLowerCase());
+  const ext = path.extname(name).toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext) || VIDEO_EXTENSIONS.has(ext);
+}
+
+// The core artifact type for a media file — both 'photo' and 'video' are registered types
+// (src/ingest-types.js). A Takeout export mixes both; a video must not be stored as a photo.
+export function mediaType(name) {
+  return VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase()) ? 'video' : 'photo';
 }
 
 // A sidecar is any *.json that isn't the album's own metadata.json.

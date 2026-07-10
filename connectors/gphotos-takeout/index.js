@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import {
   loadDotEnvIfPresent, contentHashOfFile, chunk, readJsonOr, writeJson, ingestClient, spoolClient,
 } from './lib/shared.js';
-import { walkTakeout, parseSidecar } from './lib/takeout.js';
+import { walkTakeout, parseSidecar, mediaType } from './lib/takeout.js';
 import { loadPeopleConfig, hintsForAlbums } from './people.js';
 
 const CONNECTOR_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -44,15 +44,18 @@ async function resolveAlbumTitle(record) {
   try {
     const meta = JSON.parse(await readFile(record.albumMetaPath, 'utf8'));
     if (typeof meta.title === 'string' && meta.title.trim()) title = meta.title.trim();
-  } catch {
-    // No/broken album metadata.json — fall back to the folder name (already set).
+  } catch (err) {
+    // Corrupt album metadata.json — fall back to the folder name, but log: a person-album
+    // whose real title differs from its folder would silently stop matching person_albums.
+    console.error(`gphotos-takeout: unreadable album metadata ${record.albumMetaPath}, using folder name`, err);
   }
   albumTitleCache.set(record.albumMetaPath, title);
   return title;
 }
 
-function buildTextRepr({ occurredAt, albums, aliases, description, fileName }) {
-  const parts = [occurredAt ? `Photo taken ${occurredAt.slice(0, 10)}` : `Photo: ${fileName}`];
+function buildTextRepr({ type, occurredAt, albums, aliases, description, fileName }) {
+  const noun = type === 'video' ? 'Video' : 'Photo';
+  const parts = [occurredAt ? `${noun} taken ${occurredAt.slice(0, 10)}` : `${noun}: ${fileName}`];
   if (albums.length) parts.push(`albums: ${albums.join(', ')}`);
   if (aliases.length) parts.push(`people: ${aliases.join(', ')}`);
   if (description) parts.push(description);
@@ -109,6 +112,7 @@ async function main() {
 
   // Phase 1 — walk + hash, collapsing every folder-copy of a photo into one group by content.
   const groups = new Map(); // hash -> { copies, albums:Set, occurredAt, lat, lon, description, fileName }
+  const seenPaths = new Set(); // for pruning stale manifest.hashes entries (deleted/moved files)
   let files = 0;
   for await (const record of walkTakeout(TAKEOUT_ROOT)) {
     files++;
@@ -119,6 +123,7 @@ async function main() {
       const cached = manifest.hashes[record.absPath];
       hash = cached && cached.statKey === statKey ? cached.hash : await contentHashOfFile(record.absPath);
       manifest.hashes[record.absPath] = { statKey, hash };
+      seenPaths.add(record.absPath);
     } catch (err) {
       console.error(`gphotos-takeout: skipping unreadable file ${record.absPath}`, err);
       continue;
@@ -176,16 +181,17 @@ async function main() {
     const albums = [...group.albums].sort();
     const hints = hintsForAlbums(albums, peopleConfig);
     const sourceId = `gphotos:${hash}`;
+    const type = mediaType(group.fileName);
     const payload = {
       source: 'google-photos',
       source_id: sourceId,
-      type: 'photo',
+      type,
       text_repr: buildTextRepr({
-        occurredAt: group.occurredAt, albums, aliases: hints.map((h) => h.alias), description: group.description, fileName: group.fileName,
+        type, occurredAt: group.occurredAt, albums, aliases: hints.map((h) => h.alias), description: group.description, fileName: group.fileName,
       }),
       content_hash: hash,
       raw_path: canonicalPath(group.copies),
-      extra: { source: 'google-photos-takeout', albums },
+      extra: { ingested_via: 'google-photos-takeout', albums },
     };
     if (group.occurredAt) payload.occurred_at = group.occurredAt;
     if (group.lat != null) { payload.latitude = group.lat; payload.longitude = group.lon; }
@@ -200,6 +206,15 @@ async function main() {
     if (pending.length >= BATCH_MAX) await flush();
   }
   await flush();
+
+  // Prune manifest entries for files/photos no longer in the tree so it can't grow without
+  // bound across a reorganized library. Guarded on files>0 so an accidental empty/wrong root
+  // never wipes the cache (a re-send would be idempotent, but re-hashing the world is wasteful).
+  if (files > 0) {
+    const seenSourceIds = new Set([...groups.keys()].map((h) => `gphotos:${h}`));
+    manifest.hashes = Object.fromEntries(Object.entries(manifest.hashes).filter(([p]) => seenPaths.has(p)));
+    manifest.sent = Object.fromEntries(Object.entries(manifest.sent).filter(([s]) => seenSourceIds.has(s)));
+  }
   writeJson(MANIFEST_PATH, manifest);
 
   console.error(
