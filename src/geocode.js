@@ -20,7 +20,7 @@ const FAR_KM = 300; // beyond this, the dataset has nothing useful to say
 
 const toRad = (deg) => (deg * Math.PI) / 180;
 
-function haversineKm(lat1, lon1, lat2, lon2) {
+export function haversineKm(lat1, lon1, lat2, lon2) {
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a = Math.sin(dLat / 2) ** 2
@@ -47,4 +47,30 @@ export function reverseGeocode(lat, lon) {
   if (!nearest || nearestKm > FAR_KM) return null;
   const label = nearest.region ? `${nearest.city}, ${nearest.region}` : `${nearest.city}, ${nearest.country}`;
   return nearestKm > NEARBY_KM ? `near ${label}` : label;
+}
+
+// Forward geocode: resolve a place NAME to a center point for geo-radius search (issue #68 —
+// the inverse of reverseGeocode). Case-insensitive exact match on city, optionally narrowed by
+// a ", <region>" suffix ("Austin, TX"). places.json carries no population, so an unqualified,
+// ambiguous name (there are dozens of "San Francisco"s worldwide) can't be disambiguated by
+// popularity; it instead prefers a US match — the only entries that carry a region (#67's
+// US-only region rule) — so "San Francisco" resolves to California rather than the
+// alphabetically-first country. A qualified "City, Region" always matches exactly. Returns
+// {lat, lon, label}, or null when nothing matches.
+export function geocodePlace(name) {
+  if (typeof name !== 'string' || !name.trim()) return null;
+  const [cityPart, regionPart] = name.trim().toLowerCase().split(',').map((s) => s.trim());
+  let fallback = null; // first city match regardless of region — used only if no US match exists
+  for (const place of PLACES) {
+    if (place.city.toLowerCase() !== cityPart) continue;
+    if (regionPart && (place.region || '').toLowerCase() !== regionPart) continue;
+    const hit = {
+      lat: place.lat,
+      lon: place.lon,
+      label: place.region ? `${place.city}, ${place.region}` : `${place.city}, ${place.country}`,
+    };
+    if (regionPart || place.region) return hit; // exact region match, or the preferred US match
+    if (!fallback) fallback = hit;
+  }
+  return fallback;
 }

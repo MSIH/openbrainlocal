@@ -83,6 +83,7 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 ## Env / Config keys (`.env`)
 - `LIFECONTEXT_API_KEY` (required — server hard-exits if unset or left at the placeholder)
 - `PORT` (default 3000)
+- `GEO_RADIUS_DEFAULT_KM` (default 25) / `GEO_RADIUS_MAX_KM` (default 500) — `near` geo-radius search (#68)
 - Optional/for later cloud enrichment: provider keys — keep out of git.
 
 ## Workflow tooling & local settings

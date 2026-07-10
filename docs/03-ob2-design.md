@@ -242,7 +242,8 @@ The single biggest upgrade over OB1. `search_memories(query)` becomes a two-stag
 → {
     types: ["photo"],
     entities: ["Sarah"],           → resolve via entity_aliases
-    place: "New Orleans"           → bbox or place_label LIKE
+    place: "New Orleans"           → place_label LIKE ("in"/"at" wording)
+    near: null                     → a place NAME for "near"/"around" wording → geo-radius (#68)
     time: 2025-03-01 .. 2025-06-01,
     semantic: "trip, vacation, together"
   }
@@ -270,6 +271,15 @@ Then vector-rank only within those candidates (sqlite-vec supports `partition ke
 > `place` matching no `place_label`) is folded back into the ranked search text so it can't silently
 > vanish. The query parse is one small-LLM call (`QUERY_MODEL`) validated with zod; if the model or
 > the embedder is unreachable, search degrades gracefully (pure-semantic plan / FTS-only).
+>
+> **Geo-radius (`near`, issue #68).** `place` is a `place_label LIKE` text match; `near` is a true
+> distance filter for proximity wording ("near/around/close to X"). A `near` value — a caller-supplied
+> place name or `{lat, lon}`, or one the planner extracts — resolves to a center point (names via the
+> bundled gazetteer, `geocodePlace`), and artifacts within `radius_km` (default `GEO_RADIUS_DEFAULT_KM`,
+> clamped to `GEO_RADIUS_MAX_KM`) by coordinate join the candidate set: a cheap SQL lat/lon bounding box
+> then an exact haversine refine — no spatial index. This catches nearby places whose `place_label`
+> doesn't literally contain the query (a "Sausalito" photo surfaced by `near "San Francisco"`). Same
+> demote-never-drop posture: a name that resolves to no center folds into the ranked search text.
 
 **Graph expansion for relationship queries:** "what's going on with my sister" → resolve relationship attr → Sarah entity → walk `entity_links` → recent artifacts of any type, sorted by `occurred_at`. No embedding needed at all.
 
@@ -278,7 +288,7 @@ Then vector-rank only within those candidates (sqlite-vec supports `partition ke
 Keep the per-session server factory and Streamable HTTP transport from v2.2 unchanged. New/updated tools:
 
 - `store_memory(content)` — unchanged (manual notes are just `type='note'` artifacts)
-- `search(query, types?, time_range?, entities?, limit?)` — hybrid planner above
+- `search(query, types?, time_range?, entities?, near?, radius_km?, limit?)` — hybrid planner above; `near` (place name or `{lat, lon}`) + `radius_km` add a geo-radius filter (#68)
 - `timeline(start, end, types?)` — pure chronological recall
 - `about_entity(name)` — resolve → profile + linked artifact digest + person↔person `relations` ("everything about Sarah")
 - `get_artifact(id)` — full `text_repr` + metadata + `raw_path`
