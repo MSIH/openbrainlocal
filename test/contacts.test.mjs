@@ -47,6 +47,20 @@ test('parsePhoto: unrecognized shape returns null (photo silently absent)', () =
   assert.equal(parsePhoto('some-unrecognized-value', []), null);
 });
 
+test('parsePhoto: vCard 4.0 data: URI tolerates an extra ;param=value segment (e.g. ;charset=) before ;base64,', () => {
+  const p = parsePhoto(`data:image/png;charset=binary;base64,${PHOTO_B64}`, []);
+  assert.equal(p.kind, 'base64');
+  assert.equal(p.data, PHOTO_B64);
+  assert.equal(p.mediaType, 'image/png');
+  assert.equal(p.ext, 'png');
+});
+
+test('parsePhoto: unrecognized image subtype (e.g. HEIC) falls back to its own subtype as the file extension', () => {
+  const p = parsePhoto(PHOTO_B64, [{ key: 'ENCODING', value: 'b' }, { key: 'MEDIATYPE', value: 'image/heic' }]);
+  assert.equal(p.mediaType, 'image/heic');
+  assert.equal(p.ext, 'heic');
+});
+
 test('persistContactPhoto: base64 -> content-addressed file under CONTACTS_RAW_DIR', () => {
   const result = persistContactPhoto({ kind: 'base64', data: PHOTO_B64, mediaType: 'image/jpeg', ext: 'jpg' });
   assert.ok(result.raw_path.startsWith(rawDir));
@@ -76,6 +90,21 @@ test('persistContactPhoto: malformed base64 logs and returns null, never throws'
     console.error = originalError;
   }
   assert.equal(logged, true, 'a decode failure is logged, never swallowed');
+});
+
+test('persistContactPhoto: truncated base64 (length not a multiple of 4) is rejected, not silently decoded into corrupt bytes', () => {
+  const truncated = PHOTO_B64.slice(0, PHOTO_B64.length - 1); // chop one char off a valid, padded b64 string
+  const originalError = console.error;
+  let logged = false;
+  console.error = () => { logged = true; };
+  let result;
+  try {
+    result = persistContactPhoto({ kind: 'base64', data: truncated, ext: 'jpg' });
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(result, null, 'truncated base64 must not decode into a corrupt file');
+  assert.equal(logged, true);
 });
 
 test('persistContactPhoto: null descriptor (no PHOTO) is a no-op', () => {

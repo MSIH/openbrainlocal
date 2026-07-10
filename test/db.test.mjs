@@ -213,20 +213,64 @@ test('mergeEntities: re-merging an already-tombstoned entity throws NOT_FOUND (i
   assert.throws(() => mergeEntities(third.entityId, absorb.entityId), (err) => err.code === 'NOT_FOUND');
 });
 
-test('mergeEntities: drops a direct keep<->absorb relation (no self-loop) and repoints third-party relations', () => {
+test('mergeEntities: drops a direct keep<->absorb relation (no self-loop), excludes it from moved.relations, and repoints third-party relations', () => {
   const keep = makePerson('Keep Rel', {});
   const absorb = makePerson('Absorb Rel', {});
   const third = makePerson('Third Rel', {});
   upsertEntityRelation({ from_entity_id: keep.entityId, to_entity_id: absorb.entityId, relation_type: 'sibling', source: 'test' });
   upsertEntityRelation({ from_entity_id: third.entityId, to_entity_id: absorb.entityId, relation_type: 'friend', source: 'test' });
 
-  mergeEntities(keep.entityId, absorb.entityId);
+  const result = mergeEntities(keep.entityId, absorb.entityId);
+  // The direct keep<->absorb edge is deleted, not moved — only the third-party relation
+  // should be counted (moved.relations must not overstate what actually carried over).
+  assert.equal(result.moved.relations, 1);
 
   const relations = db.prepare('SELECT * FROM entity_relations WHERE from_entity_id = ? OR to_entity_id = ?').all(keep.entityId, keep.entityId);
   assert.ok(!relations.some((r) => r.from_entity_id === r.to_entity_id), 'no self-loop relation survives the merge');
   assert.ok(
     relations.some((r) => r.from_entity_id === third.entityId && r.to_entity_id === keep.entityId && r.relation_type === 'friend'),
     'a third party\'s relation to the absorbed entity is re-pointed to the survivor'
+  );
+});
+
+test('mergeEntities: an entity_links collision is deleted as a duplicate, never left orphaned pointing at the tombstoned id', () => {
+  const keep = makePerson('Collision Keep', {});
+  const absorb = makePerson('Collision Absorb', {});
+  // Both entities separately linked as 'mentioned' to the same artifact — the exact collision
+  // shape repointLinksStmt (a plain UPDATE, post-fix) cannot move without first deduping.
+  const { id: sharedArtifactId } = storeArtifactTxn(
+    { type: 'note', source: uniqueSource(), source_id: 'shared', text_repr: 'mentions both' },
+    f32(0.5),
+    [
+      { entity_id: keep.entityId, role: 'mentioned', confidence: 0.7 },
+      { entity_id: absorb.entityId, role: 'mentioned', confidence: 0.7 },
+    ],
+  );
+
+  mergeEntities(keep.entityId, absorb.entityId);
+
+  const rows = db.prepare('SELECT entity_id, role FROM entity_links WHERE artifact_id = ?').all(sharedArtifactId);
+  assert.deepEqual(
+    rows, [{ entity_id: keep.entityId, role: 'mentioned' }],
+    'the colliding duplicate is deleted outright, not left dangling on the tombstoned absorb id'
+  );
+  // get_artifact/getArtifactById must never surface a stale link to the tombstoned entity.
+  assert.ok(!getArtifactById(sharedArtifactId).links.some((l) => l.entity_id === absorb.entityId));
+});
+
+test('mergeEntities: an entity_relations collision (to-side) is deleted as a duplicate, never left orphaned', () => {
+  const keep = makePerson('Rel Collision Keep', {});
+  const absorb = makePerson('Rel Collision Absorb', {});
+  const third = makePerson('Rel Collision Third', {});
+  upsertEntityRelation({ from_entity_id: third.entityId, to_entity_id: keep.entityId, relation_type: 'friend', source: 'test' });
+  upsertEntityRelation({ from_entity_id: third.entityId, to_entity_id: absorb.entityId, relation_type: 'friend', source: 'test' });
+
+  mergeEntities(keep.entityId, absorb.entityId);
+
+  const rows = db.prepare('SELECT from_entity_id, to_entity_id, relation_type FROM entity_relations WHERE from_entity_id = ?').all(third.entityId);
+  assert.deepEqual(
+    rows, [{ from_entity_id: third.entityId, to_entity_id: keep.entityId, relation_type: 'friend' }],
+    'the colliding duplicate relation is deleted, not left pointing at the tombstoned absorb id'
   );
 });
 

@@ -312,6 +312,7 @@ function buildMcpServer() {
           }],
         };
       } catch (err) {
+        console.error("merge_entities tool failed:", err);
         return { content: [{ type: "text", text: `Merge failed: ${err.message}` }], isError: true };
       }
     }

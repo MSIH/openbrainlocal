@@ -89,17 +89,26 @@ function parseImpp(value, params) {
 }
 
 const PHOTO_EXT_BY_MEDIA = [[/PNG/i, 'png'], [/GIF/i, 'gif'], [/JPE?G/i, 'jpg']];
-const extForPhotoType = (t) => PHOTO_EXT_BY_MEDIA.find(([re]) => re.test(t ?? ''))?.[1] ?? null;
+// Falls back to the MIME subtype itself (e.g. "image/heic" -> "heic") when it isn't one of the
+// three canonicalized aliases above, rather than defaulting every unrecognized type to '.jpg' —
+// a HEIC/WEBP/etc. photo's file extension should match what its bytes actually are.
+function extForPhotoType(t) {
+  const known = PHOTO_EXT_BY_MEDIA.find(([re]) => re.test(t ?? ''))?.[1];
+  if (known) return known;
+  const subtype = String(t ?? '').match(/^image\/([a-z0-9.+-]+)$/i)?.[1];
+  return subtype ? subtype.toLowerCase().replace(/[^a-z0-9]/g, '') || null : null;
+}
 
 // Parse a vCard PHOTO property into a pure descriptor — no I/O here (finalizeCard stays a
 // pure parser; decode/write happens in persistContactPhoto). Three shapes: vCard 4.0 inline
-// `data:` URI, an external http(s) URI (never fetched — see persistContactPhoto), and vCard
-// 3.0 `ENCODING=b`/`BASE64` + `TYPE=`. Unrecognized shapes return null (photo silently absent,
-// same as no PHOTO property at all — this is optional data, not a required field).
+// `data:` URI (tolerating extra ;param=value segments per RFC 2397, e.g. ";charset=binary"
+// before ";base64,"), an external http(s) URI (never fetched — see persistContactPhoto), and
+// vCard 3.0 `ENCODING=b`/`BASE64` + `TYPE=`. Unrecognized shapes return null (photo silently
+// absent, same as no PHOTO property at all — this is optional data, not a required field).
 export function parsePhoto(value, params) {
   const typeParam = paramValue(params, 'TYPE');
   const mediaTypeParam = paramValue(params, 'MEDIATYPE');
-  const dataUri = value.match(/^data:([^;,]*);base64,(.*)$/is);
+  const dataUri = value.match(/^data:([^;,]*)(?:;[a-zA-Z0-9.-]+=[^;,]*)*;base64,(.*)$/is);
   if (dataUri) {
     const mediaType = dataUri[1] || mediaTypeParam || 'image/jpeg';
     return { kind: 'base64', data: dataUri[2], mediaType, ext: extForPhotoType(mediaType) || extForPhotoType(typeParam) || 'jpg' };
@@ -115,13 +124,14 @@ export function parsePhoto(value, params) {
   return null;
 }
 
-// Strict base64 decode: rejects anything containing non-base64 characters rather than Node's
-// lenient Buffer.from (which silently skips invalid chars and still returns partial bytes).
-// A vCard PHOTO worth keeping should decode cleanly; garbage input becomes a logged skip, not
-// a corrupt image file.
+// Strict base64 decode: rejects anything containing non-base64 characters, or a length that
+// isn't a multiple of 4 (a truncated/corrupted payload), rather than Node's lenient
+// Buffer.from (which silently skips invalid chars and decodes a truncated group anyway,
+// returning non-empty-but-corrupt bytes). A vCard PHOTO worth keeping should decode cleanly;
+// garbage or truncated input becomes a logged skip, not a corrupt image file.
 function decodeBase64Strict(raw) {
   const cleaned = raw.replace(/\s+/g, '');
-  if (!cleaned || !/^[A-Za-z0-9+/]*={0,2}$/.test(cleaned)) return null;
+  if (!cleaned || cleaned.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(cleaned)) return null;
   return Buffer.from(cleaned, 'base64');
 }
 
@@ -193,6 +203,9 @@ function finalizeCard(lines, raw) {
       case 'X-PHONETIC-LAST-NAME': (c.phonetic ??= {}).family = value; break;
       case 'X-ABSHOWAS': if (value.toUpperCase() === 'COMPANY') c.isCompany = true; break;
       case 'KIND': if (value.toLowerCase() === 'org') c.isCompany = true; break;
+      // A card with more than one PHOTO line (e.g. a full photo plus a thumbnail variant) keeps
+      // only the last one successfully parsed — deliberate, not a bug: `c` is a scalar `photo`
+      // field (one preserved image per contact), matching every other scalar vCard field here.
       case 'PHOTO': { const p = parsePhoto(value, params); if (p) c.photo = p; break; }
       default:
         if (LEGACY_IM_PROPS.has(prop)) c.im.push({ service: prop.replace(/^X-/, '').replace(/-USERNAME$/, ''), handle: value });
@@ -340,7 +353,11 @@ export async function importContacts(text) {
     const r = importOneTxn(c, textRepr, contentHash, vec, photo);
     if (r.deduped) skipped++; else artifacts++;
     if (r.entityCreated) entitiesCreated++;
-    if (photo) photos++;
+    // Only count a photo actually attached to a newly-stored artifact — on the rare dedup race
+    // (a concurrent import commits the same (source, source_id) between this loop's pre-check
+    // and the transaction), storeArtifactTxn returns the pre-existing row untouched and the
+    // file persistContactPhoto just wrote is orphaned, not attached; don't claim it as counted.
+    if (photo && !r.deduped) photos++;
   }
   const summary = { cards: cards.length, entitiesCreated, artifacts, skipped, photos };
   logEvent('import_contacts', 'contacts.js', summary);
