@@ -25,7 +25,7 @@ import { z } from "zod";
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN } from './config.js';
+import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
 import { db, storeArtifactTxn, sha256 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates } from './search.js';
@@ -60,11 +60,17 @@ const LimitSchema = z.number().int().min(1).max(50).default(3);
 const TypeEnum = z.enum(ARTIFACT_TYPES);
 const RememberSchema = z.object({ content: ContentSchema });
 const RecallSchema = z.object({ query: z.string().min(1, "Query cannot be empty"), limit: LimitSchema });
+// Geo-radius center (#68): a place name (resolved to a center point via the bundled gazetteer)
+// or explicit coordinates. Shared by the REST schema and the MCP search tool.
+const NearSchema = z.union([z.string().min(1), z.object({ lat: z.number(), lon: z.number() })]);
+const RadiusSchema = z.number().positive();
 const SearchSchema = z.object({
   query: z.string().min(1, "Query cannot be empty"),
   types: z.array(TypeEnum).optional(),
   time_range: z.object({ start: z.string(), end: z.string() }).partial().optional(),
   entities: z.array(z.string()).optional(),
+  near: NearSchema.optional(),
+  radius_km: RadiusSchema.optional(),
   limit: LimitSchema.optional(),
 });
 const TimelineSchema = z.object({
@@ -194,12 +200,14 @@ function buildMcpServer() {
         types: z.array(TypeEnum).optional().describe(`Restrict to these artifact types: ${ARTIFACT_TYPES.join(", ")}.`),
         time_range: z.object({ start: z.string(), end: z.string() }).partial().optional().describe("ISO date bounds {start,end} to constrain occurred_at."),
         entities: z.array(z.string()).optional().describe("People/places/orgs to require (resolved via the entity graph)."),
+        near: NearSchema.optional().describe("Search near a place: a name (e.g. \"San Francisco\") or explicit {lat, lon}. Surfaces artifacts within radius_km by coordinate, catching nearby places the label text doesn't literally name."),
+        radius_km: RadiusSchema.optional().describe(`Radius in km for \`near\` (default ${GEO_RADIUS_DEFAULT_KM}, max ${GEO_RADIUS_MAX_KM}).`),
         limit: LimitSchema.optional().describe("Max results (1-50, default 3)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ query, types, time_range, entities, limit = 3 }) => {
-      const results = await hybridSearch(query, { limit, types, timeRange: time_range, entities });
+    async ({ query, types, time_range, entities, near, radius_km, limit = 3 }) => {
+      const results = await hybridSearch(query, { limit, types, timeRange: time_range, entities, near, radiusKm: radius_km });
       if (results.length === 0) return { content: [{ type: "text", text: "No matching artifacts found." }] };
       return { content: [{ type: "text", text: results.map(artifactLine).join("\n") }] };
     }
@@ -360,8 +368,8 @@ app.post('/api/recall', requireAuth, wrap(async (req, res) => {
 }));
 
 app.post('/api/search', requireAuth, wrap(async (req, res) => {
-  const { query, types, time_range, entities, limit } = SearchSchema.parse(req.body);
-  const results = await hybridSearch(query, { limit: limit ?? 3, types, timeRange: time_range, entities });
+  const { query, types, time_range, entities, near, radius_km, limit } = SearchSchema.parse(req.body);
+  const results = await hybridSearch(query, { limit: limit ?? 3, types, timeRange: time_range, entities, near, radiusKm: radius_km });
   res.json({ results });
 }));
 

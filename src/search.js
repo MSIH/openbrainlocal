@@ -10,7 +10,8 @@
 import { z } from 'zod';
 import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, mergeEntities, listProbableDuplicates } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
-import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS } from './config.js';
+import { geocodePlace, haversineKm } from './geocode.js';
+import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
 import { ARTIFACT_TYPES, TYPE_REGISTRY } from './ingest-types.js';
 
 // Re-exported so the planner prompt below, the plan-schema filter, and every existing
@@ -30,12 +31,13 @@ const PlanSchema = z.object({
   types: z.array(z.string()).catch([]).transform((a) => a.filter((t) => ARTIFACT_TYPES.includes(t))),
   entities: z.array(z.string()).catch([]).default([]),
   place: z.string().nullable().catch(null).default(null),
+  near: z.string().nullable().catch(null).default(null),
   time_start: z.string().nullable().catch(null).default(null),
   time_end: z.string().nullable().catch(null).default(null),
   semantic: z.string().catch('').default(''),
 });
 
-const fallbackPlan = (query) => ({ types: [], entities: [], place: null, time_start: null, time_end: null, semantic: query });
+const fallbackPlan = (query) => ({ types: [], entities: [], place: null, near: null, time_start: null, time_end: null, semantic: query });
 
 function planSystemPrompt(today) {
   return [
@@ -43,7 +45,8 @@ function planSystemPrompt(today) {
     'Return ONLY a JSON object with keys:',
     `  types: array of any of [${ARTIFACT_TYPES.join(', ')}], or []`,
     '  entities: array of person/place/org names exactly as written, or []',
-    '  place: a place string, or null',
+    '  place: a place string for "in"/"at" location wording (matched against the stored label), or null',
+    '  near: a place name for proximity wording ("near", "around", "close to", "nearby") — a geographic-radius search — or null',
     '  time_start, time_end: ISO dates (YYYY-MM-DD) resolving any relative time, or null',
     '  semantic: the meaning-bearing core of the query (always a non-empty string)',
     'For week- or month-scale summary questions ("what was I doing in October"), set types to ["digest"] — daily digests answer those in one hit.',
@@ -117,6 +120,14 @@ const ftsInStmt = db.prepare(`
 `);
 // Cheap existence probe: is this place string a usable filter at all?
 const placeExistsStmt = db.prepare('SELECT 1 FROM artifacts WHERE place_label LIKE ? LIMIT 1');
+// Geo-radius candidates (#68): a cheap lat/lon bounding-box prefilter over artifacts that carry
+// coordinates; the caller refines the box corners with an exact haversine pass (geoCandidateIds).
+const geoBboxStmt = db.prepare(`
+  SELECT id, latitude, longitude FROM artifacts
+  WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+    AND latitude BETWEEN @latMin AND @latMax
+    AND longitude BETWEEN @lonMin AND @lonMax
+`);
 // Per-day digest substitution (roadmap M6 deliverable 3): within the range, a day that has a
 // daily digest is represented by it — its digest-eligible raw rows are folded away; undigested
 // days keep their raw artifacts (partial backfill must never hide data), and types the digest
@@ -154,6 +165,28 @@ function toFtsQuery(text) {
   return terms.length ? terms.join(' OR ') : null;
 }
 
+// Artifact ids within `radiusKm` of a center point (#68). A degree-based bounding box narrows
+// the SQL scan to a rectangle around the center, then an exact haversine pass trims it to a true
+// circle. Near a pole (cos(lat)→0 blows up the longitude span) the box widens to the full
+// longitude band; antimeridian wraparound is out of scope (documented). Returns an id Set.
+const KM_PER_DEG_LAT = 111.32;
+const POLE_COS_EPSILON = 1e-6;  // below this |cos(lat)| the longitude span blows up — widen to the full band
+const FULL_LON_SPAN_DEG = 180;  // that full-longitude-band fallback near a pole
+function geoCandidateIds(center, radiusKm) {
+  const dLat = radiusKm / KM_PER_DEG_LAT;
+  const cosLat = Math.cos((center.lat * Math.PI) / 180);
+  const dLon = Math.abs(cosLat) < POLE_COS_EPSILON ? FULL_LON_SPAN_DEG : radiusKm / (KM_PER_DEG_LAT * Math.abs(cosLat));
+  const rows = geoBboxStmt.all({
+    latMin: center.lat - dLat, latMax: center.lat + dLat,
+    lonMin: center.lon - dLon, lonMax: center.lon + dLon,
+  });
+  const ids = new Set();
+  for (const r of rows) {
+    if (haversineKm(center.lat, center.lon, r.latitude, r.longitude) <= radiusKm) ids.add(r.id);
+  }
+  return ids;
+}
+
 // Reciprocal rank fusion over N ranked id-lists: score = Σ 1/(RRF_K + rank).
 function rrf(lists, k = RRF_K) {
   const scores = new Map();
@@ -169,8 +202,10 @@ function rrf(lists, k = RRF_K) {
  * `distance` from the vector arm when available (null for FTS-only hits). Ranking is
  * constrained to the prefiltered candidate set. Pass `usePlanner: false` to skip the LLM
  * parse entirely (the legacy recall path — a plain semantic+keyword lookup, no NL filters).
+ * `near` (a place name or {lat, lon}) plus `radiusKm` add a geo-radius filter (#68): artifacts
+ * within the radius by coordinate, not just by place-label text.
  */
-export async function hybridSearch(query, { limit = 3, types, timeRange, entities, usePlanner = true } = {}) {
+export async function hybridSearch(query, { limit = 3, types, timeRange, entities, near, radiusKm, usePlanner = true } = {}) {
   const plan = usePlanner ? await parseQuery(query) : fallbackPlan(query);
 
   const effTypes = types?.length ? types : plan.types;
@@ -195,6 +230,33 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
     place = null;
   }
 
+  // Geo-radius (#68). Explicit {lat,lon} wins; a name (caller `near` or plan.near) resolves via
+  // the bundled gazetteer. A name that resolves to no center isn't a filter — it's folded into
+  // the ranked-search text, same demote-never-drop posture as an unmatched place. `geoFromCaller`
+  // tracks whether the filter is the caller's (survives the zero-candidate retry) or plan-invented.
+  const nearInput = near ?? emptyish(plan.near);
+  const radius = clamp(radiusKm || GEO_RADIUS_DEFAULT_KM, 1, GEO_RADIUS_MAX_KM);
+  let geoIds = null;
+  let geoFromCaller = false;
+  if (nearInput != null) {
+    let center = null;
+    if (typeof nearInput === 'object' && nearInput.lat != null && nearInput.lon != null) {
+      // Guard out-of-range coordinates (mirrors reverseGeocode): a garbage center yields no geo
+      // filter rather than a bounding box that silently matches nothing.
+      if (Math.abs(nearInput.lat) <= 90 && Math.abs(nearInput.lon) <= 180) {
+        center = { lat: nearInput.lat, lon: nearInput.lon };
+      }
+    } else if (typeof nearInput === 'string') {
+      const resolved = geocodePlace(nearInput);
+      if (resolved) center = { lat: resolved.lat, lon: resolved.lon };
+      else unresolvedTerms.push(nearInput);
+    }
+    if (center) {
+      geoIds = geoCandidateIds(center, radius);
+      geoFromCaller = near != null;
+    }
+  }
+
   // What both ranking arms actually search: semantic core + everything the filters
   // couldn't absorb.
   const searchText = [plan.semantic || query, ...unresolvedTerms].join(' ');
@@ -213,15 +275,26 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
         .map((r) => r.id)
     );
 
+  // Geo is an id Set (or null when absent); it intersects the SQL candidate set the same way
+  // an extra WHERE clause would (null SQL set + geo => geo alone).
+  const applyGeo = (sqlSet, geo) => {
+    if (geo == null) return sqlSet;
+    if (sqlSet == null) return geo;
+    return new Set([...sqlSet].filter((id) => geo.has(id)));
+  };
+
+  const hasSqlFilter = effTypes.length || entityIds.length || t0 || t1 || place;
   let candidates = null;
-  if (effTypes.length || entityIds.length || t0 || t1 || place) {
-    candidates = prefilter({ types: effTypes, entityIds, t0, t1, place });
+  if (hasSqlFilter || geoIds != null) {
+    const sqlSet = hasSqlFilter ? prefilter({ types: effTypes, entityIds, t0, t1, place }) : null;
+    candidates = applyGeo(sqlSet, geoIds);
     if (candidates.size === 0) {
       // Planner-overfilter fix (M2 rule: demote, never drop): zero candidates conflates
       // "caller's explicit filters matched nothing" (honest) with "the LLM invented a
       // filter" (silent planner failure — e.g. the prompt steers summary queries to
       // types=['digest'], which must not empty the search when no digests exist for the
-      // period). Retry with only the caller's explicit args; place is always plan-derived.
+      // period). Retry with only the caller's explicit args — explicit types/time/entities
+      // plus a caller-supplied `near`; place and plan-derived `near` are always dropped here.
       const caller = {
         types: types?.length ? types : [],
         entityIds: entities?.length ? entityIds : [],
@@ -229,8 +302,11 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
         t1: emptyish(timeRange?.end),
         place: null,
       };
-      if (caller.types.length || caller.entityIds.length || caller.t0 || caller.t1) {
-        candidates = prefilter(caller);
+      const callerGeo = geoFromCaller ? geoIds : null;
+      const callerHasSql = caller.types.length || caller.entityIds.length || caller.t0 || caller.t1;
+      if (callerHasSql || callerGeo != null) {
+        const sqlSet2 = callerHasSql ? prefilter(caller) : null;
+        candidates = applyGeo(sqlSet2, callerGeo);
         if (candidates.size === 0) return []; // the caller's own filters matched nothing — honest empty
       } else {
         candidates = null; // every filter was plan-invented — fall back to pure semantic + keyword

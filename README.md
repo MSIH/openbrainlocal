@@ -96,7 +96,7 @@ Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Author
   ```
 - **MCP** (Streamable HTTP) — `/mcp`, tools:
   - `store_memory` / `search_memories` — the original note store + recall (unchanged on the wire)
-  - `search` — hybrid semantic + keyword search with optional `types` / `time_range` / `entities` filters
+  - `search` — hybrid semantic + keyword search with optional `types` / `time_range` / `entities` filters, plus `near` (a place name or `{lat, lon}`) + `radius_km` for geo-radius search — surfaces artifacts within the radius by coordinate, catching nearby places the label text doesn't literally name (e.g. `near: "San Francisco"` finds a Sausalito photo)
   - `timeline` — chronological recall over a date range
   - `about_entity` — resolve a person/place/org and return their profile, recent linked artifacts, and person↔person relations (spouse, child, parent, …)
   - `get_artifact` — one artifact's full text, metadata, and entity links by id

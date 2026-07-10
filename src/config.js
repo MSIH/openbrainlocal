@@ -48,6 +48,8 @@ export const RRF_K = int(process.env.RRF_K, 60);          // reciprocal-rank-fus
 export const KNN_OVERFETCH = int(process.env.KNN_OVERFETCH, 5); // fetch limit*this before fusion/filter
 export const KNN_MIN = int(process.env.KNN_MIN, 50);      // floor on k so fusion has depth
 export const KNN_MAX = int(process.env.KNN_MAX, 500);     // ceiling on k (perf guard)
+export const GEO_RADIUS_DEFAULT_KM = int(process.env.GEO_RADIUS_DEFAULT_KM, 25); // default radius for `near` search (#68)
+export const GEO_RADIUS_MAX_KM = int(process.env.GEO_RADIUS_MAX_KM, 500);        // clamp ceiling on radius_km
 
 // --- Consolidation (nightly daily digests — docs/06-consolidation.md) ---
 // Chat model that writes the digest. Roadmap M6 default; any Ollama chat model works.
