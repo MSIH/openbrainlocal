@@ -280,7 +280,7 @@ async function suggestLabels() {
     console.error(`photo-exif: suggest-labels — hit the ${CONTACT_PHOTOS_FETCH_LIMIT}-contact fetch limit; some contacts may not have been checked`);
   }
 
-  let suggested = 0;
+  const suggestedClusterIds = new Set(); // unique clusters, not contact×cluster match count
   let skipped = 0;
   for (const contact of contacts) {
     let faces;
@@ -306,7 +306,7 @@ async function suggestLabels() {
           `photo-exif: suggest — cluster ${cluster.id} (${cluster.count} photo(s)) possibly "${contact.name}" ` +
           `(entity #${contact.entity_id}, distance ${dist.toFixed(2)} <= threshold ${FACE_SEED_THRESHOLD})`
         );
-        suggested++;
+        suggestedClusterIds.add(cluster.id);
       }
     }
   }
@@ -316,7 +316,7 @@ async function suggestLabels() {
   if (contacts.length > 0 && skipped === contacts.length) {
     console.error(`photo-exif: suggest-labels — all ${skipped} contact photo(s) were unreadable/undetectable; check the same-filesystem setup (see README)`);
   }
-  console.error(`photo-exif: suggest-labels — checked ${contacts.length} contact photo(s) (${skipped} skipped), ${suggested} cluster(s) suggested`);
+  console.error(`photo-exif: suggest-labels — checked ${contacts.length} contact photo(s) (${skipped} skipped), ${suggestedClusterIds.size} cluster(s) suggested`);
 }
 
 // Write one representative SAMPLE image per cluster (whole image, not a tight face crop — a crop

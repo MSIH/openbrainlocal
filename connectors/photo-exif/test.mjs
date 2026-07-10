@@ -518,3 +518,40 @@ test('face-worker: suggest-labels warns distinctly when every contact photo was 
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stderr, /all 1 contact photo\(s\) were unreadable\/undetectable/, 'a total-skip run is distinguishable from a healthy zero-match run');
 });
+
+test('face-worker: suggest-labels summary counts unique clusters, not contact×cluster matches', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'face-suggest-unique-'));
+  const clustersState = path.join(tmp, 'clusters.json');
+  // One unlabeled cluster; TWO different contacts both happen to match it.
+  writeFileSync(clustersState, serializeClustersFile(1, [
+    { id: 1, centroid: [0, 0, 0], count: 2, label: null, sample: 'a.jpg' },
+  ]));
+  const fixturePath = path.join(tmp, 'faces-fixture.json');
+  writeFileSync(fixturePath, JSON.stringify({
+    '/fake/raw/one.jpg': [[0.01, 0, 0]],
+    '/fake/raw/two.jpg': [[0.02, 0, 0]],
+  }));
+
+  const env = {
+    LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_EXIF_FACE_FIXTURE: fixturePath,
+    PHOTO_EXIF_FACE_CLUSTERS_PATH: clustersState,
+    FACE_SEED_THRESHOLD: '0.6',
+  };
+  const { server, port } = await startMockServer((req, body, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      contacts: [
+        { entity_id: 30, name: 'Contact One', raw_path: '/fake/raw/one.jpg' },
+        { entity_id: 31, name: 'Contact Two', raw_path: '/fake/raw/two.jpg' },
+      ],
+    }));
+  });
+  const res = await run('face-worker.js', { ...env, LIFECONTEXT_URL: `http://127.0.0.1:${port}` }, ['suggest-labels']);
+  server.closeAllConnections();
+  server.close();
+
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal((res.stderr.match(/suggest — cluster/g) || []).length, 2, 'both contacts are printed as suggestions for the one cluster');
+  assert.match(res.stderr, /checked 2 contact photo\(s\) \(0 skipped\), 1 cluster\(s\) suggested/, 'the summary counts the one unique cluster, not the two contact matches');
+});

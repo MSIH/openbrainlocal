@@ -783,11 +783,13 @@ const listContactPhotosStmt = db.prepare(`
  * List photographed contacts for reference-face matching. Read-only; core never computes or
  * compares face descriptors itself — that stays connector-local (doc 04 §11 rejects
  * connector-supplied embeddings, and the inverse holds too: core doesn't do connector-side ML).
- * `raw_path` is resolved to an absolute path before returning: CONTACTS_RAW_DIR defaults to a
- * relative value (src/config.js), meaningful only relative to core's own process cwd — and this
- * is the first consumer to hand raw_path to a SECOND process (a connector), which has no way to
- * know core's cwd. path.resolve() against this same process's cwd reproduces exactly the
- * absolute location path.join(CONTACTS_RAW_DIR, ...) wrote to at import time.
+ * `raw_path` is passed through path.resolve() before returning. contacts.js now stores an
+ * already-absolute raw_path (resolved at import time, against that import's own cwd — the only
+ * moment the correct base directory is unambiguous), so this is a no-op for new rows; it's a
+ * backward-compat shim for any row imported before that fix, when CONTACTS_RAW_DIR's relative
+ * default meant raw_path was stored relative to whatever cwd `import:contacts` happened to run
+ * from. Resolving here against the SERVER's cwd is only correct for those old rows if the server
+ * happens to share import's cwd — best-effort for pre-existing data, not a general guarantee.
  */
 export function listContactPhotos(limit = 100) {
   return listContactPhotosStmt.all(limit).map((r) => ({ ...r, raw_path: path.resolve(r.raw_path) }));
