@@ -8,7 +8,7 @@
  * Search never throws just because Ollama is offline.
  */
 import { z } from 'zod';
-import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, mergeEntities, listProbableDuplicates } from './db.js';
+import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, mergeEntities, listProbableDuplicates, listContactPhotos } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { geocodePlace, haversineKm } from './geocode.js';
 import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
@@ -386,4 +386,4 @@ export function aboutEntity(name, limit = 10) {
   return { resolved: true, name, entities };
 }
 
-export { getArtifactById, rrf, mergeEntities, listProbableDuplicates };
+export { getArtifactById, rrf, mergeEntities, listProbableDuplicates, listContactPhotos };
