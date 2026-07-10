@@ -170,15 +170,19 @@ function toFtsQuery(text) {
 // circle. Near a pole (cos(lat)→0 blows up the longitude span) the box widens to the full
 // longitude band; antimeridian wraparound is out of scope (documented). Returns an id Set.
 const KM_PER_DEG_LAT = 111.32;
-const POLE_COS_EPSILON = 1e-6;  // below this |cos(lat)| the longitude span blows up — widen to the full band
-const FULL_LON_SPAN_DEG = 180;  // that full-longitude-band fallback near a pole
+const POLE_COS_EPSILON = 1e-6;  // below this |cos(lat)| the longitude span blows up — cover the whole band
+const LON_ABS_MAX = 180;        // longitude range is [-180, 180]
 function geoCandidateIds(center, radiusKm) {
   const dLat = radiusKm / KM_PER_DEG_LAT;
   const cosLat = Math.cos((center.lat * Math.PI) / 180);
-  const dLon = Math.abs(cosLat) < POLE_COS_EPSILON ? FULL_LON_SPAN_DEG : radiusKm / (KM_PER_DEG_LAT * Math.abs(cosLat));
+  // Near a pole longitude is meaningless (all meridians converge), so the box spans the ENTIRE
+  // [-180, 180] band regardless of center.lon; otherwise a degree-based half-width around center.
+  const nearPole = Math.abs(cosLat) < POLE_COS_EPSILON;
+  const dLon = nearPole ? 0 : radiusKm / (KM_PER_DEG_LAT * Math.abs(cosLat));
   const rows = geoBboxStmt.all({
     latMin: center.lat - dLat, latMax: center.lat + dLat,
-    lonMin: center.lon - dLon, lonMax: center.lon + dLon,
+    lonMin: nearPole ? -LON_ABS_MAX : center.lon - dLon,
+    lonMax: nearPole ? LON_ABS_MAX : center.lon + dLon,
   });
   const ids = new Set();
   for (const r of rows) {
@@ -235,7 +239,7 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   // the ranked-search text, same demote-never-drop posture as an unmatched place. `geoFromCaller`
   // tracks whether the filter is the caller's (survives the zero-candidate retry) or plan-invented.
   const nearInput = near ?? emptyish(plan.near);
-  const radius = clamp(radiusKm || GEO_RADIUS_DEFAULT_KM, 1, GEO_RADIUS_MAX_KM);
+  const radius = clamp(radiusKm ?? GEO_RADIUS_DEFAULT_KM, 0, GEO_RADIUS_MAX_KM);
   let geoIds = null;
   let geoFromCaller = false;
   if (nearInput != null) {
