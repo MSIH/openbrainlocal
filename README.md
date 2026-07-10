@@ -102,6 +102,10 @@ Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Author
   - `get_artifact` — one artifact's full text, metadata, and entity links by id
   - `list_probable_duplicates` / `merge_entities` — surface and merge likely-duplicate contacts (30 years across Google/Yahoo/iPhone rarely dedup perfectly); merge tombstones the absorbed entity rather than deleting it
 
+### Connectors write; recall is separate
+
+A connector's only job is to **submit** data via `POST /api/v1/ingest` (or `POST /api/v1/ingest/batch`) — see [`docs/04-connector-contract.md §1.1`](docs/04-connector-contract.md). Installing a connector does not, by itself, make any AI tool *recall* from LifeContext. That's a separate integration you configure on the AI tool's side: point an MCP-capable client at `/mcp` (or use the REST `/api/recall`/`/api/search` endpoints directly) as described above under Interfaces. A connector neither provides nor configures that wiring for you.
+
 ## Status
 
 **Phase 2.0 (foundation) — working.** Every memory is now an **artifact** (an event with time, place, and a text representation) in a unified store, backed by an **entity graph** (contacts as the spine) and **hybrid retrieval** (vector KNN + FTS5 keyword search fused with reciprocal rank fusion, planned by a small LLM). Local store → embed (Ollama) → recall works over both REST and MCP; `npm run migrate` brings earlier memories forward, `npm run import:contacts` seeds people.
