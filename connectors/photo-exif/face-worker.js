@@ -118,20 +118,24 @@ function buildPayload(relPath, entry, clustersById, captionCache) {
 // byte-for-byte identical to the last one we sent for this photo.
 const payloadSignature = (p) => JSON.stringify({ e: p.extra, h: p.entity_hints ?? null, t: p.text_repr ?? null });
 
+// Shared by scan() and suggestLabels() — models unavailable/unloadable stops the run before
+// touching anything, same as the VLM-down path.
+async function loadDetectorOrExit() {
+  try {
+    return await resolveDetector({ modelsPath: FACE_MODELS_PATH, fixturePath: FACE_FIXTURE });
+  } catch (err) {
+    console.error('photo-exif: face detector unavailable (check FACE_MODELS_PATH)', err);
+    process.exit(1);
+  }
+}
+
 async function scan() {
   requireApiKey();
   if (!PHOTO_ROOT || !existsSync(PHOTO_ROOT)) {
     console.error(`photo-exif: PHOTO_ROOT not set or doesn't exist: ${PHOTO_ROOT}`);
     process.exit(1);
   }
-  let detectFaces;
-  try {
-    detectFaces = await resolveDetector({ modelsPath: FACE_MODELS_PATH, fixturePath: FACE_FIXTURE });
-  } catch (err) {
-    // Models unavailable/unloadable → stop before touching anything, same as the VLM-down path.
-    console.error('photo-exif: face detector unavailable (check FACE_MODELS_PATH)', err);
-    process.exit(1);
-  }
+  const detectFaces = await loadDetectorOrExit();
 
   const { postIngest } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
   const faceState = readJson(FACE_STATE_PATH, {});
@@ -252,31 +256,33 @@ async function label(clusterIdArg, name) {
 // connector's process to be able to read the raw_path core returns (same filesystem/shared
 // volume as core — see README); an unreadable/undetectable reference photo is skipped, not
 // fatal to the run.
+const CONTACT_PHOTOS_FETCH_LIMIT = 500; // matches the server's own GET /api/v1/entities/photos max
+
 async function suggestLabels() {
   requireApiKey();
-  let detectFaces;
-  try {
-    detectFaces = await resolveDetector({ modelsPath: FACE_MODELS_PATH, fixturePath: FACE_FIXTURE });
-  } catch (err) {
-    console.error('photo-exif: face detector unavailable (check FACE_MODELS_PATH)', err);
-    process.exit(1);
-  }
-
   const clustersState = loadClusters();
   const unlabeled = clustersState.clusters.filter((c) => !c.label);
+  if (unlabeled.length === 0) {
+    console.error('photo-exif: suggest-labels — no unlabeled clusters; nothing to suggest');
+    return;
+  }
+
+  const detectFaces = await loadDetectorOrExit();
 
   let contacts;
   try {
-    contacts = await fetchContactPhotos({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY, limit: 500 });
+    contacts = await fetchContactPhotos({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY, limit: CONTACT_PHOTOS_FETCH_LIMIT });
   } catch (err) {
     console.error('photo-exif: suggest-labels — could not fetch contact photos from LifeContext', err);
     process.exit(1);
   }
+  if (contacts.length === CONTACT_PHOTOS_FETCH_LIMIT) {
+    console.error(`photo-exif: suggest-labels — hit the ${CONTACT_PHOTOS_FETCH_LIMIT}-contact fetch limit; some contacts may not have been checked`);
+  }
 
-  let checked = 0;
   let suggested = 0;
+  let skipped = 0;
   for (const contact of contacts) {
-    checked++;
     let faces;
     try {
       // Second arg is the fixture detector's lookup key (see lib/face-detect.js); the real
@@ -284,10 +290,12 @@ async function suggestLabels() {
       faces = await detectFaces(contact.raw_path, contact.raw_path);
     } catch (err) {
       console.error(`photo-exif: suggest-labels — skipping "${contact.name}" (entity #${contact.entity_id}): reference photo unreadable/undetectable`, err);
+      skipped++;
       continue;
     }
     if (faces.length !== 1) {
       console.error(`photo-exif: suggest-labels — skipping "${contact.name}" (entity #${contact.entity_id}): detected ${faces.length} faces, expected exactly 1`);
+      skipped++;
       continue;
     }
     const [{ descriptor }] = faces;
@@ -302,7 +310,13 @@ async function suggestLabels() {
       }
     }
   }
-  console.error(`photo-exif: suggest-labels — checked ${checked} contact photo(s), ${suggested} cluster(s) suggested`);
+  // A run where every contact was skipped must not read the same as "checked N, found nothing" —
+  // that's indistinguishable from a healthy zero-match run otherwise (e.g. a CONTACTS_RAW_DIR /
+  // shared-filesystem misconfiguration would silently look like "nothing to suggest").
+  if (contacts.length > 0 && skipped === contacts.length) {
+    console.error(`photo-exif: suggest-labels — all ${skipped} contact photo(s) were unreadable/undetectable; check the same-filesystem setup (see README)`);
+  }
+  console.error(`photo-exif: suggest-labels — checked ${contacts.length} contact photo(s) (${skipped} skipped), ${suggested} cluster(s) suggested`);
 }
 
 // Write one representative SAMPLE image per cluster (whole image, not a tight face crop — a crop

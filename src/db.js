@@ -10,6 +10,7 @@
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { DB_PATH, VECTOR_DIMENSION } from './config.js';
 
 export const db = new Database(DB_PATH);
@@ -754,13 +755,27 @@ export function listProbableDuplicates(limit = 20) {
 // The reference-face input for photo-exif's face-worker `suggest-labels` command (#84): live
 // person entities whose own contact artifact has a preserved photo (raw_path, from #74's vCard
 // PHOTO persistence). Company entities and photo-less contacts are excluded at the query level.
+// One row per entity, never per artifact: an entity can end up with more than one role='self'
+// contact artifact (re-importing the same person from a second vCard source under a different
+// UID resolves to the same entity but creates a NEW self-linked artifact, per contacts.js's
+// resolveExistingEntity — this is the ordinary multi-source-consolidation case, not an edge
+// case) — the correlated subquery picks the most-recently-created photo deterministically,
+// mirroring the LIMIT-1-per-entity discipline getSelfArtifactVecStmt already applies to this
+// exact join shape. `merged_into IS NULL` is provably redundant here (mergeEntities re-points
+// every entity_links row off an absorbed entity unconditionally, so no such row can ever join
+// back to a tombstoned e.id) — kept anyway as defense-in-depth, matching this file's dominant
+// style of explicit liveness checks (getLiveEntityStmt, listLivePersonEntitiesStmt).
 const listContactPhotosStmt = db.prepare(`
-  SELECT e.id AS entity_id, e.canonical_name AS name, a.raw_path AS raw_path
-  FROM entities e
-  JOIN entity_links el ON el.entity_id = e.id AND el.role = 'self'
-  JOIN artifacts a ON a.id = el.artifact_id
-  WHERE e.kind = 'person' AND e.merged_into IS NULL AND a.raw_path IS NOT NULL
-  ORDER BY e.id
+  SELECT entity_id, name, raw_path FROM (
+    SELECT e.id AS entity_id, e.canonical_name AS name,
+      (SELECT a.raw_path FROM entity_links el JOIN artifacts a ON a.id = el.artifact_id
+       WHERE el.entity_id = e.id AND el.role = 'self' AND a.raw_path IS NOT NULL
+       ORDER BY a.id DESC LIMIT 1) AS raw_path
+    FROM entities e
+    WHERE e.kind = 'person' AND e.merged_into IS NULL
+  )
+  WHERE raw_path IS NOT NULL
+  ORDER BY entity_id
   LIMIT ?
 `);
 
@@ -768,9 +783,14 @@ const listContactPhotosStmt = db.prepare(`
  * List photographed contacts for reference-face matching. Read-only; core never computes or
  * compares face descriptors itself — that stays connector-local (doc 04 §11 rejects
  * connector-supplied embeddings, and the inverse holds too: core doesn't do connector-side ML).
+ * `raw_path` is resolved to an absolute path before returning: CONTACTS_RAW_DIR defaults to a
+ * relative value (src/config.js), meaningful only relative to core's own process cwd — and this
+ * is the first consumer to hand raw_path to a SECOND process (a connector), which has no way to
+ * know core's cwd. path.resolve() against this same process's cwd reproduces exactly the
+ * absolute location path.join(CONTACTS_RAW_DIR, ...) wrote to at import time.
  */
 export function listContactPhotos(limit = 100) {
-  return listContactPhotosStmt.all(limit);
+  return listContactPhotosStmt.all(limit).map((r) => ({ ...r, raw_path: path.resolve(r.raw_path) }));
 }
 
 export function getArtifactById(id) {

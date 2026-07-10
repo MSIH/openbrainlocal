@@ -94,11 +94,12 @@ export function ingestClient({ url, apiKey }) {
 // #84 — photographed contacts (entity_id/name/raw_path) for face-worker's suggest-labels
 // reference-face matching. Read-only GET, mirrors the ingestClient fetch-wrapper style above.
 export async function fetchContactPhotos({ url, apiKey, limit }) {
-  const qs = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+  const qs = limit != null ? `?limit=${encodeURIComponent(limit)}` : ''; // limit:0 is a real value, not "unset"
   const res = await fetch(`${url}/api/v1/entities/photos${qs}`, {
     headers: { 'x-api-key': apiKey },
   });
   if (!res.ok) throw new Error(`entities/photos returned ${res.status}`);
-  const { contacts } = await res.json();
-  return contacts;
+  const body = await res.json();
+  if (!Array.isArray(body.contacts)) throw new Error('entities/photos returned an unexpected response shape');
+  return body.contacts;
 }

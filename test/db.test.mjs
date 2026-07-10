@@ -5,6 +5,7 @@
 // db.js is imported (it opens the DB at module load), so db.js is loaded dynamically here.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { useTempDb, f32 } from './helpers.mjs';
 
 const { cleanup } = useTempDb();
@@ -311,4 +312,25 @@ test('listContactPhotos: only live person entities with a preserved contact phot
   mergeEntities(photographed.entityId, absorbTarget.entityId);
   const afterMerge = listContactPhotos(100);
   assert.ok(!afterMerge.some((p) => p.entity_id === absorbTarget.entityId), 'a tombstoned entity is excluded from contact-photo listings');
+});
+
+test('listContactPhotos: dedups an entity with two self-linked photographed artifacts to one row, and resolves a relative raw_path to absolute (#84)', () => {
+  // The ordinary multi-source-consolidation case: the same person imported from a second vCard
+  // source under a different UID resolves to the same entity (contacts.js's resolveExistingEntity)
+  // but creates a NEW self-linked contact artifact — this entity now has two role='self' links.
+  const entityId = Number(insertEntityStmt.run('person', 'Multi Source Person', JSON.stringify({})).lastInsertRowid);
+  insertAliasStmt.run(entityId, 'multi source person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: uniqueSource(), source_id: 'first-import', text_repr: 'Multi Source Person (first)', raw_path: 'raw/contacts/first.jpg' },
+    f32(0.5), [{ entity_id: entityId, role: 'self', confidence: 1.0 }],
+  );
+  storeArtifactTxn(
+    { type: 'contact', source: uniqueSource(), source_id: 'second-import', text_repr: 'Multi Source Person (second)', raw_path: 'raw/contacts/second.jpg' },
+    f32(0.5), [{ entity_id: entityId, role: 'self', confidence: 1.0 }],
+  );
+
+  const rows = listContactPhotos(100).filter((p) => p.entity_id === entityId);
+  assert.equal(rows.length, 1, 'exactly one row per entity, even with two self-linked photographed artifacts');
+  assert.ok(rows[0].raw_path.endsWith('raw/contacts/second.jpg'), 'the most recently created contact artifact\'s photo wins');
+  assert.ok(path.isAbsolute(rows[0].raw_path), 'a relative raw_path (CONTACTS_RAW_DIR default) is resolved to an absolute path');
 });

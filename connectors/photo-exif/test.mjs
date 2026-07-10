@@ -475,3 +475,46 @@ test('face-worker: suggest-labels (#84) matches unlabeled clusters against conta
   );
   assert.equal(readFileSync(clustersState, 'utf8'), beforeClusters, 'suggest-labels never writes cluster.label — clusters file is byte-identical');
 });
+
+test('face-worker: suggest-labels exits early (no detector load, no network fetch) when every cluster is already labeled', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'face-suggest-early-exit-'));
+  const clustersState = path.join(tmp, 'clusters.json');
+  writeFileSync(clustersState, serializeClustersFile(1, [
+    { id: 1, centroid: [0, 0, 0], count: 2, label: 'Already Named', sample: 'a.jpg' },
+  ]));
+  // LIFECONTEXT_URL is deliberately unreachable, and no FACE_MODELS_PATH/fixture is set — if the
+  // early exit didn't fire before loading a detector or fetching contacts, this would fail loudly.
+  const res = await run('face-worker.js', {
+    LIFECONTEXT_API_KEY: 'test-key',
+    LIFECONTEXT_URL: 'http://127.0.0.1:1',
+    PHOTO_EXIF_FACE_CLUSTERS_PATH: clustersState,
+  }, ['suggest-labels']);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stderr, /no unlabeled clusters/);
+});
+
+test('face-worker: suggest-labels warns distinctly when every contact photo was unreadable/undetectable', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'face-suggest-allskip-'));
+  const clustersState = path.join(tmp, 'clusters.json');
+  writeFileSync(clustersState, serializeClustersFile(1, [
+    { id: 1, centroid: [0, 0, 0], count: 1, label: null, sample: 'a.jpg' },
+  ]));
+  const fixturePath = path.join(tmp, 'faces-fixture.json');
+  writeFileSync(fixturePath, JSON.stringify({})); // empty — every raw_path lookup misses -> 0 faces detected
+
+  const env = {
+    LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_EXIF_FACE_FIXTURE: fixturePath,
+    PHOTO_EXIF_FACE_CLUSTERS_PATH: clustersState,
+  };
+  const { server, port } = await startMockServer((req, body, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ contacts: [{ entity_id: 20, name: 'Nobody Detected', raw_path: '/fake/raw/missing.jpg' }] }));
+  });
+  const res = await run('face-worker.js', { ...env, LIFECONTEXT_URL: `http://127.0.0.1:${port}` }, ['suggest-labels']);
+  server.closeAllConnections();
+  server.close();
+
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stderr, /all 1 contact photo\(s\) were unreadable\/undetectable/, 'a total-skip run is distinguishable from a healthy zero-match run');
+});
