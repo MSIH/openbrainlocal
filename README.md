@@ -104,7 +104,7 @@ Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Author
 
 ### Connectors write; recall is separate
 
-A connector's only job is to **submit** data via `POST /api/v1/ingest` (or `/ingest/batch`) — see [`docs/04-connector-contract.md §1.1`](docs/04-connector-contract.md). Installing a connector does not, by itself, make any AI tool *recall* from LifeContext. That's a separate integration you configure on the AI tool's side: point an MCP-capable client at `/mcp` (or use the REST `/api/recall`/`/api/search` endpoints directly) as described above under Interfaces. A connector neither provides nor configures that wiring for you.
+A connector's only job is to **submit** data via `POST /api/v1/ingest` (or `POST /api/v1/ingest/batch`) — see [`docs/04-connector-contract.md §1.1`](docs/04-connector-contract.md). Installing a connector does not, by itself, make any AI tool *recall* from LifeContext. That's a separate integration you configure on the AI tool's side: point an MCP-capable client at `/mcp` (or use the REST `/api/recall`/`/api/search` endpoints directly) as described above under Interfaces. A connector neither provides nor configures that wiring for you.
 
 ## Status
 
