@@ -160,6 +160,26 @@ test('importContacts: malformed PHOTO does not abort the contact import', async 
   assert.equal(getArtifactById(row.id).raw_path, null);
 });
 
+test('importContacts: every distinct address lands in text_repr, de-duplicated (issue #92)', async () => {
+  // Two distinct addresses plus an exact duplicate of the first. Before the fix, only the
+  // LAST address (the scalar c.address, last-one-wins) reached text_repr; the others were
+  // reachable only via extra_json, never by recall/search.
+  const text = vcard(
+    'FN:Multi Address Person\n' +
+    'EMAIL:multi.addr@example.com\n' +
+    'ADR;TYPE=HOME:;;14409 Barkwood;Rockville;MD;20853;US\n' +
+    'ADR;TYPE=HOME:;;14409 Barkwood;Rockville;MD;20853;US\n' + // exact duplicate -> collapses
+    'ADR;TYPE=WORK:;;5800 Nicholson Lane;Rockville;MD;20852;US'
+  );
+  const summary = await importContacts(text);
+  assert.equal(summary.artifacts, 1);
+
+  const row = db.prepare("SELECT text_repr FROM artifacts WHERE source = 'vcard' AND text_repr LIKE 'Multi Address Person%'").get();
+  assert.match(row.text_repr, /5800 Nicholson Lane/, 'a non-last address is embedded, not just the last one');
+  assert.match(row.text_repr, /14409 Barkwood/, 'the first address is embedded too');
+  assert.equal(row.text_repr.split('14409 Barkwood').length - 1, 1, 'the duplicate address collapses to a single occurrence');
+});
+
 test('importContacts: re-import is idempotent — no duplicate artifact, no duplicate photo write', async () => {
   const text = vcard(`FN:Repeat Person\nEMAIL:repeat.person@example.com\nPHOTO;ENCODING=b;TYPE=JPEG:${PHOTO_B64}`);
   const first = await importContacts(text);
