@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>LifeContext · Contacts</title>
+  <link rel="stylesheet" href="/ui/style.css" />
+</head>
+<body>
+  <!-- API key bar: shown until a key is stored, or after a 401. The whole /api/v1 surface is
+       x-api-key gated; the key lives only in this browser's localStorage. -->
+  <div id="keyBar" class="keybar" hidden>
+    <label>API key
+      <input id="keyInput" type="password" autocomplete="off" placeholder="LIFECONTEXT_API_KEY" />
+    </label>
+    <button id="keySave" type="button">Save key</button>
+    <span id="keyMsg" class="keymsg"></span>
+  </div>
+
+  <header class="topbar">
+    <h1>Contacts</h1>
+    <input id="search" type="search" placeholder="Search name, email, phone…" autocomplete="off" />
+    <div class="filters" id="kindFilter" role="tablist">
+      <button data-kind="" class="active" type="button">All</button>
+      <button data-kind="person" type="button">People</button>
+      <button data-kind="org" type="button">Orgs</button>
+    </div>
+    <button id="newContact" type="button" class="primary">+ New</button>
+    <button id="keyEdit" type="button" class="ghost" title="Change API key">🔑</button>
+  </header>
+
+  <main class="layout">
+    <aside class="list" id="list" aria-label="Contacts"></aside>
+    <section class="detail" id="detail">
+      <p class="empty">Select a contact, or create one.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="/ui/app.js"></script>
+</body>
+</html>

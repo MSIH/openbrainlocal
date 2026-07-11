@@ -23,10 +23,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
-import { db, storeArtifactTxn, sha256 } from './db.js';
+import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
+import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType } from './db.js';
+import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
 import { TYPE_REGISTRY } from './ingest-types.js';
@@ -87,6 +91,29 @@ const DuplicatesQuerySchema = z.object({ limit: z.coerce.number().int().positive
 // #84 — reference-face input for photo-exif's suggest-labels; a connector concern, hence no
 // MCP tool (unlike duplicates/merge, which a human drives conversationally).
 const ContactPhotosQuerySchema = z.object({ limit: z.coerce.number().int().positive().max(500).optional() });
+// Contacts curation surface (#96): the web UI's edits to the entity graph. `attrs` is the open
+// vCard superset object; server-owned keys (photoFile/raw_path) are stripped in updateEntityAttrs,
+// never trusted from the client. Query/param values arrive as strings, hence z.coerce.
+const EntityKindSchema = z.enum(['person', 'org', 'place', 'event', 'topic']);
+const AliasTypeSchema = z.enum(['email', 'phone', 'name', 'handle']);
+const AttrsSchema = z.record(z.string(), z.any());
+const IdParamSchema = z.object({ id: z.coerce.number().int().positive() });
+const RelationParamSchema = z.object({ id: z.coerce.number().int().positive(), relationId: z.coerce.number().int().positive() });
+const ListEntitiesQuerySchema = z.object({
+  query: z.string().optional(),
+  kind: EntityKindSchema.optional(),
+  limit: z.coerce.number().int().positive().max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+const CreateEntitySchema = z.object({ kind: z.enum(['person', 'org']), canonical_name: z.string().trim().min(1), attrs: AttrsSchema.optional() });
+const UpdateEntitySchema = z.object({ canonical_name: z.string().trim().min(1).optional(), attrs: AttrsSchema.optional() })
+  .refine((v) => v.canonical_name !== undefined || v.attrs !== undefined, { message: 'nothing to update' });
+const AliasBodySchema = z.object({ alias: z.string().trim().min(1), alias_type: AliasTypeSchema });
+const AddRelationSchema = z.object({
+  to_entity_id: z.coerce.number().int().positive(),
+  relation_type: z.string().trim().min(1).optional(),
+  raw_label: z.string().trim().min(1).optional(),
+}).refine((v) => v.relation_type || v.raw_label, { message: 'relation_type or raw_label required' });
 
 // --- OUTPUT FORMATTERS (MCP tools return text) ---
 const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
@@ -430,6 +457,117 @@ app.get('/api/v1/entities/photos', requireAuth, wrap(async (req, res) => {
   const { limit } = ContactPhotosQuerySchema.parse(req.query);
   res.json({ contacts: listContactPhotos(limit ?? 100) });
 }));
+
+// --- CONTACTS CURATION SURFACE (#96) ---
+// Web-UI-driven edits to the entity graph — correct aliases/attrs, edit relationships, set a
+// photo. Core-owned (connectors may never mutate entities — contract §1.2), same family as the
+// merge/duplicates routes above. db.js err.code maps to HTTP (ALIAS_CONFLICT→409, NOT_FOUND→404,
+// BAD_ALIAS→422) mirroring the /merge handler. The literal /entities routes above are registered
+// before these `/:id` routes, so they win the match.
+const mapEntityError = (err, res) => {
+  if (err.code === 'ALIAS_CONFLICT') return res.status(409).json({ error: err.message, conflict: err.conflict });
+  if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message });
+  if (err.code === 'BAD_ALIAS') return res.status(422).json({ error: err.message });
+  throw err; // unexpected — let the generic error middleware handle it
+};
+
+app.get('/api/v1/entities', requireAuth, wrap(async (req, res) => {
+  const { query, kind, limit, offset } = ListEntitiesQuerySchema.parse(req.query);
+  res.json({ entities: listEntities({ query, kind, limit: limit ?? 50, offset: offset ?? 0 }) });
+}));
+
+app.post('/api/v1/entities', requireAuth, wrap(async (req, res) => {
+  const body = CreateEntitySchema.parse(req.body);
+  try { res.status(201).json({ id: createEntity(body) }); }
+  catch (err) { mapEntityError(err, res); }
+}));
+
+app.get('/api/v1/entities/:id', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  const profile = getEntityProfile(id);
+  if (!profile) return res.status(404).json({ error: "Not found" });
+  res.json(profile);
+}));
+
+app.patch('/api/v1/entities/:id', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  const body = UpdateEntitySchema.parse(req.body);
+  try { res.json(updateEntityAttrs(id, body)); }
+  catch (err) { mapEntityError(err, res); }
+}));
+
+app.post('/api/v1/entities/:id/aliases', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  const { alias, alias_type } = AliasBodySchema.parse(req.body);
+  try { res.json(addAlias(id, alias, alias_type)); }
+  catch (err) { mapEntityError(err, res); }
+}));
+
+app.delete('/api/v1/entities/:id/aliases', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  const { alias, alias_type } = AliasBodySchema.parse(req.body);
+  res.json(removeAlias(id, alias, alias_type));
+}));
+
+app.post('/api/v1/entities/:id/relations', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  const { to_entity_id, relation_type, raw_label } = AddRelationSchema.parse(req.body);
+  if (id === to_entity_id) return res.status(422).json({ error: "a relation cannot point at itself" });
+  if (!getEntity(to_entity_id)) return res.status(404).json({ error: `entity ${to_entity_id} not found` });
+  const type = relation_type ?? canonicalRelationType(raw_label);
+  const added = upsertEntityRelation({ from_entity_id: id, to_entity_id, relation_type: type, raw_label: raw_label ?? null, confidence: 1.0, source: 'contacts-ui' });
+  res.json({ added, relation_type: type });
+}));
+
+app.delete('/api/v1/entities/:id/relations/:relationId', requireAuth, wrap(async (req, res) => {
+  const { relationId } = RelationParamSchema.parse(req.params);
+  res.json(removeRelation(relationId));
+}));
+
+// Photo upload: raw image bytes (not multipart) — the browser POSTs the File as the body with its
+// own Content-Type; express.raw buffers it (capped → 413 via the error middleware). Non-image →
+// 415. Bytes go to the content-addressed store; the basename is recorded in attrs.photoFile. The
+// imported contact artifact's raw_path is never touched (append-only).
+app.post('/api/v1/entities/:id/photo', requireAuth, express.raw({ type: () => true, limit: CONTACT_PHOTO_MAX_BYTES }), wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  const mediaType = req.headers['content-type'] || '';
+  if (!/^image\//i.test(mediaType)) return res.status(415).json({ error: "Content-Type must be image/*" });
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: "Empty image body" });
+  try { res.json(setEntityPhotoFile(id, savePhotoBytes(req.body, mediaType))); }
+  catch (err) { mapEntityError(err, res); }
+}));
+
+// Photo download: the uploaded override (attrs.photoFile, confined to CONTACTS_RAW_DIR) wins over
+// the imported vCard photo (raw_path); 404 when the contact has neither. The UI fetches this with
+// the key header and renders the blob (a plain <img src> can't send x-api-key).
+const CONTACT_PHOTO_DIR = path.resolve(CONTACTS_RAW_DIR);
+app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  const profile = getEntityProfile(id);
+  if (!profile) return res.status(404).json({ error: "Not found" });
+  let file = null;
+  const uploaded = profile.entity.attrs?.photoFile;
+  if (uploaded) {
+    const resolved = path.resolve(CONTACT_PHOTO_DIR, uploaded);
+    if (resolved.startsWith(CONTACT_PHOTO_DIR + path.sep) && existsSync(resolved)) file = resolved;
+  }
+  if (!file) {
+    const imported = getContactPhotoRawPath(id);
+    if (imported && existsSync(imported)) file = imported;
+  }
+  if (!file) return res.status(404).json({ error: "No photo" });
+  // dotfiles:'allow' — send() defaults to 'ignore', which 404s any path whose segments start with
+  // a dot (e.g. a data dir under a hidden ancestor). The path is already confined + stat'd above,
+  // so serving it is safe; send still sets Content-Type from the extension.
+  res.sendFile(file, { dotfiles: 'allow' });
+}));
+
+// --- STATIC CONTACTS UI (#96) ---
+// Plain static assets served at /ui; the API key lives in the browser and rides x-api-key on every
+// /api/v1 call above (the static files carry no secret). Mounted after the rate limiter so page +
+// asset loads are still rate-limited.
+const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
+app.use('/ui', express.static(publicDir));
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---
 const activeMcpTransports = new Map();

@@ -175,6 +175,28 @@ export function persistContactPhoto(photo) {
   return null;
 }
 
+// Persist already-decoded image bytes to the same content-addressed store persistContactPhoto's
+// base64 branch uses — the contacts-UI upload path (#96). sha256-named file under
+// CONTACTS_RAW_DIR, exclusive 'wx' write (identical bytes -> EEXIST -> no-op, never overwrites).
+// Returns the bare basename (never a path): the caller records it in attrs.photoFile and the
+// photo route resolves it back under CONTACTS_RAW_DIR, so a traversal-y name can't escape. The
+// ext is derived from the declared media type (same allowlist as persistContactPhoto). Throws on
+// empty input or a real write error; the route maps that to a 4xx/5xx.
+export function savePhotoBytes(bytes, mediaType) {
+  if (!bytes || !bytes.length) throw new Error('empty photo bytes');
+  const ext = extForPhotoType(mediaType);
+  const safeExt = /^[a-z0-9]{1,10}$/i.test(ext ?? '') ? ext : 'jpg';
+  const basename = `${sha256(bytes)}.${safeExt}`;
+  const rawPath = path.resolve(CONTACTS_RAW_DIR, basename);
+  mkdirSync(path.dirname(rawPath), { recursive: true });
+  try {
+    writeFileSync(rawPath, bytes, { flag: 'wx' });
+  } catch (writeErr) {
+    if (writeErr.code !== 'EEXIST') throw writeErr;
+  }
+  return basename;
+}
+
 // Build the connector-agnostic contact object from a card's parsed property lines. Labels are
 // resolved first (a group's X-ABLabel may precede OR follow its value line), then each line is
 // routed. New list fields default to []; scalar fields are absent unless present. `address`,

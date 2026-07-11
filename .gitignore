@@ -6,6 +6,9 @@ node_modules/
 *.db
 *.db-wal
 *.db-shm
+# Decoded contact photos (vCard import + contacts-UI uploads) — personal data, files on disk
+# pointed at by raw_path / attrs.photoFile; the DB references them, they're never committed.
+raw/
 logs/
 _*.log
 

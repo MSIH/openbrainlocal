@@ -151,6 +151,7 @@ rule when their turn comes:
 - **Location visits** — Google Timeline / Owntracks pings segmented into visits via the event lane (doc 04 §5)
 - **Video/audio** — Whisper transcripts + keyframe captions; **social-media exports** (Takeout, X archive)
 - **Face clustering** (local-only, `insightface`), **CLIP visual-similarity second index** (doc 03 §3.3), **`merge_entities` admin endpoint** (doc 03 §7), cross-device sync, temporal knowledge graph
+- **Contacts management UI — shipped (#96):** a browser UI (`/ui/contacts.html`) + `/api/v1/entities` CRUD surface to curate the entity graph (fix aliases/fields, edit relationships, set a photo). See [`docs/09-contacts-ui.md`](09-contacts-ui.md).
 
 ---
 
