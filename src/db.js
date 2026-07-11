@@ -924,7 +924,9 @@ function assertNoAliasConflict(entityId, normAlias, aliasType) {
     throw err;
   }
 }
-const normAlias = (alias, aliasType) => (aliasType === 'phone' ? normalizePhone(alias) : normalizeName(alias));
+const normalizeAlias = (alias, aliasType) => (aliasType === 'phone' ? normalizePhone(alias) : normalizeName(alias));
+// Recent linked artifacts shown on a contact's profile (GET /:id) — a preview, not the full set.
+const PROFILE_ARTIFACT_LIMIT = 10;
 
 export function listEntities({ kind = null, query = null, limit = 50, offset = 0 } = {}) {
   const like = query && query.trim() ? `%${normalizeName(query)}%` : null;
@@ -941,7 +943,7 @@ export function getEntityProfile(id) {
     aliases: getAliasesStmt.all(id),
     relations: getRelations(id),
     relations_in: getRelationsTo(id),
-    artifacts: profileArtifactsStmt.all(id, 10),
+    artifacts: profileArtifactsStmt.all(id, PROFILE_ARTIFACT_LIMIT),
   };
 }
 
@@ -991,7 +993,7 @@ export const updateEntityAttrs = db.transaction((id, { canonical_name = null, at
 
 export const addAlias = db.transaction((id, alias, alias_type) => {
   if (!getLiveEntityStmt.get(id)) notFound(id);
-  const a = normAlias(alias, alias_type);
+  const a = normalizeAlias(alias, alias_type);
   if (!a) { const err = new Error('empty alias'); err.code = 'BAD_ALIAS'; throw err; }
   assertNoAliasConflict(id, a, alias_type);
   const added = insertAliasStmt.run(id, a, alias_type).changes > 0;
@@ -1000,7 +1002,7 @@ export const addAlias = db.transaction((id, alias, alias_type) => {
 });
 
 export const removeAlias = db.transaction((id, alias, alias_type) => {
-  const a = normAlias(alias, alias_type);
+  const a = normalizeAlias(alias, alias_type);
   const removed = deleteAliasStmt.run(id, a, alias_type).changes > 0;
   if (removed) logEvent('alias_removed', 'contacts-ui', { entity_id: id, alias: a, alias_type });
   return { removed };

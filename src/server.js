@@ -24,7 +24,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 
@@ -533,7 +533,7 @@ app.post('/api/v1/entities/:id/photo', requireAuth, express.raw({ type: () => tr
   const mediaType = req.headers['content-type'] || '';
   if (!/^image\//i.test(mediaType)) return res.status(415).json({ error: "Content-Type must be image/*" });
   if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: "Empty image body" });
-  try { res.json(setEntityPhotoFile(id, savePhotoBytes(req.body, mediaType))); }
+  try { res.json(setEntityPhotoFile(id, await savePhotoBytes(req.body, mediaType))); }
   catch (err) { mapEntityError(err, res); }
 }));
 
@@ -541,6 +541,7 @@ app.post('/api/v1/entities/:id/photo', requireAuth, express.raw({ type: () => tr
 // the imported vCard photo (raw_path); 404 when the contact has neither. The UI fetches this with
 // the key header and renders the blob (a plain <img src> can't send x-api-key).
 const CONTACT_PHOTO_DIR = path.resolve(CONTACTS_RAW_DIR);
+const fileExists = async (p) => { try { await access(p); return true; } catch { return false; } };
 app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
   const { id } = IdParamSchema.parse(req.params);
   const profile = getEntityProfile(id);
@@ -549,11 +550,11 @@ app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
   const uploaded = profile.entity.attrs?.photoFile;
   if (uploaded) {
     const resolved = path.resolve(CONTACT_PHOTO_DIR, uploaded);
-    if (resolved.startsWith(CONTACT_PHOTO_DIR + path.sep) && existsSync(resolved)) file = resolved;
+    if (resolved.startsWith(CONTACT_PHOTO_DIR + path.sep) && await fileExists(resolved)) file = resolved;
   }
   if (!file) {
     const imported = getContactPhotoRawPath(id);
-    if (imported && existsSync(imported)) file = imported;
+    if (imported && await fileExists(imported)) file = imported;
   }
   if (!file) return res.status(404).json({ error: "No photo" });
   // dotfiles:'allow' — send() defaults to 'ignore', which 404s any path whose segments start with
