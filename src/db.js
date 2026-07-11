@@ -80,10 +80,12 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_unresolved_alias ON unresolved_aliases(alias, alias_type);
 
-  -- Person<->person edges (issue #37). entity_links joins artifacts->entities; this joins
-  -- entities to each other (spouse/child/parent/…). Append-only + idempotent via the UNIQUE
-  -- key + OR IGNORE, mirroring entity_links. Directional: from_entity_id = the contact owner,
-  -- to_entity_id = the related person; asymmetric; confidence 1.0 for an explicit contact field.
+  -- Entity<->entity edges (issue #37; person->org added #88). entity_links joins
+  -- artifacts->entities; this joins entities to each other (spouse/child/parent/…, and a
+  -- person's worksAt->org). Append-only + idempotent via the UNIQUE key + OR IGNORE, mirroring
+  -- entity_links. Kind-agnostic columns. Directional: from_entity_id = the contact owner (or the
+  -- employee), to_entity_id = the related person (or the employer org); asymmetric; confidence
+  -- 1.0 for an explicit contact field.
   CREATE TABLE IF NOT EXISTS entity_relations (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     from_entity_id INTEGER NOT NULL REFERENCES entities(id),
@@ -146,6 +148,28 @@ if (!db.prepare("PRAGMA table_info(entities)").all().some((c) => c.name === 'mer
     .run('schema_migration', 'db.js', JSON.stringify({ migration: 'entities.merged_into' }));
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_entities_merged_into ON entities(merged_into)');
+
+// Data migration (#88): business contacts flagged isCompany were historically inserted as
+// kind='person' (the 'org' schema slot went unused). Fill the derived classification from the
+// raw source signal — idempotent (only still-mis-kinded live rows change), run unconditionally,
+// logged only when it actually promotes rows. Same raw-statement approach as the migration above
+// (logEvent/logStmt aren't defined yet at schema-setup time). json_extract ships with better-sqlite3.
+// json_valid guards first: attrs_json is an unconstrained TEXT column the code already treats as
+// possibly-non-JSON (safeJson), and json_extract THROWS on malformed JSON — since this runs at
+// module load, one bad row would otherwise crash every startup. SQLite short-circuits AND, so a
+// malformed/NULL row is skipped before json_extract sees it.
+{
+  const info = db.prepare(`
+    UPDATE entities SET kind = 'org'
+    WHERE kind = 'person' AND merged_into IS NULL
+      AND json_valid(attrs_json)
+      AND json_extract(attrs_json, '$.isCompany') = 1
+  `).run();
+  if (info.changes > 0) {
+    db.prepare('INSERT INTO ingest_log (event_type, actor, details) VALUES (?, ?, ?)')
+      .run('schema_migration', 'db.js', JSON.stringify({ migration: 'entities.kind=org', rows: info.changes }));
+  }
+}
 
 // --- PREPARED STATEMENTS (compiled once) ---
 const insertArtifactStmt = db.prepare(`
@@ -219,6 +243,14 @@ const getRelationsStmt = db.prepare(`
   SELECT r.to_entity_id AS entity_id, r.relation_type, r.raw_label, r.confidence, e.canonical_name AS name
   FROM entity_relations r JOIN entities e ON e.id = r.to_entity_id
   WHERE r.from_entity_id = ? ORDER BY r.relation_type, e.canonical_name
+`);
+// Incoming edges (#88): the reverse of getRelationsStmt — who points AT this entity. Lets
+// about_entity(org) list its employees (worksAt from=person, to=org); harmlessly gives every
+// entity its reverse edges too. Joins the FROM side for the name.
+const getRelationsToStmt = db.prepare(`
+  SELECT r.from_entity_id AS entity_id, r.relation_type, r.raw_label, r.confidence, e.canonical_name AS name
+  FROM entity_relations r JOIN entities e ON e.id = r.from_entity_id
+  WHERE r.to_entity_id = ? ORDER BY r.relation_type, e.canonical_name
 `);
 // Name aliases of an entity — used to match staged relation hints that point at this person.
 const selectNameAliasesStmt = db.prepare(`SELECT alias FROM entity_aliases WHERE entity_id = ? AND alias_type = 'name'`);
@@ -460,6 +492,7 @@ const RELATION_TYPE_MAP = {
   friend: 'friend', relative: 'relative',
   assistant: 'assistant', manager: 'manager',
   'referred by': 'referredBy', referredby: 'referredBy',
+  worksat: 'worksAt', employer: 'worksAt',   // person->org employment edge (#88)
 };
 export const canonicalRelationType = (rawLabel) =>
   RELATION_TYPE_MAP[String(rawLabel ?? '').trim().toLowerCase()] || 'custom';
@@ -509,6 +542,10 @@ export function resolveRelationHints(entityId) {
 
 export function getRelations(entityId) {
   return getRelationsStmt.all(entityId);
+}
+
+export function getRelationsTo(entityId) {
+  return getRelationsToStmt.all(entityId);
 }
 
 export function getEntity(id) {

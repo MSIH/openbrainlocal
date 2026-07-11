@@ -92,6 +92,7 @@ Key decisions:
 CREATE TABLE entities (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   kind           TEXT NOT NULL,       -- person | place | org | event | topic
+                                      -- (a contact flagged isCompany -> 'org', else 'person'; #88)
   canonical_name TEXT NOT NULL,
   attrs_json     TEXT,                -- person: the contact superset below —
                                       -- emails[], phones[], addresses[], birthday,
@@ -120,9 +121,10 @@ CREATE TABLE entity_links (
   PRIMARY KEY (artifact_id, entity_id, role)
 );
 
--- Person<->person edges (issue #37). entity_links joins artifacts->entities;
--- this joins entities to each other. Directional (from = contact owner,
--- to = related person), append-only, idempotent via the UNIQUE key + OR IGNORE.
+-- Entity<->entity edges (issue #37; person->org #88). entity_links joins
+-- artifacts->entities; this joins entities to each other. Directional (from =
+-- contact owner / employee, to = related person / employer org), append-only,
+-- idempotent via the UNIQUE key + OR IGNORE. Columns are kind-agnostic.
 CREATE TABLE entity_relations (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   from_entity_id INTEGER NOT NULL REFERENCES entities(id),
@@ -136,7 +138,9 @@ CREATE TABLE entity_relations (
 );
 ```
 
-**Person↔person relationships (issue #37).** A contact's `relatedNames[] {type, name}` (parsed above) become `entity_relations` edges. Because every source expresses a relationship as a related **name string + a type** (no foreign key), this is a name→entity resolution problem, so it reuses the same machinery as alias hints: for each related name, `resolveEntityIds(name)` — a hit inserts the edge now; a miss is **staged** on the owner's contact artifact in `unresolved_aliases` (`alias_type='relation'`, `role` = the raw label) and `resolveRelationHints` forms the edge when that person is later imported (so either import order converges). The raw label is canonicalized (`RELATION_TYPE_MAP`) to a fixed vocabulary — `spouse, partner, domesticPartner, child, parent, mother, father, sibling, brother, sister, friend, relative, assistant, manager, referredBy, custom` — with the original preserved in `raw_label`. Edges are append-only and idempotent (`UNIQUE(from, to, relation_type)` + `OR IGNORE`); `ingest_log` records `relation_added` / `relation_resolved`. `about_entity` returns them as `relations: [{ entity_id, name, relation_type, raw_label, confidence }]` (`raw_label` carries the original label, most useful when `relation_type` is `custom`).
+**Person↔person relationships (issue #37).** A contact's `relatedNames[] {type, name}` (parsed above) become `entity_relations` edges. Because every source expresses a relationship as a related **name string + a type** (no foreign key), this is a name→entity resolution problem, so it reuses the same machinery as alias hints: for each related name, `resolveEntityIds(name)` — a hit inserts the edge now; a miss is **staged** on the owner's contact artifact in `unresolved_aliases` (`alias_type='relation'`, `role` = the raw label) and `resolveRelationHints` forms the edge when that person is later imported (so either import order converges). The raw label is canonicalized (`RELATION_TYPE_MAP`) to a fixed vocabulary — `spouse, partner, domesticPartner, child, parent, mother, father, sibling, brother, sister, friend, relative, assistant, manager, referredBy, worksAt, custom` — with the original preserved in `raw_label`. Edges are append-only and idempotent (`UNIQUE(from, to, relation_type)` + `OR IGNORE`); `ingest_log` records `relation_added` / `relation_resolved`. `about_entity` returns each entity's outgoing edges as `relations: [{ entity_id, name, relation_type, raw_label, confidence }]` and its incoming edges as `relations_in` (same shape, the `from` side) (`raw_label` carries the original label, most useful when `relation_type` is `custom`).
+
+**Business contacts + employment (issue #88).** A contact flagged as a company (`X-ABSHOWAS:COMPANY` / vCard 4.0 `KIND:org` → `isCompany`) is created as a `kind='org'` entity rather than `kind='person'`, filling the existing schema slot instead of polluting the person graph (`isCompany` stays in `attrs_json` as the raw signal; `kind` is the derived classification — deterministic flags only, no fuzzy heuristics). A person's `ORG` name seeds a structured `worksAt` edge (person→org) through the same relation-staging machinery: the org **name** (`ORG` component `parts[0]`, not the joined `org, department` display string) becomes a synthetic `worksAt` hint that forms an edge to the org entity when a matching org contact exists, in **either import order**; a name that matches no imported org contact is staged (never fabricated into an org entity — a free-text org string has no dedup key to assert identity by, the same exact-name-match limitation as person relations). A startup data migration promotes any pre-existing `person`+`isCompany` entity to `org` (idempotent; logged `schema_migration` only when rows change; no DDL — `kind` and `entity_relations` already exist). Person-only surfaces (`listProbableDuplicates` dedup, `listContactPhotos` reference faces) already filter `kind='person'`, so orgs are correctly excluded.
 
 **Contacts are the spine.** Your contacts import seeds the `entities` table with high-quality person records (name, emails, phones, birthday, relationship). Because recall quality is set by how clean these records are *before* import, [`08-preparing-contacts.md`](08-preparing-contacts.md) is the primer + source-side pre-clean checklist for getting them right. Every subsequent artifact links to them deterministically: email `From:` header matches an alias → hard link, confidence 1.0. A name mentioned in a document body → NER-inferred link, confidence 0.7. Confidence lets retrieval prefer certain links without discarding fuzzy ones.
 

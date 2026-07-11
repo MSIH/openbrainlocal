@@ -16,7 +16,7 @@ process.env.OLLAMA_BASE_URL = fake.baseUrl;
 process.env.PORT = '0'; // ephemeral port — avoids collisions with a real running server
 
 const { app, serverInstance, secureCompare } = await import('../src/server.js');
-const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn } = await import('../src/db.js');
+const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn, upsertEntityRelation } = await import('../src/db.js');
 const { embedToFloat32 } = await import('../src/embeddings.js');
 
 if (!serverInstance.listening) await once(serverInstance, 'listening');
@@ -185,4 +185,20 @@ test('/api/v1/entities/photos (#84): only photographed live person entities, for
   assert.ok(found, 'the photographed contact is returned');
   assert.equal(found.raw_path, '/raw/contacts/rest-photo.jpg');
   assert.ok(!contacts.some((c) => c.entity_id === noPhoto), 'a contact with no preserved photo is excluded');
+});
+
+test('/api/about_entity (#88): an org carries its employees in relations_in (reverse worksAt edge)', async () => {
+  const org = Number(insertEntityStmt.run('org', 'Acme REST Corp', JSON.stringify({})).lastInsertRowid);
+  insertAliasStmt.run(org, 'acme rest corp', 'name');
+  const person = Number(insertEntityStmt.run('person', 'Dana Employee', JSON.stringify({})).lastInsertRowid);
+  insertAliasStmt.run(person, 'dana employee', 'name');
+  upsertEntityRelation({ from_entity_id: person, to_entity_id: org, relation_type: 'worksAt', raw_label: 'worksAt', source: 'test' });
+
+  const res = await post('/api/about_entity', { name: 'Acme REST Corp' }, { 'x-api-key': API_KEY });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const e = body.entities.find((x) => x.entity.id === org);
+  assert.ok(e, 'the org resolves');
+  assert.ok(e.relations_in.some((r) => r.relation_type === 'worksAt' && r.name === 'Dana Employee'), 'relations_in lists the employee');
+  assert.equal(e.relations.length, 0, 'the org has no outgoing edges');
 });
