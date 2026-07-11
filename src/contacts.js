@@ -23,7 +23,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   db, storeArtifactTxn, sha256, logEvent,
-  insertEntityStmt, insertAliasStmt, resolveEntityIds, normalizeName, normalizePhone,
+  insertEntityStmt, insertAliasStmt, resolveEntityIds, normalizeName, normalizePhone, nameVariants,
   canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
@@ -214,6 +214,12 @@ function finalizeCard(lines, raw) {
       case 'ANNIVERSARY': c.dates.push({ type: 'Anniversary', value }); break; // vCard 4.0
       case 'X-ABRELATEDNAMES': c.relatedNames.push({ type: label || 'Other', name: value }); break;
       case 'RELATED': c.relatedNames.push({ type: paramValue(params, 'TYPE') || label || 'Other', name: value }); break; // vCard 4.0
+      // Google/Android single-property relationship extensions (#93): the relation type is the
+      // tag after `X-`, lowercased (canonicalRelationType maps spouse/child/parent/manager/etc.).
+      case 'X-SPOUSE': case 'X-PARTNER': case 'X-CHILD': case 'X-PARENT':
+      case 'X-MOTHER': case 'X-FATHER': case 'X-BROTHER': case 'X-SISTER':
+      case 'X-FRIEND': case 'X-MANAGER': case 'X-ASSISTANT':
+        c.relatedNames.push({ type: prop.replace(/^X-/, '').toLowerCase(), name: value }); break;
       case 'IMPP': c.im.push(parseImpp(value, params)); break;
       case 'X-SOCIALPROFILE': c.socialProfiles.push({ service: paramValue(params, 'TYPE'), url: value }); break;
       case 'X-PHONETIC-FIRST-NAME': (c.phonetic ??= {}).given = value; break;
@@ -337,8 +343,11 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
     entityId = insertEntityStmt.run(c.isCompany ? 'org' : 'person', c.fn || c.emails[0] || 'Unnamed', JSON.stringify(attrs)).lastInsertRowid;
     entityCreated = true;
   }
-  if (c.fn) insertAliasStmt.run(entityId, normalizeName(c.fn), 'name');
-  for (const n of c.nicknames) insertAliasStmt.run(entityId, normalizeName(n), 'name');
+  // Name aliases: full FN + nickname(s) + the derived given+family and nickname+family variants
+  // (#93) so a related-name reference that drops the middle name or pairs a nickname with the
+  // surname still resolves. INSERT OR IGNORE makes the (nick-only) overlap with the base case safe.
+  for (const alias of nameVariants({ fn: c.fn, given: c.name?.given, family: c.name?.family, additional: c.name?.additional, nicknames: c.nicknames }))
+    insertAliasStmt.run(entityId, alias, 'name');
   for (const e of c.emails) insertAliasStmt.run(entityId, normalizeName(e), 'email');
   for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasStmt.run(entityId, d, 'phone'); }
 
