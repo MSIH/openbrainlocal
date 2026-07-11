@@ -16,8 +16,8 @@ process.env.OLLAMA_BASE_URL = fake.baseUrl;
 const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-test-contacts-raw-'));
 process.env.CONTACTS_RAW_DIR = rawDir;
 
-const { parsePhoto, persistContactPhoto, importContacts } = await import('../src/contacts.js');
-const { db, getArtifactById } = await import('../src/db.js');
+const { parsePhoto, persistContactPhoto, importContacts, parseVCards } = await import('../src/contacts.js');
+const { db, getArtifactById, nameVariants } = await import('../src/db.js');
 
 after(async () => { db.close(); await fake.close(); cleanup(); rmSync(rawDir, { recursive: true, force: true }); });
 
@@ -170,4 +170,72 @@ test('importContacts: re-import is idempotent — no duplicate artifact, no dupl
 
   const rows = db.prepare("SELECT id FROM artifacts WHERE source = 'vcard' AND text_repr LIKE 'Repeat Person%'").all();
   assert.equal(rows.length, 1, 'no duplicate artifact on re-import');
+});
+
+// --- Entity resolution: name-variant aliases + X-* relationship parsing (#93) ---
+
+test('parseVCards: Google/Android X-SPOUSE / X-CHILD parse into relatedNames with a canonical-able type', () => {
+  const [c] = parseVCards(vcard('FN:Rel Parser\nX-SPOUSE:Some Spouse\nX-CHILD:Some Kid\nX-MANAGER:The Boss'));
+  assert.deepEqual(c.relatedNames, [
+    { type: 'spouse', name: 'Some Spouse' },
+    { type: 'child', name: 'Some Kid' },
+    { type: 'manager', name: 'The Boss' },
+  ]);
+});
+
+test('nameVariants: middle name yields a given+family alias; two-token name adds no redundant duplicate', () => {
+  assert.deepEqual(
+    nameVariants({ fn: 'Amy Margaret Schneider', given: 'Amy', family: 'Schneider', additional: 'Margaret' }).sort(),
+    ['amy margaret schneider', 'amy schneider'].sort(),
+  );
+  assert.deepEqual(nameVariants({ fn: 'Jon Ardell', given: 'Jon', family: 'Ardell' }), ['jon ardell']);
+});
+
+test('nameVariants: nickname yields both the bare nickname and a nickname+family alias', () => {
+  assert.deepEqual(
+    nameVariants({ fn: 'Elisabeth Allister', given: 'Elisabeth', family: 'Allister', nicknames: ['Betsy'] }).sort(),
+    ['betsy', 'betsy allister', 'elisabeth allister'].sort(),
+  );
+});
+
+test('nameVariants: falls back to tokenizing FN when the N split is absent (backfill path)', () => {
+  assert.deepEqual(
+    nameVariants({ fn: 'Amy Margaret Schneider' }).sort(),
+    ['amy margaret schneider', 'amy schneider'].sort(),
+  );
+});
+
+test('nameVariants: a 4+ token name is NOT reduced to first+last (would mint a wrong alias)', () => {
+  // "Ana Maria Garcia Lopez" -> first+last "ana lopez" would be wrong (compound given + 2-part
+  // surname). Without a structured N split we only keep the full name.
+  assert.deepEqual(nameVariants({ fn: 'Ana Maria Garcia Lopez' }), ['ana maria garcia lopez']);
+});
+
+test('nameVariants: derive=false (org) yields only the full name + nicknames, no given+family reduction', () => {
+  assert.deepEqual(nameVariants({ fn: 'Bank of America', derive: false }), ['bank of america']);
+});
+
+test('nameVariants: non-array nicknames are ignored, not iterated (robust backfill input)', () => {
+  assert.deepEqual(nameVariants({ fn: 'Solo Name', nicknames: 'betsy' }), ['solo name']);
+});
+
+test('importContacts: an org contact does not get a bogus given+family name alias', async () => {
+  await importContacts(vcard('FN:Global Widgets Incorporated\nKIND:org\nEMAIL:info@globalwidgets.example'));
+  const org = db.prepare("SELECT id FROM entities WHERE canonical_name='Global Widgets Incorporated'").get();
+  const aliases = db.prepare("SELECT alias FROM entity_aliases WHERE entity_id=? AND alias_type='name'").all(org.id).map((r) => r.alias);
+  assert.deepEqual(aliases, ['global widgets incorporated'], 'org keeps only its full-name alias');
+});
+
+test('importContacts: X-SPOUSE relation forms across a middle-name variant, regardless of import order', async () => {
+  // Card names the spouse by given+family ("Zoe Quill"); the spouse's own card carries the middle
+  // name ("Zoe Beatrix Quill"). Import the referencing card FIRST so the hint must stage and only
+  // resolve when the middle-name entity lands — exercising X-SPOUSE parse + staging + the derived
+  // given+family alias + reverse resolution together (the seed-bug regression).
+  await importContacts(vcard('FN:Quinn Referrer\nEMAIL:quinn.ref@example.com\nX-SPOUSE:Zoe Quill'));
+  await importContacts(vcard('FN:Zoe Beatrix Quill\nN:Quill;Zoe;Beatrix;;\nEMAIL:zoe.quill@example.com'));
+
+  const from = db.prepare("SELECT entity_id FROM entity_links WHERE role='self' AND artifact_id=(SELECT id FROM artifacts WHERE text_repr LIKE 'Quinn Referrer%')").get();
+  const to = db.prepare("SELECT id FROM entities WHERE canonical_name='Zoe Beatrix Quill'").get();
+  const edge = db.prepare('SELECT relation_type FROM entity_relations WHERE from_entity_id=? AND to_entity_id=?').get(from.entity_id, to.id);
+  assert.equal(edge?.relation_type, 'spouse', 'spouse edge formed from referrer to the middle-name entity');
 });
