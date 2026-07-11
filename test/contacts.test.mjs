@@ -169,15 +169,21 @@ test('importContacts: every distinct address lands in text_repr, de-duplicated (
     'EMAIL:multi.addr@example.com\n' +
     'ADR;TYPE=HOME:;;14409 Barkwood;Rockville;MD;20853;US\n' +
     'ADR;TYPE=HOME:;;14409 Barkwood;Rockville;MD;20853;US\n' + // exact duplicate -> collapses
-    'ADR;TYPE=WORK:;;5800 Nicholson Lane;Rockville;MD;20852;US'
+    'ADR;TYPE=WORK:;;5800 Nicholson Lane;Rockville;MD;20852;US\n' +
+    'ADR;TYPE=OTHER:;;;;;;'                                     // all-empty -> must not add a stray Address entry
   );
   const summary = await importContacts(text);
   assert.equal(summary.artifacts, 1);
 
   const row = db.prepare("SELECT text_repr FROM artifacts WHERE source = 'vcard' AND text_repr LIKE 'Multi Address Person%'").get();
-  assert.match(row.text_repr, /5800 Nicholson Lane/, 'a non-last address is embedded, not just the last one');
-  assert.match(row.text_repr, /14409 Barkwood/, 'the first address is embedded too');
+  // 14409 Barkwood is the NON-last ADR — before the fix only the last (5800 Nicholson Lane) reached text_repr.
+  assert.match(row.text_repr, /14409 Barkwood/, 'a non-last address is embedded, not just the last one');
+  assert.match(row.text_repr, /5800 Nicholson Lane/, 'the last address is embedded too');
   assert.equal(row.text_repr.split('14409 Barkwood').length - 1, 1, 'the duplicate address collapses to a single occurrence');
+  assert.ok(
+    row.text_repr.includes('Address: 14409 Barkwood, Rockville, MD, 20853, US; 5800 Nicholson Lane, Rockville, MD, 20852, US'),
+    'exactly the two distinct addresses are embedded, in order, with no empty entry from the all-separator ADR'
+  );
 });
 
 test('importContacts: re-import is idempotent — no duplicate artifact, no duplicate photo write', async () => {

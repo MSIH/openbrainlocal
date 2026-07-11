@@ -274,7 +274,10 @@ export function contactTextRepr(c) {
   if (c.phones.length) parts.push(`Phone: ${c.phones.join(', ')}`);
   if (c.birthday) parts.push(`Birthday: ${c.birthday}`);
   for (const d of c.dates) parts.push(`${d.type}: ${formatVcardDate(d.value)}`);
-  const uniqueAddresses = [...new Set(c.addresses)];
+  // filter(Boolean): an all-separator ADR (e.g. `ADR:;;;;;;`) flattens to '' and is pushed to
+  // c.addresses — drop it rather than emit a stray empty `Address:` line (the old `if (c.address)`
+  // guard skipped it too).
+  const uniqueAddresses = [...new Set(c.addresses.filter(Boolean))];
   if (uniqueAddresses.length) parts.push(`Address: ${uniqueAddresses.join('; ')}`);
   for (const r of c.relatedNames) parts.push(`${r.type}: ${r.name}`);
   if (c.urls.length) parts.push(`URL: ${c.urls.join(', ')}`);
