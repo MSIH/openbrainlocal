@@ -1,6 +1,7 @@
 // Runs index.js end-to-end against a mock LifeContext ingest server (no real network, no LLM).
-// Covers: Bash `gh issue create` stdout parse, MCP create_pull_request JSON parse, no-URL ->
-// no ingest, and missing API key -> skip. Mirrors devsession-claude/test.mjs's harness.
+// Covers: Bash `gh issue create` stdout parse, MCP create_pull_request JSON parse, html_url
+// preference, issue_write update -> no ingest, no-URL -> no ingest, and missing API key -> skip.
+// Mirrors devsession-claude/test.mjs's harness.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -119,6 +120,49 @@ test('MCP response with a body link to another issue: prefers html_url, not the 
   assert.equal(requests[0].body.source_id, 'https://github.com/MSIH/life-context/pull/90');
   assert.equal(requests[0].body.extra.kind, 'pr');
   assert.equal(requests[0].body.extra.number, 90);
+});
+
+test('MCP issue_write update: has an issue html_url but method=update -> no ingest, exits 0', async () => {
+  const { server, port, requests } = await startMockServer();
+
+  const result = await runHook(
+    {
+      // issue_write handles create AND update; an update still returns the issue's html_url, so
+      // without the method guard it would be mis-recorded as "Opened GitHub issue…". Must not ingest.
+      tool_name: 'mcp__github__issue_write',
+      tool_input: { method: 'update', owner: 'MSIH', repo: 'life-context', issue_number: 89, title: 'edited title' },
+      tool_response: { html_url: 'https://github.com/MSIH/life-context/issues/89', number: 89, title: 'edited title' },
+      cwd: __dirname,
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 0, 'an issue_write update must not be captured as an Opened event');
+});
+
+test('MCP issue_write create: method=create is captured as an x-dev-event, exits 0', async () => {
+  const { server, port, requests } = await startMockServer();
+
+  const result = await runHook(
+    {
+      tool_name: 'mcp__github__issue_write',
+      tool_input: { method: 'create', owner: 'MSIH', repo: 'life-context', title: 'new via issue_write' },
+      tool_response: { html_url: 'https://github.com/MSIH/life-context/issues/92', number: 92, title: 'new via issue_write' },
+      cwd: __dirname,
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 1, 'an issue_write create must be captured');
+  assert.equal(requests[0].body.source_id, 'https://github.com/MSIH/life-context/issues/92');
+  assert.equal(requests[0].body.extra.kind, 'issue');
+  assert.equal(requests[0].body.extra.number, 92);
 });
 
 test('no issue/PR URL in the tool result -> no ingest, exits 0', async () => {

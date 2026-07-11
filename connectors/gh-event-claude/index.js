@@ -96,6 +96,17 @@ function extractGithubUrlMatch(toolResponse, toolInput) {
   return GH_URL_RE.exec(haystack);
 }
 
+// `mcp__github__issue_write` handles BOTH create and update; only a create is an "Opened…" event.
+// (The dedicated `create_*` MCP tools and `gh … create` are creates by definition — nothing to
+// check there.) An update still carries the issue's html_url, so without this guard it would be
+// recorded as a phantom "Opened GitHub issue…" and pollute memory. Mirrors the gate's detection
+// exactly (.claude/hooks/draft-issue-gate.sh): only an EXPLICIT non-create method is an update; a
+// missing/unparseable method falls through as a create, so the two hooks agree on "a create".
+function isNonCreateIssueWrite(toolName, toolInput) {
+  const method = typeof toolInput?.method === 'string' ? toolInput.method : '';
+  return toolName === 'mcp__github__issue_write' && method !== '' && method !== 'create';
+}
+
 // Current branch, best-effort — useful context on a PR. Never throws (detached HEAD, no git, …).
 async function currentBranch(cwd) {
   try {
@@ -151,6 +162,12 @@ async function main() {
 
   const hookInput = JSON.parse(await readStdin());
   const { tool_name: toolName, tool_input: toolInput, tool_response: toolResponse, cwd } = hookInput;
+
+  // Skip issue_write updates before touching the response — an update is not an "Opened" event.
+  if (isNonCreateIssueWrite(toolName, toolInput)) {
+    console.error(`gh-event-claude: ${toolName} method=${toolInput?.method} is not a create; nothing to capture`);
+    return;
+  }
 
   // The URL is the anchor: no URL means the create didn't produce one (failed, or an update with
   // nothing to record) — nothing to remember.

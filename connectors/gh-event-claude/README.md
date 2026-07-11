@@ -17,6 +17,12 @@ open issue #89?", "what PRs did I cut last week?".
 If no issue/PR URL can be found (the create failed, or there's nothing to record) it ingests
 nothing and exits 0.
 
+`mcp__github__issue_write` handles both **create** and **update**; an update still returns the
+issue's `html_url`, so the hook records *only* `method: "create"` — an explicit non-create method
+is skipped, so ordinary edits never appear as phantom "Opened…" events. This mirrors the
+`draft-issue-gate`'s method detection exactly (a missing/unparseable method falls through as a
+create). The other matchers are creates by definition, so no check applies to them.
+
 ## Contract
 
 | Field | Value |
@@ -70,4 +76,5 @@ ingest server is unreachable the payload is spooled to `GH_EVENT_SPOOL_PATH`
 
 `npm test` (`node --test test.mjs`) spawns `index.js` against a mock `node:http` ingest server —
 no `npm install`, no real network. Covers the Bash-stdout parse, the MCP-response parse, the
+`html_url` preference, the `issue_write` update → no-ingest and create → ingest paths, the
 no-URL no-ingest path, and the missing-API-key skip.
