@@ -147,6 +147,7 @@ rule when their turn comes:
 
 - **Email** (Takeout mbox first, IMAP later) — highest-density relationship data; deterministic entity links at volume (doc 03 §3.1)
 - **Documents + filesystem watcher** — the batch-scan half shipped as [`connectors/documents/`](../connectors/documents/) (#56 — pdfjs/mammoth/exceljs extraction + tesseract OCR worker); still open: the live filesystem watcher trigger and NER-inferred links
+- **Dev-workflow event capture** — GitHub issue/PR creation recorded as `x-dev-event` artifacts, shipped as [`connectors/gh-event-claude/`](../connectors/gh-event-claude/) (#89 — Claude Code `PostToolUse` hook); a sibling of the Milestone 1 `devsession-claude` session-capture connector (captures the discrete event, not the conversation)
 - **Location visits** — Google Timeline / Owntracks pings segmented into visits via the event lane (doc 04 §5)
 - **Video/audio** — Whisper transcripts + keyframe captions; **social-media exports** (Takeout, X archive)
 - **Face clustering** (local-only, `insightface`), **CLIP visual-similarity second index** (doc 03 §3.3), **`merge_entities` admin endpoint** (doc 03 §7), cross-device sync, temporal knowledge graph
