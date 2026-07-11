@@ -346,7 +346,8 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
   // Name aliases: full FN + nickname(s) + the derived given+family and nickname+family variants
   // (#93) so a related-name reference that drops the middle name or pairs a nickname with the
   // surname still resolves. INSERT OR IGNORE makes the (nick-only) overlap with the base case safe.
-  for (const alias of nameVariants({ fn: c.fn, given: c.name?.given, family: c.name?.family, additional: c.name?.additional, nicknames: c.nicknames }))
+  // `derive` is off for orgs — a company name has no given/family to reduce (#93 review).
+  for (const alias of nameVariants({ fn: c.fn, given: c.name?.given, family: c.name?.family, additional: c.name?.additional, nicknames: c.nicknames, derive: !c.isCompany }))
     insertAliasStmt.run(entityId, alias, 'name');
   for (const e of c.emails) insertAliasStmt.run(entityId, normalizeName(e), 'email');
   for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasStmt.run(entityId, d, 'phone'); }

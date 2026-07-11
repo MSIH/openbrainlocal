@@ -205,6 +205,27 @@ test('nameVariants: falls back to tokenizing FN when the N split is absent (back
   );
 });
 
+test('nameVariants: a 4+ token name is NOT reduced to first+last (would mint a wrong alias)', () => {
+  // "Ana Maria Garcia Lopez" -> first+last "ana lopez" would be wrong (compound given + 2-part
+  // surname). Without a structured N split we only keep the full name.
+  assert.deepEqual(nameVariants({ fn: 'Ana Maria Garcia Lopez' }), ['ana maria garcia lopez']);
+});
+
+test('nameVariants: derive=false (org) yields only the full name + nicknames, no given+family reduction', () => {
+  assert.deepEqual(nameVariants({ fn: 'Bank of America', derive: false }), ['bank of america']);
+});
+
+test('nameVariants: non-array nicknames are ignored, not iterated (robust backfill input)', () => {
+  assert.deepEqual(nameVariants({ fn: 'Solo Name', nicknames: 'betsy' }), ['solo name']);
+});
+
+test('importContacts: an org contact does not get a bogus given+family name alias', async () => {
+  await importContacts(vcard('FN:Global Widgets Incorporated\nKIND:org\nEMAIL:info@globalwidgets.example'));
+  const org = db.prepare("SELECT id FROM entities WHERE canonical_name='Global Widgets Incorporated'").get();
+  const aliases = db.prepare("SELECT alias FROM entity_aliases WHERE entity_id=? AND alias_type='name'").all(org.id).map((r) => r.alias);
+  assert.deepEqual(aliases, ['global widgets incorporated'], 'org keeps only its full-name alias');
+});
+
 test('importContacts: X-SPOUSE relation forms across a middle-name variant, regardless of import order', async () => {
   // Card names the spouse by given+family ("Zoe Quill"); the spouse's own card carries the middle
   // name ("Zoe Beatrix Quill"). Import the referencing card FIRST so the hint must stage and only

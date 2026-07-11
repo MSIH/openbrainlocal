@@ -417,25 +417,34 @@ export function logEvent(eventType, actor, details) {
 export const normalizeName = (s) => s.trim().toLowerCase();
 export const normalizePhone = (s) => s.replace(/\D/g, '');
 
-// The set of name aliases a person should answer to (#93). Beyond the full FN and each verbatim
-// nickname, we derive:
+// The set of name aliases a person should answer to (#93). Always the full FN + each verbatim
+// nickname; when `derive` is on (persons, not orgs) we also add:
 //   - a given+family form when a middle name is present, so "Amy Schneider" resolves an entity
 //     stored as "Amy Margaret Schneider" (exact-match lookup misses the middle name otherwise);
 //   - a nickname+family form ("betsy allister"), so a related-name reference by nickname+surname
 //     resolves alongside the bare nickname ("betsy").
-// Prefers the structured N split (given/family/additional) and falls back to tokenizing FN
-// (first + last) when the split isn't available (e.g. the backfill, which only has canonical_name).
-// Returns normalized, de-duped strings; callers INSERT OR IGNORE so re-runs are no-ops.
-export function nameVariants({ fn, given, family, additional, nicknames = [] }) {
+// Prefers the structured N split (given/family/additional). When it's absent (e.g. the backfill,
+// which only has canonical_name) we fall back to tokenizing FN, but ONLY for a clean 2- or
+// 3-token name (first [middle] last) — a 4+ token name is too ambiguous (compound given names,
+// multi-part surnames) to reduce to first+last without minting a wrong alias, so we skip it.
+// `derive: false` (orgs) yields just the full name + nicknames — a company name has no given/
+// family to reduce, and "Bank of America" must not become "bank america". Returns normalized,
+// de-duped strings; callers INSERT OR IGNORE so re-runs are no-ops.
+export function nameVariants({ fn, given, family, additional, nicknames = [], derive = true }) {
+  const nicks = Array.isArray(nicknames) ? nicknames : [];
   const out = new Set();
-  const add = (s) => { const n = s && normalizeName(s); if (n) out.add(n); };
+  const add = (s) => { const n = typeof s === 'string' && normalizeName(s); if (n) out.add(n); };
   if (fn) add(fn);
-  const toks = fn ? fn.trim().split(/\s+/) : [];
-  const g = given || toks[0];
-  const f = family || (toks.length >= 2 ? toks[toks.length - 1] : null);
-  const hasMiddle = Boolean(additional) || toks.length >= 3;
-  if (hasMiddle && g && f) add(`${g} ${f}`);
-  for (const nick of nicknames) { add(nick); if (f) add(`${nick} ${f}`); }
+  for (const nick of nicks) add(nick);
+  if (derive) {
+    const toks = typeof fn === 'string' ? fn.trim().split(/\s+/) : [];
+    const g = given || toks[0];
+    // Trust a structured family outright; from tokenization only accept the last of a 2/3-token name.
+    const f = family || (toks.length === 2 || toks.length === 3 ? toks[toks.length - 1] : null);
+    const hasMiddle = Boolean(additional) || toks.length === 3;
+    if (hasMiddle && g && f) add(`${g} ${f}`);
+    if (f) for (const nick of nicks) add(`${nick} ${f}`);
+  }
   return [...out];
 }
 
@@ -538,11 +547,13 @@ export function upsertEntityRelation({ from_entity_id, to_entity_id, relation_ty
  */
 export function stageRelationHint(artifactId, relatedName, rawLabel) {
   insertUnresolvedStmt.run(artifactId, normalizeName(relatedName), 'relation', rawLabel, 1.0);
-  // Also stage a given+family reduction of a 3+ token related name (#93), so a card that names
+  // Also stage a given+family reduction of a 3-token related name (#93), so a card that names
   // someone by their full middle-name form ("Amy Margaret Schneider") still matches an entity
-  // aliased only as given+family ("amy schneider"). Idempotent via the table's UNIQUE key.
+  // aliased only as given+family ("amy schneider"). Gated to exactly 3 tokens for the same reason
+  // nameVariants is: a 4+ token name can't be reduced to first+last without minting a wrong match.
+  // Idempotent via the table's UNIQUE key.
   const toks = String(relatedName ?? '').trim().split(/\s+/);
-  if (toks.length >= 3) {
+  if (toks.length === 3) {
     const reduced = normalizeName(`${toks[0]} ${toks[toks.length - 1]}`);
     if (reduced && reduced !== normalizeName(relatedName)) {
       insertUnresolvedStmt.run(artifactId, reduced, 'relation', rawLabel, 1.0);
