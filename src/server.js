@@ -250,11 +250,14 @@ function buildMcpServer() {
     async ({ name, limit = 10 }) => {
       const res = aboutEntity(name, limit);
       if (!res.resolved) return { content: [{ type: "text", text: `No entity found for "${name}".` }] };
-      const blocks = res.entities.map(({ entity, artifacts, relations }) => {
+      const blocks = res.entities.map(({ entity, artifacts, relations, relations_in }) => {
         const header = `${entity.canonical_name} (${entity.kind})${entity.attrs ? ` — ${JSON.stringify(entity.attrs)}` : ""}`;
         const rels = relations?.length ? `\nRelations: ${relations.map((r) => `${r.relation_type} → ${r.name}`).join(", ")}` : "";
+        // Incoming edges (#88) — e.g. an org's employees (worksAt ← person). Same arrow idiom,
+        // reversed, so "who works at Acme" is answerable over MCP, not just REST.
+        const relsIn = relations_in?.length ? `\nRelated from: ${relations_in.map((r) => `${r.relation_type} ← ${r.name}`).join(", ")}` : "";
         const items = artifacts.map(artifactLine).join("\n");
-        return `${header}${rels}\n${items || "  (no linked artifacts yet)"}`;
+        return `${header}${rels}${relsIn}\n${items || "  (no linked artifacts yet)"}`;
       });
       return { content: [{ type: "text", text: blocks.join("\n\n") }] };
     }
