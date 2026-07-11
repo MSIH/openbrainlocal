@@ -8,6 +8,7 @@ Official connectors for **LifeContext** — each is an isolated process that gat
 
 ```
 devsession-claude/  Claude Code SessionEnd/PreCompact hook → dev_session artifacts (Milestone 1)
+gh-event-claude/    Claude Code PostToolUse hook → x-dev-event artifacts on gh issue/PR create (#89)
 documents/          PDF/DOCX/XLSX/PPTX tree scan + tesseract OCR worker → document artifacts (#56)
 imessage/           iMessage chat.db sync → message/photo artifacts (Milestone 3)
 photo-exif/         Photo library EXIF scan + VLM captioning → photo artifacts (Milestone 4)

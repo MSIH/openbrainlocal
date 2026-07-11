@@ -30,6 +30,38 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash(gh issue create*)",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
+        ]
+      },
+      {
+        "matcher": "mcp__github__create_issue",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
+        ]
+      },
+      {
+        "matcher": "mcp__github__issue_write",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
+        ]
+      },
+      {
+        "matcher": "Bash(gh pr create*)",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR event..." }
+        ]
+      },
+      {
+        "matcher": "mcp__github__create_pull_request",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR event..." }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash(gh issue create*)",
