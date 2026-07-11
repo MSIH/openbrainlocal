@@ -30,10 +30,13 @@ test('a pre-existing person+isCompany entity is promoted to org on startup, logg
   assert.equal(seeded.companyKind, 'person', 'starts life mis-kinded as person (pre-migration)');
   assert.equal(seeded.migRows, 0, 'no migration fired on the empty DB');
 
-  // First reopen: the migration promotes the company and writes exactly one log row.
+  // First reopen: the migration promotes the company and writes exactly one log row. A row with
+  // malformed attrs_json must NOT crash the startup migration (json_valid guards json_extract) —
+  // if it threw, this execFileSync would throw and the test would fail here.
   const first = run('check');
   assert.equal(first.companyKind, 'org', 'promoted to org');
   assert.equal(first.humanKind, 'person', 'a genuine person (isCompany:false) is untouched');
+  assert.equal(first.malformedKind, 'person', 'a malformed-attrs_json row is skipped, not crashed on');
   assert.equal(first.migRows, 1, 'exactly one schema_migration row');
 
   // Second reopen: nothing left to promote, no new log row.

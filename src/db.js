@@ -154,10 +154,15 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_entities_merged_into ON entities(merged_
 // raw source signal — idempotent (only still-mis-kinded live rows change), run unconditionally,
 // logged only when it actually promotes rows. Same raw-statement approach as the migration above
 // (logEvent/logStmt aren't defined yet at schema-setup time). json_extract ships with better-sqlite3.
+// json_valid guards first: attrs_json is an unconstrained TEXT column the code already treats as
+// possibly-non-JSON (safeJson), and json_extract THROWS on malformed JSON — since this runs at
+// module load, one bad row would otherwise crash every startup. SQLite short-circuits AND, so a
+// malformed/NULL row is skipped before json_extract sees it.
 {
   const info = db.prepare(`
     UPDATE entities SET kind = 'org'
     WHERE kind = 'person' AND merged_into IS NULL
+      AND json_valid(attrs_json)
       AND json_extract(attrs_json, '$.isCompany') = 1
   `).run();
   if (info.changes > 0) {
