@@ -8,7 +8,7 @@
  * Search never throws just because Ollama is offline.
  */
 import { z } from 'zod';
-import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, mergeEntities, listProbableDuplicates, listContactPhotos } from './db.js';
+import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, getRelationsTo, mergeEntities, listProbableDuplicates, listContactPhotos } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { geocodePlace, haversineKm } from './geocode.js';
 import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
@@ -379,7 +379,9 @@ export function timeline(start, end, types, limit = 50) {
 }
 
 // Graph-only recall: no embedding. Resolve name -> entity -> recent linked artifacts +
-// person<->person relations (issue #37). `relations` is [] when the person has none. Merge
+// entity relations (issue #37; person->org #88). `relations` is the entity's outgoing edges
+// (worksAt, spouse, …); `relations_in` its incoming edges (#88) — for an org, the people who
+// work there. Both [] when the entity has none. Merge
 // redirect (#75) is inherited from resolveEntityIds — a name that used to resolve to an
 // absorbed entity now resolves straight to the survivor, so no extra redirect logic is needed
 // here; the survivor's `aboutStmt` results already include the absorbed entity's re-pointed
@@ -387,7 +389,7 @@ export function timeline(start, end, types, limit = 50) {
 export function aboutEntity(name, limit = 10) {
   const ids = resolveEntityIds(name);
   if (!ids.length) return { resolved: false, name, entities: [] };
-  const entities = ids.map((id) => ({ entity: getEntity(id), artifacts: aboutStmt.all(id, limit), relations: getRelations(id) }));
+  const entities = ids.map((id) => ({ entity: getEntity(id), artifacts: aboutStmt.all(id, limit), relations: getRelations(id), relations_in: getRelationsTo(id) }));
   return { resolved: true, name, entities };
 }
 

@@ -202,7 +202,7 @@ function finalizeCard(lines, raw) {
       case 'TEL': c.phones.push(value); break;
       case 'BDAY': c.birthday = value; break;
       case 'ADR': { const a = value.split(';').filter(Boolean).join(', '); c.address = a; c.addresses.push(a); break; }
-      case 'ORG': { const parts = value.split(';'); c.org = parts.filter(Boolean).join(', '); if (parts[1]) c.department = parts[1]; break; }
+      case 'ORG': { const parts = value.split(';'); c.org = parts.filter(Boolean).join(', '); const name = parts[0]?.trim(); if (name) c.orgName = name; if (parts[1]) c.department = parts[1]; break; }
       case 'TITLE': c.title = value; break;
       case 'ROLE': c.role = value; break;
       case 'NOTE': c.note = value; break;
@@ -334,7 +334,7 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
       title: c.title ?? null, role: c.role ?? null, note: c.note ?? null,
       phonetic: c.phonetic ?? null, isCompany: c.isCompany ?? false,
     };
-    entityId = insertEntityStmt.run('person', c.fn || c.emails[0] || 'Unnamed', JSON.stringify(attrs)).lastInsertRowid;
+    entityId = insertEntityStmt.run(c.isCompany ? 'org' : 'person', c.fn || c.emails[0] || 'Unnamed', JSON.stringify(attrs)).lastInsertRowid;
     entityCreated = true;
   }
   if (c.fn) insertAliasStmt.run(entityId, normalizeName(c.fn), 'name');
@@ -351,7 +351,15 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
   );
   // Relations need the self-link (just written) to derive the "from" side of a staged hint.
   // Skip on a dedup hit — the first import already formed/staged them (all steps are idempotent).
-  if (!res.deduped) linkRelations(entityId, res.id, c.relatedNames);
+  // A person's ORG name rides the same machinery as a synthetic worksAt relation (#88): it forms
+  // a person->org edge when a matching org contact exists, else stages until one is imported.
+  // Guarded by !isCompany so an org card never self-links via its own ORG line.
+  if (!res.deduped) {
+    const relations = c.orgName && !c.isCompany
+      ? [...c.relatedNames, { type: 'worksAt', name: c.orgName }]
+      : c.relatedNames;
+    linkRelations(entityId, res.id, relations);
+  }
   return { entityCreated, artifactId: res.id, deduped: res.deduped };
 });
 
