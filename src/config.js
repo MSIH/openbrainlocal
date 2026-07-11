@@ -31,6 +31,10 @@ export const DB_PATH = process.env.DB_PATH || 'life-context.db';
 // default so a fresh install just works; override to keep raw originals on a bigger disk.
 export const CONTACTS_RAW_DIR = process.env.CONTACTS_RAW_DIR || 'raw/contacts';
 
+// Max bytes accepted by the contacts-UI photo upload (#96). Caps the express.raw body so a
+// huge/hostile upload can't exhaust memory; 10 MB comfortably fits a phone photo.
+export const CONTACT_PHOTO_MAX_BYTES = int(process.env.CONTACT_PHOTO_MAX_BYTES, 10 * 1024 * 1024);
+
 // --- Embedding / LLM gateway (local Ollama, OpenAI-compatible) ---
 export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1';
 export const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'qwen3-embedding:0.6b';

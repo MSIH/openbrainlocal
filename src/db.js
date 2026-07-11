@@ -128,7 +128,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS ingest_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved|entity_merged|schema_migration
+    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved|relation_removed|entity_created|entity_edited|entity_merged|alias_added|alias_removed|schema_migration
     actor       TEXT,
     details     TEXT                    -- JSON
   );
@@ -239,8 +239,10 @@ const insertRelationStmt = db.prepare(`
   INSERT OR IGNORE INTO entity_relations (from_entity_id, to_entity_id, relation_type, raw_label, confidence, source)
   VALUES (@from_entity_id, @to_entity_id, @relation_type, @raw_label, @confidence, @source)
 `);
+// r.id AS relation_id lets the contacts UI (#96) target a specific edge for removal; harmless to
+// about_entity, which ignores it.
 const getRelationsStmt = db.prepare(`
-  SELECT r.to_entity_id AS entity_id, r.relation_type, r.raw_label, r.confidence, e.canonical_name AS name
+  SELECT r.id AS relation_id, r.to_entity_id AS entity_id, r.relation_type, r.raw_label, r.confidence, e.canonical_name AS name
   FROM entity_relations r JOIN entities e ON e.id = r.to_entity_id
   WHERE r.from_entity_id = ? ORDER BY r.relation_type, e.canonical_name
 `);
@@ -248,7 +250,7 @@ const getRelationsStmt = db.prepare(`
 // about_entity(org) list its employees (worksAt from=person, to=org); harmlessly gives every
 // entity its reverse edges too. Joins the FROM side for the name.
 const getRelationsToStmt = db.prepare(`
-  SELECT r.from_entity_id AS entity_id, r.relation_type, r.raw_label, r.confidence, e.canonical_name AS name
+  SELECT r.id AS relation_id, r.from_entity_id AS entity_id, r.relation_type, r.raw_label, r.confidence, e.canonical_name AS name
   FROM entity_relations r JOIN entities e ON e.id = r.from_entity_id
   WHERE r.to_entity_id = ? ORDER BY r.relation_type, e.canonical_name
 `);
@@ -873,6 +875,162 @@ const listContactPhotosStmt = db.prepare(`
  */
 export function listContactPhotos(limit = 100) {
   return listContactPhotosStmt.all(limit).map((r) => ({ ...r, raw_path: path.resolve(r.raw_path) }));
+}
+
+// --- Contacts curation surface (#96) ---
+// The core-owned admin API the contacts web UI drives: correct a contact's aliases/attrs, edit
+// relationships, set a photo. Same posture as mergeEntities above — the entity graph is mutable
+// curation state (raw `contact` artifacts stay append-only; nothing here touches them), and every
+// mutation logs to ingest_log with before/after so the derived record's history is reconstructable.
+const listEntitiesStmt = db.prepare(`
+  SELECT id, kind, canonical_name, attrs_json FROM entities
+  WHERE merged_into IS NULL
+    AND (@kind IS NULL OR kind = @kind)
+    AND (@like IS NULL
+         OR LOWER(canonical_name) LIKE @like
+         OR id IN (SELECT entity_id FROM entity_aliases WHERE alias LIKE @like))
+  ORDER BY canonical_name COLLATE NOCASE
+  LIMIT @limit OFFSET @offset
+`);
+const getAliasesStmt = db.prepare('SELECT alias, alias_type FROM entity_aliases WHERE entity_id = ? ORDER BY alias_type, alias');
+const profileArtifactsStmt = db.prepare(`
+  SELECT a.id, a.type, a.occurred_at, a.text_repr, el.role
+  FROM entity_links el JOIN artifacts a ON a.id = el.artifact_id
+  WHERE el.entity_id = ? ORDER BY a.id DESC LIMIT ?
+`);
+const updateEntityRowStmt = db.prepare('UPDATE entities SET canonical_name = COALESCE(?, canonical_name), attrs_json = ? WHERE id = ?');
+const deleteAliasStmt = db.prepare('DELETE FROM entity_aliases WHERE entity_id = ? AND alias = ? AND alias_type = ?');
+const getRelationByIdStmt = db.prepare('SELECT * FROM entity_relations WHERE id = ?');
+const deleteRelationStmt = db.prepare('DELETE FROM entity_relations WHERE id = ?');
+// The self-linked contact artifact's photo (most-recent, mirroring listContactPhotos' subquery).
+const getSelfPhotoStmt = db.prepare(`
+  SELECT a.raw_path FROM entity_links el JOIN artifacts a ON a.id = el.artifact_id
+  WHERE el.entity_id = ? AND el.role = 'self' AND a.raw_path IS NOT NULL
+  ORDER BY a.id DESC LIMIT 1
+`);
+
+const notFound = (id) => { const err = new Error(`entity ${id} not found (or merged)`); err.code = 'NOT_FOUND'; throw err; };
+// email/phone aliases are globally UNIQUE(alias, alias_type). Adding one already owned by a
+// DIFFERENT live entity would silently no-op (insertAliasStmt is OR IGNORE) and quietly fail to
+// take effect — surface it as a conflict instead so the UI can offer a merge (mergeEntities).
+// name/handle aliases are intentionally shareable (two people named "chris"), so they're exempt.
+function assertNoAliasConflict(entityId, normAlias, aliasType) {
+  if (aliasType !== 'email' && aliasType !== 'phone') return;
+  const other = resolveAliasByTypeStmt.all(normAlias, aliasType).map((r) => r.entity_id).find((eid) => eid !== entityId);
+  if (other != null) {
+    const err = new Error(`${aliasType} "${normAlias}" already belongs to entity ${other}`);
+    err.code = 'ALIAS_CONFLICT';
+    err.conflict = { alias: normAlias, alias_type: aliasType, entity_id: other };
+    throw err;
+  }
+}
+const normalizeAlias = (alias, aliasType) => (aliasType === 'phone' ? normalizePhone(alias) : normalizeName(alias));
+// Recent linked artifacts shown on a contact's profile (GET /:id) — a preview, not the full set.
+const PROFILE_ARTIFACT_LIMIT = 10;
+
+export function listEntities({ kind = null, query = null, limit = 50, offset = 0 } = {}) {
+  const like = query && query.trim() ? `%${normalizeName(query)}%` : null;
+  return listEntitiesStmt.all({ kind, like, limit, offset }).map((e) => ({
+    id: e.id, kind: e.kind, canonical_name: e.canonical_name, attrs: e.attrs_json ? safeJson(e.attrs_json) : null,
+  }));
+}
+
+export function getEntityProfile(id) {
+  const entity = getLiveEntityStmt.get(id);
+  if (!entity) return null;
+  return {
+    entity: { id: entity.id, kind: entity.kind, canonical_name: entity.canonical_name, attrs: entity.attrs_json ? safeJson(entity.attrs_json) : null },
+    aliases: getAliasesStmt.all(id),
+    relations: getRelations(id),
+    relations_in: getRelationsTo(id),
+    artifacts: profileArtifactsStmt.all(id, PROFILE_ARTIFACT_LIMIT),
+  };
+}
+
+// Create a person/org from the UI (e.g. a related contact that doesn't exist yet). Seeds name/
+// email/phone aliases exactly like the vCard import path so the new entity is resolvable. Any
+// supplied email/phone that already belongs to another entity is a conflict (throws) — a new
+// contact must not silently inherit someone else's alias.
+export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }) => {
+  const emails = [...new Set((attrs.emails ?? []).map((e) => normalizeName(e)).filter(Boolean))];
+  const phones = [...new Set((attrs.phones ?? []).map((p) => normalizePhone(p)).filter(Boolean))];
+  for (const e of emails) assertNoAliasConflict(-1, e, 'email');
+  for (const p of phones) assertNoAliasConflict(-1, p, 'phone');
+  const id = Number(insertEntityStmt.run(kind, canonical_name, JSON.stringify(attrs)).lastInsertRowid);
+  for (const alias of nameVariants({ fn: canonical_name, nicknames: attrs.nicknames, derive: kind === 'person' })) insertAliasStmt.run(id, alias, 'name');
+  for (const e of emails) insertAliasStmt.run(id, e, 'email');
+  for (const p of phones) insertAliasStmt.run(id, p, 'phone');
+  logEvent('entity_created', 'contacts-ui', { entity_id: id, kind, canonical_name });
+  return id;
+});
+
+// Overwrite a contact's editable attrs (+ optional rename), reconciling email/phone aliases to
+// match the new attrs. Additive for names (a rename adds new name variants; old ones stay, as a
+// person may still be referenced by them). photoFile/raw_path are server-owned — a PATCH can
+// neither set nor wipe them (the upload route + import own them). Conflicts are checked before
+// any write; a throw rolls the whole transaction back.
+export const updateEntityAttrs = db.transaction((id, { canonical_name = null, attrs = null } = {}) => {
+  const cur = getLiveEntityStmt.get(id) || notFound(id);
+  const before = cur.attrs_json ? safeJson(cur.attrs_json) : {};
+  const next = attrs ? { ...attrs } : { ...before };
+  delete next.photoFile; delete next.raw_path;
+  if (before.photoFile) next.photoFile = before.photoFile; // preserve server-owned photo
+  const set = (arr, fn) => [...new Set((arr ?? []).map(fn).filter(Boolean))];
+  const oldEmails = set(before.emails, normalizeName), newEmails = set(next.emails, normalizeName);
+  const oldPhones = set(before.phones, normalizePhone), newPhones = set(next.phones, normalizePhone);
+  for (const e of newEmails) if (!oldEmails.includes(e)) assertNoAliasConflict(id, e, 'email');
+  for (const p of newPhones) if (!oldPhones.includes(p)) assertNoAliasConflict(id, p, 'phone');
+  if (canonical_name && canonical_name !== cur.canonical_name)
+    for (const alias of nameVariants({ fn: canonical_name, nicknames: next.nicknames, derive: cur.kind === 'person' })) insertAliasStmt.run(id, alias, 'name');
+  for (const e of newEmails) if (!oldEmails.includes(e)) insertAliasStmt.run(id, e, 'email');
+  for (const e of oldEmails) if (!newEmails.includes(e)) deleteAliasStmt.run(id, e, 'email');
+  for (const p of newPhones) if (!oldPhones.includes(p)) insertAliasStmt.run(id, p, 'phone');
+  for (const p of oldPhones) if (!newPhones.includes(p)) deleteAliasStmt.run(id, p, 'phone');
+  updateEntityRowStmt.run(canonical_name, JSON.stringify(next), id);
+  logEvent('entity_edited', 'contacts-ui', { entity_id: id, before, after: next, renamed_to: canonical_name && canonical_name !== cur.canonical_name ? canonical_name : null });
+  return { updated: true };
+});
+
+export const addAlias = db.transaction((id, alias, alias_type) => {
+  if (!getLiveEntityStmt.get(id)) notFound(id);
+  const a = normalizeAlias(alias, alias_type);
+  if (!a) { const err = new Error('empty alias'); err.code = 'BAD_ALIAS'; throw err; }
+  assertNoAliasConflict(id, a, alias_type);
+  const added = insertAliasStmt.run(id, a, alias_type).changes > 0;
+  if (added) logEvent('alias_added', 'contacts-ui', { entity_id: id, alias: a, alias_type });
+  return { added };
+});
+
+export const removeAlias = db.transaction((id, alias, alias_type) => {
+  const a = normalizeAlias(alias, alias_type);
+  const removed = deleteAliasStmt.run(id, a, alias_type).changes > 0;
+  if (removed) logEvent('alias_removed', 'contacts-ui', { entity_id: id, alias: a, alias_type });
+  return { removed };
+});
+
+export const removeRelation = db.transaction((relationId) => {
+  const row = getRelationByIdStmt.get(relationId);
+  if (!row) return { removed: false };
+  deleteRelationStmt.run(relationId);
+  logEvent('relation_removed', 'contacts-ui', { relation_id: relationId, from_entity_id: row.from_entity_id, to_entity_id: row.to_entity_id, relation_type: row.relation_type, raw_label: row.raw_label });
+  return { removed: true };
+});
+
+// Record an uploaded photo's basename in attrs.photoFile (server-owned key — see updateEntityAttrs).
+export const setEntityPhotoFile = db.transaction((id, basename) => {
+  const cur = getLiveEntityStmt.get(id) || notFound(id);
+  const before = cur.attrs_json ? safeJson(cur.attrs_json) : {};
+  updateEntityRowStmt.run(null, JSON.stringify({ ...before, photoFile: basename }), id);
+  logEvent('entity_edited', 'contacts-ui', { entity_id: id, photoFile: basename, prev_photoFile: before.photoFile ?? null });
+  return { photoFile: basename };
+});
+
+// The effective photo path for a contact: the self-linked contact artifact's raw_path (imported
+// vCard photo), absolute. The uploaded-photo override (attrs.photoFile) is resolved by the route,
+// which confines it to CONTACTS_RAW_DIR. Returns null when the contact has no imported photo.
+export function getContactPhotoRawPath(id) {
+  const row = getSelfPhotoStmt.get(id);
+  return row?.raw_path ? path.resolve(row.raw_path) : null;
 }
 
 export function getArtifactById(id) {

@@ -19,6 +19,7 @@
  * are read by property name too, so both versions land in the same shape.
  */
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -173,6 +174,31 @@ export function persistContactPhoto(photo) {
     console.error('contacts: failed to persist contact photo', err);
   }
   return null;
+}
+
+// Persist already-decoded image bytes to the same content-addressed store persistContactPhoto's
+// base64 branch uses — the contacts-UI upload path (#96). sha256-named file under
+// CONTACTS_RAW_DIR, exclusive 'wx' write (identical bytes -> EEXIST -> no-op, never overwrites).
+// Returns the bare basename (never a path): the caller records it in attrs.photoFile and the
+// photo route resolves it back under CONTACTS_RAW_DIR, so a traversal-y name can't escape. The
+// ext is derived from the declared media type (same allowlist as persistContactPhoto). Async
+// (fs/promises) because the only caller is the server's upload route — coding-standards.md bans
+// blocking sync I/O on the request path (persistContactPhoto stays sync: it runs in the import
+// script, off the request path). Throws on empty input or a real write error; the route maps that
+// to a 4xx/5xx.
+export async function savePhotoBytes(bytes, mediaType) {
+  if (!bytes || !bytes.length) throw new Error('empty photo bytes');
+  const ext = extForPhotoType(mediaType);
+  const safeExt = /^[a-z0-9]{1,10}$/i.test(ext ?? '') ? ext : 'jpg';
+  const basename = `${sha256(bytes)}.${safeExt}`;
+  const rawPath = path.resolve(CONTACTS_RAW_DIR, basename);
+  await mkdir(path.dirname(rawPath), { recursive: true });
+  try {
+    await writeFile(rawPath, bytes, { flag: 'wx' });
+  } catch (writeErr) {
+    if (writeErr.code !== 'EEXIST') throw writeErr;
+  }
+  return basename;
 }
 
 // Build the connector-agnostic contact object from a card's parsed property lines. Labels are

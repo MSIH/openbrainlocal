@@ -58,6 +58,8 @@ npm run import:contacts contacts.vcf
 
 Any embedded contact photo is decoded and preserved to `CONTACTS_RAW_DIR` (default `raw/contacts`, override in `.env`) — the future seed for face-recognition-based photo↔contact linking.
 
+Real imports are messy. Curate contacts — fix emails/phones/addresses, set a photo, and wire up relationships (spouse/parent/child/`worksAt`) — in the browser at **`http://localhost:3000/ui/contacts.html`** (enter your `LIFECONTEXT_API_KEY` once). See [`docs/09-contacts-ui.md`](docs/09-contacts-ui.md).
+
 Consolidate each day's artifacts into one searchable daily digest (schedule it nightly — see [`docs/06-consolidation.md`](docs/06-consolidation.md)):
 
 ```bash
@@ -78,7 +80,7 @@ Recall returns the stored memory with a similarity score. For AI clients, point 
 Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Authorization: Bearer`, or — for clients that can't set headers — an `?api_key=` query param; header preferred, see the caveat above). REST and MCP share one store.
 
 - **REST** — `POST /api/remember`, `POST /api/recall`, `POST /api/search`, `POST /api/timeline`, `POST /api/about_entity`, `GET /api/artifact/:id`
-- **Entity curation** (`/api/v1/entities`, core-owned — never via a connector, see [`docs/03-ob2-design.md §7`](docs/03-ob2-design.md)) — `GET /api/v1/entities/duplicates` (rank likely-duplicate person entities by shared phone/email + name similarity; read-only), `POST /api/v1/entities/merge` (`{keep_id, absorb_id}` — tombstones the absorbed entity, never deletes it, and re-points its aliases/links/relations to the survivor)
+- **Entity curation** (`/api/v1/entities`, core-owned — never via a connector, see [`docs/03-ob2-design.md §7`](docs/03-ob2-design.md)) — `GET /api/v1/entities/duplicates` (rank likely-duplicate person entities by shared phone/email + name similarity; read-only), `POST /api/v1/entities/merge` (`{keep_id, absorb_id}` — tombstones the absorbed entity, never deletes it, and re-points its aliases/links/relations to the survivor), plus the contacts-UI CRUD surface — list/get, create, `PATCH` fields, add/remove aliases & relationships, and photo upload/download (all under `/api/v1/entities`, see [`docs/09-contacts-ui.md`](docs/09-contacts-ui.md)). A browser UI over these lives at `/ui/contacts.html`.
 - **Connector ingest** (`/api/v1`, see [`docs/04-connector-contract.md`](docs/04-connector-contract.md)) — `POST /api/v1/ingest` (submit one artifact; upsert on `(source, source_id)` — 201 create / 200 update, non-destructive issues accepted with a `warnings` array, 256 KB body cap), `POST /api/v1/ingest/batch` (submit 1–100 artifacts in one call; 200 with index-aligned per-item results + a `summary`, per-item isolation — one bad item is reported at its index, never poisons the rest), `GET /api/v1/ingest/types` (the machine-readable type registry, §6). The payload's JSON Schema is published at [`schemas/ingest.v1.json`](schemas/ingest.v1.json) (generated from the zod schema via `npm run schema:ingest`) so connector authors can validate offline, without a live server:
 
   ```bash
