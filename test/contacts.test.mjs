@@ -358,3 +358,43 @@ test('importContacts (#111): a later import does not resurrect an alias removed 
   await importContacts(vcard('FN:Jane Tombstone\nNICKNAME:Janie\nEMAIL:jane.tomb@example.com\nUID:jane-tomb-2'));
   assert.ok(!resolveEntityIds('janie').includes(id), 'the UI-removed nickname is NOT resurrected by a later import');
 });
+
+test('importContacts (#94): a CHANGED card (same UID) updates in place; an unchanged re-import is skipped', async () => {
+  const uid = 'reimport-uid-1';
+  await importContacts(vcard(`FN:Reimport Person\nUID:${uid}\nEMAIL:reimp@example.com`));
+  const before = db.prepare("SELECT id, text_repr, content_hash, ingested_at FROM artifacts WHERE source='vcard' AND source_id=?").get(uid);
+  assert.ok(before, 'created on first import');
+
+  const s1 = await importContacts(vcard(`FN:Reimport Person\nUID:${uid}\nEMAIL:reimp@example.com`));
+  assert.equal(s1.updated, 0, 'unchanged re-import is not an update');
+  assert.equal(s1.skipped, 1, 'unchanged re-import is skipped (no embed, no write)');
+
+  const s2 = await importContacts(vcard(`FN:Reimport Person\nUID:${uid}\nEMAIL:reimp@example.com\nEMAIL:reimp2@example.com`));
+  assert.equal(s2.updated, 1, 'changed re-import counted as updated');
+  assert.equal(s2.artifacts, 0, 'no new artifact created');
+  const after = db.prepare("SELECT id, text_repr, content_hash, ingested_at FROM artifacts WHERE source='vcard' AND source_id=?").get(uid);
+  assert.equal(after.id, before.id, 'same artifact id (in-place update)');
+  assert.match(after.text_repr, /reimp2@example\.com/, 'the new email is in the refreshed text_repr');
+  assert.equal(after.content_hash, before.content_hash, 'content_hash frozen (append-only original)');
+  assert.equal(after.ingested_at, before.ingested_at, 'ingested_at frozen');
+  assert.ok(resolveEntityIds('reimp2@example.com').length > 0, 'the added email resolves as an alias');
+  assert.ok(db.prepare("SELECT COUNT(*) n FROM ingest_log WHERE event_type='ingest_update'").get().n >= 1, 'an ingest_update row was logged');
+});
+
+test('importContacts (#94): a changed re-import respects a UI-removed alias (#111) and does not rewrite the entity profile (#97)', async () => {
+  const uid = 'reimport-uid-2';
+  await importContacts(vcard(`FN:Reimport Two\nUID:${uid}\nEMAIL:rt@example.com\nNICKNAME:Reepy`));
+  const [id] = resolveEntityIds('rt@example.com');
+  assert.ok(resolveEntityIds('reepy').includes(id), 'nickname present after first import');
+  const profBefore = db.prepare('SELECT attrs_json, canonical_name FROM entities WHERE id=?').get(id);
+
+  removeAlias(id, 'reepy', 'name'); // UI removes the nickname
+  assert.ok(!resolveEntityIds('reepy').includes(id), 'nickname removed');
+
+  // Changed re-import still carries NICKNAME:Reepy — must NOT resurrect it, must NOT touch the profile.
+  await importContacts(vcard(`FN:Reimport Two\nUID:${uid}\nEMAIL:rt@example.com\nEMAIL:rt2@example.com\nNICKNAME:Reepy`));
+  assert.ok(!resolveEntityIds('reepy').includes(id), 'UI-removed nickname NOT resurrected by re-import (#111)');
+  const profAfter = db.prepare('SELECT attrs_json, canonical_name FROM entities WHERE id=?').get(id);
+  assert.equal(profAfter.attrs_json, profBefore.attrs_json, 'entity attrs_json unchanged by re-import (#97 owns the profile)');
+  assert.equal(profAfter.canonical_name, profBefore.canonical_name, 'canonical_name unchanged by re-import');
+});

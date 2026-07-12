@@ -1233,6 +1233,9 @@ export function getArtifactById(id) {
 // Raw artifact row by its upsert key, or undefined. Used by the ingest orchestrator to decide
 // whether text_repr changed (and thus whether to re-embed) before opening upsertArtifactTxn.
 export const getArtifactBySource = (source, sourceId) => getArtifactBySourceStmt.get(source, sourceId);
+// The entity a contact artifact self-links to (role='self') — the authoritative owner for the
+// contacts re-import update path (#94), resilient to a post-import merge (links repoint to survivor).
+export const getSelfEntityId = (artifactId) => selectSelfEntityStmt.get(artifactId)?.entity_id ?? null;
 
 function safeJson(s) {
   try { return JSON.parse(s); } catch { return null; }

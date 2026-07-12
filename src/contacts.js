@@ -23,7 +23,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  db, storeArtifactTxn, sha256, logEvent,
+  db, storeArtifactTxn, upsertArtifactTxn, getArtifactBySource, getSelfEntityId, sha256, logEvent,
   insertEntityStmt, insertAliasUnlessTombstoned, resolveEntityIds, normalizeName, normalizePhone, nameVariants,
   canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
   resolveStagedArtifactHints,
@@ -31,7 +31,6 @@ import {
 import { embedToFloat32 } from './embeddings.js';
 import { CONTACTS_RAW_DIR } from './config.js';
 
-const findBySource = db.prepare('SELECT id FROM artifacts WHERE source = ? AND source_id = ?');
 const findByHash = db.prepare('SELECT id FROM artifacts WHERE content_hash = ? LIMIT 1');
 
 // Legacy single-property IM extensions (pre-IMPP). service = the tag after `X-`.
@@ -413,15 +412,54 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
   return { entityCreated, artifactId: res.id, deduped: res.deduped, linksFormed };
 });
 
+// Re-import of a CHANGED, already-imported card (#94): update the derived searchable artifact in
+// place via upsertArtifactTxn — text_repr + embedding + extra_json — while it freezes the originals
+// (raw_path/content_hash/ingested_at) and logs ingest_update. The entity PROFILE (attrs_json/
+// canonical_name) is deliberately NOT touched: the contacts UI owns it (#97). Aliases + relations
+// refresh additively against the self-linked entity, through the tombstone guard (#111) so a
+// UI-removed alias isn't resurrected. Photo stays frozen — carry the existing extra_json.photo
+// forward rather than re-persisting the card's PHOTO. Caller embeds `vec` before this txn opens.
+const updateOneTxn = db.transaction((c, existing, textRepr, vec) => {
+  const entityId = getSelfEntityId(existing.id);
+  const existingExtra = existing.extra_json ? JSON.parse(existing.extra_json) : {};
+  const extra = existingExtra.photo ? { ...structuredFields(c), photo: existingExtra.photo } : structuredFields(c);
+  upsertArtifactTxn(
+    { type: 'contact', source: 'vcard', source_id: c.uid, text_repr: textRepr, extra_json: JSON.stringify(extra) },
+    vec, [],
+  );
+  let linksFormed = 0;
+  if (entityId != null) {
+    for (const alias of nameVariants({ fn: c.fn, given: c.name?.given, family: c.name?.family, additional: c.name?.additional, nicknames: c.nicknames, derive: !c.isCompany }))
+      insertAliasUnlessTombstoned(entityId, alias, 'name');
+    for (const e of c.emails) insertAliasUnlessTombstoned(entityId, normalizeName(e), 'email');
+    for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasUnlessTombstoned(entityId, d, 'phone'); }
+    const relations = c.orgName && !c.isCompany ? [...c.relatedNames, { type: 'worksAt', name: c.orgName }] : c.relatedNames;
+    linkRelations(entityId, existing.id, relations);
+    linksFormed = resolveStagedArtifactHints(entityId);
+  }
+  return { linksFormed };
+});
+
 export async function importContacts(text) {
   const cards = parseVCards(text);
-  let entitiesCreated = 0, artifacts = 0, skipped = 0, photos = 0, linksFormed = 0;
+  let entitiesCreated = 0, artifacts = 0, updated = 0, skipped = 0, photos = 0, linksFormed = 0;
   for (const c of cards) {
     const textRepr = contactTextRepr(c);
     const contentHash = sha256(c.raw);
-    // Pre-check dedup BEFORE embedding, so re-imports don't burn API calls.
-    const exists = c.uid ? findBySource.get('vcard', c.uid) : findByHash.get(contentHash);
-    if (exists) { skipped++; continue; }
+    // UID-bearing card: look up the existing artifact and compare its derived text_repr (#94).
+    // Unchanged → skip with no embed. Changed → update in place. New UID → fall through to create.
+    // (content_hash can't be the change signal: upsertArtifactTxn freezes it to first-seen bytes.)
+    const existing = c.uid ? getArtifactBySource('vcard', c.uid) : null;
+    if (existing) {
+      if (existing.text_repr === textRepr) { skipped++; continue; } // unchanged — no Ollama call, no write
+      const vec = await embedToFloat32(textRepr); // enrich BEFORE the transaction
+      const r = updateOneTxn(c, existing, textRepr, vec); // photo frozen — not re-persisted
+      updated++; linksFormed += r.linksFormed;
+      continue;
+    }
+    // No UID (or a UID not seen before): dedup by content_hash — an exact-content dup is skipped; a
+    // changed no-UID card has a new hash and inserts as new (documented caveat: no stable identity).
+    if (!c.uid && findByHash.get(contentHash)) { skipped++; continue; }
 
     const vec = await embedToFloat32(textRepr); // enrich BEFORE the transaction
     const photo = persistContactPhoto(c.photo); // I/O BEFORE the transaction, same reasoning
@@ -435,7 +473,7 @@ export async function importContacts(text) {
     // file persistContactPhoto just wrote is orphaned, not attached; don't claim it as counted.
     if (photo && !r.deduped) photos++;
   }
-  const summary = { cards: cards.length, entitiesCreated, artifacts, skipped, photos, linksFormed };
+  const summary = { cards: cards.length, entitiesCreated, artifacts, updated, skipped, photos, linksFormed };
   logEvent('import_contacts', 'contacts.js', summary);
   return summary;
 }
@@ -449,7 +487,7 @@ async function main() {
   }
   const summary = await importContacts(readFileSync(file, 'utf8'));
   console.log(
-    `Contacts import complete: ${summary.artifacts} contacts added ` +
+    `Contacts import complete: ${summary.artifacts} added, ${summary.updated} updated ` +
     `(${summary.entitiesCreated} new entities, ${summary.photos} photos preserved), ` +
     `${summary.skipped} skipped, of ${summary.cards} vCards.`
   );
