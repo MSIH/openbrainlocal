@@ -12,6 +12,7 @@
     "import:contacts": "node src/contacts.js",
     "consolidate": "node src/consolidate.js",
     "backfill:relations": "node scripts/backfill-relations.js",
+    "backfill:links": "node scripts/backfill-entity-links.js",
     "schema:ingest": "node scripts/generate-ingest-schema.js",
     "check:boundary": "node scripts/check-boundary.js",
     "geocode:build": "node scripts/build-places.js"

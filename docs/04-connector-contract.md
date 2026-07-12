@@ -161,10 +161,12 @@ The single most important boundary in the contract.
 | Case | Action | Resulting confidence |
 |---|---|---|
 | Alias matches `entity_aliases` exactly (normalized) | Create `entity_links` row | 1.0 for deterministic alias types (email, phone); connector-supplied confidence (capped 0.9) for `name`/`handle` |
-| No match | Insert into `unresolved_aliases` staging table with artifact reference | — (surfaced in an admin/merge UI later; resolving retroactively links all queued artifacts) |
+| No match | Insert into `unresolved_aliases` staging table with artifact reference | — (staged; when a later contact import creates a matching alias, `resolveStagedArtifactHints` links every queued artifact automatically — see below) |
 | Connector supplies `confidence` > its type's cap | Clamp | Deterministic trust is earned by alias type, not asserted by the connector |
 
 Normalization (lowercase, digits-only phones) happens core-side; connectors submit what they see.
+
+**Retroactive resolution (implemented, #102).** A staged (no-match) hint isn't stranded: every contact import runs `resolveStagedArtifactHints` for each entity it touches, so when a later contact supplies the missing alias (email/phone/name), all queued artifacts carrying that hint are linked automatically — no separate command, no schedule. Idempotent (append-only `entity_links`, re-import forms 0 new links). A one-shot `npm run backfill:links` sweeps every entity to heal artifacts staged before this mechanism shipped. (This is why ingest order is a recommendation — contacts first — not a hard constraint: an out-of-order artifact self-heals when its contact arrives.)
 
 **Never in the payload:** entity IDs, entity creation requests, relationship assertions ("this is my sister"). Durable facts enter the graph through contacts import and consolidation, not through connectors.
 

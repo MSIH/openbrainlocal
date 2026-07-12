@@ -512,6 +512,33 @@ export function resolveEntityHints(artifactId, hints) {
   return { resolved, unresolved };
 }
 
+// The entity's own aliases, and the staged artifact hints matching one (alias, alias_type).
+// alias_type != 'relation' keeps person<->person relation staging (resolveRelationHints) out —
+// though entity_aliases never holds a 'relation' type anyway, so the guard is belt-and-suspenders.
+const selectEntityAliasesStmt = db.prepare(`SELECT alias, alias_type FROM entity_aliases WHERE entity_id = ?`);
+const selectArtifactHintsStmt = db.prepare(`SELECT artifact_id, role, hint_confidence FROM unresolved_aliases WHERE alias = ? AND alias_type = ? AND alias_type != 'relation'`);
+
+/**
+ * Retroactively link artifacts whose connector hints (doc 04 §4) were staged in
+ * unresolved_aliases before this entity existed — "resolving retroactively links all queued
+ * artifacts." For each of the entity's own aliases (name/email/phone/handle), form an
+ * entity_links row for every staged hint matching (alias, alias_type). Confidence follows the
+ * same hintConfidence() policy as resolveEntityHints, so ingest-time and retroactive linking
+ * cannot diverge. Append-only + idempotent: staged rows are left in place (mirrors
+ * resolveRelationHints) and the INSERT OR IGNORE + entity_links PK absorb re-runs. Called
+ * automatically on contact import; NOT scheduled. Returns the count of links formed.
+ */
+export function resolveStagedArtifactHints(entityId) {
+  let formed = 0;
+  for (const { alias, alias_type } of selectEntityAliasesStmt.all(entityId)) {
+    for (const hint of selectArtifactHintsStmt.all(alias, alias_type)) {
+      const confidence = hintConfidence(alias_type, hint.hint_confidence);
+      formed += insertLinkStmt.run(hint.artifact_id, entityId, hint.role, confidence).changes;
+    }
+  }
+  return formed;
+}
+
 // Canonical person<->person relation vocabulary (issue #37). Maps an Apple X-ABLabel /
 // Google `type` / Android relation label (lowercased) onto one enum; anything unrecognized is
 // 'custom' with the original label preserved in entity_relations.raw_label.
