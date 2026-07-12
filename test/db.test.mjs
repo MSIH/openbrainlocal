@@ -352,3 +352,42 @@ test('listContactPhotos: dedups an entity with two self-linked photographed arti
   assert.ok(rows[0].raw_path.split(path.sep).join('/').endsWith('raw/contacts/second.jpg'), 'the most recently created contact artifact\'s photo wins');
   assert.ok(path.isAbsolute(rows[0].raw_path), 'a relative raw_path (CONTACTS_RAW_DIR default) is resolved to an absolute path');
 });
+
+test('schema (#110): foreign_keys pragma is ON', () => {
+  assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+});
+
+test('schema (#110): the tightened columns are NOT NULL in table_info', () => {
+  const notnull = (t, c) => db.prepare(`PRAGMA table_info(${t})`).all().find((x) => x.name === c)?.notnull;
+  assert.equal(notnull('entity_aliases', 'entity_id'), 1);
+  assert.equal(notnull('entity_aliases', 'alias_type'), 1);
+  assert.equal(notnull('entity_links', 'role'), 1);
+  assert.equal(notnull('unresolved_aliases', 'alias_type'), 1);
+  assert.equal(notnull('unresolved_aliases', 'role'), 1);
+});
+
+test('schema (#110): FK enforced — an alias/link/relation referencing a nonexistent entity throws', () => {
+  const person = makePerson('FK Guard Person');
+  assert.throws(() => db.prepare('INSERT INTO entity_aliases (entity_id, alias, alias_type) VALUES (?, ?, ?)').run(9_999_999, 'ghost alias', 'name'), /FOREIGN KEY|foreign key/i);
+  assert.throws(() => db.prepare('INSERT INTO entity_links (artifact_id, entity_id, role) VALUES (?, ?, ?)').run(person.artifactId, 9_999_999, 'mentioned'), /FOREIGN KEY|foreign key/i);
+  assert.throws(() => db.prepare('INSERT INTO entity_relations (from_entity_id, to_entity_id, relation_type) VALUES (?, ?, ?)').run(person.entityId, 9_999_999, 'spouse'), /FOREIGN KEY|foreign key/i);
+});
+
+test('schema (#110): NOT NULL enforced — a NULL-role entity_links insert throws (was silently allowed)', () => {
+  const person = makePerson('Null Role Person');
+  assert.throws(() => db.prepare('INSERT INTO entity_links (artifact_id, entity_id, role) VALUES (?, ?, ?)').run(person.artifactId, person.entityId, null), /NOT NULL/i);
+});
+
+test('schema (#110): a born-tight, clean DB logs no not_null rebuild and no integrity violations', () => {
+  const rows = db.prepare("SELECT details FROM ingest_log WHERE event_type IN ('schema_migration','integrity_check')").all();
+  assert.ok(!rows.some((r) => /not_null/.test(r.details || '')), 'no NOT NULL rebuild on a DB born tight from CREATE TABLE');
+  assert.ok(!rows.some((r) => { try { return (JSON.parse(r.details).foreign_key_violations || []).length > 0; } catch { return false; } }), 'no FK violations logged on a clean DB');
+});
+
+test('schema (#110): storeArtifactTxn throws (not silently drops) a link missing role', () => {
+  const e = Number(insertEntityStmt.run('person', 'Roleless Link Person', null).lastInsertRowid);
+  assert.throws(
+    () => storeArtifactTxn({ type: 'note', source: uniqueSource(), text_repr: 'roleless link' }, f32(0.4), [{ entity_id: e }]),
+    /link requires entity_id and role/,
+  );
+});

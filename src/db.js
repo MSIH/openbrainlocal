@@ -16,6 +16,7 @@ import { DB_PATH, VECTOR_DIMENSION } from './config.js';
 export const db = new Database(DB_PATH);
 sqliteVec.load(db);
 db.pragma('journal_mode = WAL'); // concurrent readers (data-model.md rule 5)
+db.pragma('foreign_keys = ON');  // enforce REFERENCES clauses — per-connection, defaults OFF (#110)
 
 // --- SCHEMA (idempotent; VECTOR_DIMENSION must match the embedding model — rule 2) ---
 db.exec(`
@@ -50,16 +51,16 @@ db.exec(`
   );
   -- Identity resolution: "Mom", an email, a phone, and a full name are one entity.
   CREATE TABLE IF NOT EXISTS entity_aliases (
-    entity_id  INTEGER REFERENCES entities(id),
+    entity_id  INTEGER NOT NULL REFERENCES entities(id),
     alias      TEXT NOT NULL,           -- normalized (lowercase names/emails, digits-only phones)
-    alias_type TEXT,                    -- email|phone|name|handle
+    alias_type TEXT NOT NULL,           -- email|phone|name|handle
     UNIQUE(alias, alias_type)
   );
   CREATE INDEX IF NOT EXISTS idx_aliases_entity ON entity_aliases(entity_id);
   CREATE TABLE IF NOT EXISTS entity_links (
     artifact_id INTEGER REFERENCES artifacts(id),
     entity_id   INTEGER REFERENCES entities(id),
-    role        TEXT,                   -- sender|recipient|pictured|mentioned|author|self|location_of
+    role        TEXT NOT NULL,          -- sender|recipient|pictured|mentioned|author|self|location_of
     confidence  REAL DEFAULT 1.0,       -- 1.0 deterministic; <1.0 inferred
     PRIMARY KEY (artifact_id, entity_id, role)
   );
@@ -72,8 +73,8 @@ db.exec(`
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     artifact_id     INTEGER REFERENCES artifacts(id),
     alias           TEXT NOT NULL,       -- normalized (lowercase; digits-only phones)
-    alias_type      TEXT,                -- email|phone|name|handle
-    role            TEXT,
+    alias_type      TEXT NOT NULL,       -- email|phone|name|handle
+    role            TEXT NOT NULL,
     hint_confidence REAL,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(artifact_id, alias, alias_type, role)
@@ -128,7 +129,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS ingest_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved|relation_removed|entity_created|entity_edited|entity_merged|alias_added|alias_removed|schema_migration
+    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved|relation_removed|entity_created|entity_edited|entity_merged|alias_added|alias_removed|schema_migration|integrity_check
     actor       TEXT,
     details     TEXT                    -- JSON
   );
@@ -170,6 +171,100 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_entities_merged_into ON entities(merged_
       .run('schema_migration', 'db.js', JSON.stringify({ migration: 'entities.kind=org', rows: info.changes }));
   }
 }
+
+// --- Integrity enforcement (#110) ---
+// FKs are enforced for NEW writes (pragma at open). Check EXISTING data once at startup —
+// detect-only: design-philosophy §1 forbids deleting stored rows, so a pre-existing orphan is
+// logged (console + an `integrity_check` ingest_log row) and boot continues; repair is a separate,
+// deliberate act. Raw statement, not logEvent/logStmt (not defined until later in this module).
+const logSchemaStmt = db.prepare('INSERT INTO ingest_log (event_type, actor, details) VALUES (?, ?, ?)');
+{
+  const fkViolations = db.pragma('foreign_key_check');            // [] when clean
+  const integrity = db.pragma('integrity_check');                 // [{integrity_check:'ok'}] when clean
+  const integrityOk = integrity.length === 1 && integrity[0].integrity_check === 'ok';
+  if (fkViolations.length > 0 || !integrityOk) {
+    console.error('db.js: startup integrity issues (NOT repaired — design-philosophy §1):',
+      { foreign_key_violations: fkViolations, integrity_check: integrity });
+    logSchemaStmt.run('integrity_check', 'db.js',
+      JSON.stringify({ foreign_key_violations: fkViolations, integrity_check: integrityOk ? 'ok' : integrity }));
+  }
+}
+
+// Guarded NOT NULL tightening (#110): SQLite can't ALTER a column to NOT NULL, so rebuild the table
+// (sqlite.org new-table→INSERT SELECT→drop→rename recipe). Idempotent — skipped once the target
+// column is already NOT NULL (so a fresh DB, born tight from the CREATE TABLE above, never rebuilds).
+// Never coerces/drops data: if the target columns still hold NULLs, or the rebuilt table trips a
+// pre-existing FK orphan, SKIP and log loudly (surfacing corruption beats hiding it, design-philosophy
+// §1). FKs toggle OFF around the rebuild (the pragma is a no-op inside a transaction) and are always
+// restored in `finally`; foreign_key_check re-verifies before commit and rolls back on an orphan.
+function tightenNotNull(table, columns, createNewSql, copyCols, indexSqls) {
+  const info = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.every((c) => info.find((x) => x.name === c)?.notnull === 1)) return; // already migrated
+  const nullRows = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${columns.map((c) => `"${c}" IS NULL`).join(' OR ')}`).get().n;
+  if (nullRows > 0) {
+    console.error(`db.js: NOT NULL migration for ${table} SKIPPED — ${nullRows} row(s) with NULL ${columns.join('/')} (not coerced; design-philosophy §1). Clean these and restart.`);
+    logSchemaStmt.run('integrity_check', 'db.js', JSON.stringify({ migration: `${table}.not_null`, skipped: 'null_rows', null_rows: nullRows, columns }));
+    return;
+  }
+  db.pragma('foreign_keys = OFF'); // must be outside any transaction; restored in finally
+  try {
+    let orphans = [];
+    const rebuild = db.transaction(() => {
+      db.exec(createNewSql);
+      db.exec(`INSERT INTO ${table}_new (${copyCols}) SELECT ${copyCols} FROM ${table}`);
+      db.exec(`DROP TABLE ${table}`);
+      db.exec(`ALTER TABLE ${table}_new RENAME TO ${table}`);
+      for (const ix of indexSqls) db.exec(ix);
+      orphans = db.pragma(`foreign_key_check(${table})`);
+      if (orphans.length > 0) throw new Error('__ROLLBACK_ORPHAN__'); // preserve data; leave table untightened
+    });
+    try {
+      rebuild();
+      logSchemaStmt.run('schema_migration', 'db.js', JSON.stringify({ migration: `${table}.not_null`, columns }));
+    } catch (err) {
+      if (err.message !== '__ROLLBACK_ORPHAN__') throw err;
+      console.error(`db.js: NOT NULL migration for ${table} SKIPPED — ${orphans.length} pre-existing FK orphan(s); table left unchanged (not repaired, design-philosophy §1).`);
+      logSchemaStmt.run('integrity_check', 'db.js', JSON.stringify({ migration: `${table}.not_null`, skipped: 'fk_orphans', orphans: orphans.length, columns }));
+    }
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+tightenNotNull('entity_aliases', ['entity_id', 'alias_type'], `
+  CREATE TABLE entity_aliases_new (
+    entity_id  INTEGER NOT NULL REFERENCES entities(id),
+    alias      TEXT NOT NULL,
+    alias_type TEXT NOT NULL,
+    UNIQUE(alias, alias_type)
+  )`, 'entity_id, alias, alias_type', [
+  'CREATE INDEX IF NOT EXISTS idx_aliases_entity ON entity_aliases(entity_id)',
+]);
+
+tightenNotNull('entity_links', ['role'], `
+  CREATE TABLE entity_links_new (
+    artifact_id INTEGER REFERENCES artifacts(id),
+    entity_id   INTEGER REFERENCES entities(id),
+    role        TEXT NOT NULL,
+    confidence  REAL DEFAULT 1.0,
+    PRIMARY KEY (artifact_id, entity_id, role)
+  )`, 'artifact_id, entity_id, role, confidence', [
+  'CREATE INDEX IF NOT EXISTS idx_links_entity ON entity_links(entity_id)',
+]);
+
+tightenNotNull('unresolved_aliases', ['alias_type', 'role'], `
+  CREATE TABLE unresolved_aliases_new (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_id     INTEGER REFERENCES artifacts(id),
+    alias           TEXT NOT NULL,
+    alias_type      TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    hint_confidence REAL,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(artifact_id, alias, alias_type, role)
+  )`, 'id, artifact_id, alias, alias_type, role, hint_confidence, created_at', [
+  'CREATE INDEX IF NOT EXISTS idx_unresolved_alias ON unresolved_aliases(alias, alias_type)',
+]);
 
 // --- PREPARED STATEMENTS (compiled once) ---
 const insertArtifactStmt = db.prepare(`
@@ -307,7 +402,11 @@ export const storeArtifactTxn = db.transaction((artifact, float32Vector, links =
   // sqlite-vec vec0 PKs MUST bind as BigInt; a plain Number throws (data-model.md rule 1).
   insertVecArtifactStmt.run(BigInt(id), float32Vector);
   for (const l of links) {
-    insertLinkStmt.run(id, l.entity_id, l.role ?? null, l.confidence ?? 1.0);
+    // entity_id + role are the entity_links PK and role is NOT NULL (#110); a missing one would be
+    // silently dropped by INSERT OR IGNORE (it swallows constraint violations, incl. NOT NULL), so
+    // fail fast and surface the caller's bug rather than lose the link (design-philosophy §1).
+    if (l.entity_id == null || l.role == null) throw new Error(`storeArtifactTxn: link requires entity_id and role — got ${JSON.stringify(l)}`);
+    insertLinkStmt.run(id, l.entity_id, l.role, l.confidence ?? 1.0);
   }
   return { id, deduped: false };
 });
