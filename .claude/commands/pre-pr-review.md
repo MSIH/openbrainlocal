@@ -71,10 +71,17 @@ Do NOT write it on `CHANGES-REQUESTED` / `BLOCK` — fix the Blockers, re-run, a
 Then check for a governing issue number on record for the branch: `.claude/.draft-issue-done` (local) or `.claude/.cloud-issue-done` (cloud) holds a value, or the branch's commits already carry a `Closes #<n>` / `Refs #<n>` trailer. If found, proceed straight to `gh pr create` (or the `mcp__github__create_pull_request` MCP tool in cloud sessions) using the Step 3 title/body skeleton — no separate ask. If no issue number is on record (ad hoc work), stop here: report the verdict and skeleton, and wait to be asked before opening the PR.
 
 ## Step 5 — Request bot review
-After the PR is created, request a Copilot review (`--reviewer @copilot` at create, or `gh pr edit <n> --add-reviewer @copilot`). Other bots (Greptile/CodeRabbit) auto-trigger if installed. Bot reviews are comment-only — they never block merge. Surface `gh` errors verbatim; don't retry on org/license errors.
+After the PR is created, request a Copilot review. The mechanism differs by environment (mirrors how Step 3 branches `gh pr create` vs `mcp__github__create_pull_request`):
+- **Local / desktop (has the `gh` CLI):** do NOT use `--reviewer @copilot` / `--add-reviewer @copilot` — `gh` lowercases the login and GitHub GraphQL rejects it (`Could not resolve user with login 'copilot'`); the `@copilot` form even exits 0 while attaching nothing. Use the REST bot login instead:
+  ```bash
+  gh api "repos/MSIH/life-context/pulls/<n>/requested_reviewers" -X POST -f "reviewers[]=copilot-pull-request-reviewer[bot]"
+  ```
+- **Cloud / remote (no `gh`; GitHub via MCP):** use the GitHub MCP tool `mcp__github__request_copilot_review` (`owner`, `repo`, `pullNumber`) — the `github/github-mcp-server` tool `request_copilot_review`, surfaced with the `mcp__github__` prefix (like `mcp__github__create_pull_request` in Step 3), that POSTs `/repos/{owner}/{repo}/pulls/{pullNumber}/copilot/review`. Confirm the exact tool name against the GitHub MCP server wired into the session.
+
+Other bots (Greptile/CodeRabbit) auto-trigger if installed. Bot reviews are comment-only — they never block merge. Surface errors verbatim; don't retry on org/license errors.
 
 ## Step 6 — Monitor & resolve reviews (second-level)
-Poll up to ~10 min for reviews (use the Monitor tool, not a sleep loop). When they arrive, fetch all three endpoints — formal reviews, inline thread comments, PR conversation comments — and triage each: **Accept** (fix; ≥7 before merge), **Defer** (valid, out of scope → follow-up issue, link it), **Dismiss** (invalid / violates a repo convention → cite the rule). Persona findings outrank bot findings on repo conventions (e.g., a bot suggesting a committed `.env`, hardcoded key, or non-`BigInt` vec PK is wrong here). Apply mechanical Accepts, rebuild/smoke, push, resolve every thread. Hard cap: one Copilot re-request per invocation.
+Poll up to ~10 min for reviews (use the Monitor tool, not a sleep loop). Note: Copilot usually reviews within ~1 min and then **drops off `requested_reviewers`** — its output lands in the PR's reviews + inline comments (fetched below), so don't gauge success by an empty `requested_reviewers`. When they arrive, fetch all three endpoints — formal reviews, inline thread comments, PR conversation comments — and triage each: **Accept** (fix; ≥7 before merge), **Defer** (valid, out of scope → follow-up issue, link it), **Dismiss** (invalid / violates a repo convention → cite the rule). Persona findings outrank bot findings on repo conventions (e.g., a bot suggesting a committed `.env`, hardcoded key, or non-`BigInt` vec PK is wrong here). Apply mechanical Accepts, rebuild/smoke, push, resolve every thread. Hard cap: one Copilot re-request per invocation.
 
 ## Step 7 — Post-merge cleanup (automatic — no prompt)
 
