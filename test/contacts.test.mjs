@@ -378,7 +378,8 @@ test('importContacts (#94): a CHANGED card (same UID) updates in place; an uncha
   assert.equal(after.content_hash, before.content_hash, 'content_hash frozen (append-only original)');
   assert.equal(after.ingested_at, before.ingested_at, 'ingested_at frozen');
   assert.ok(resolveEntityIds('reimp2@example.com').length > 0, 'the added email resolves as an alias');
-  assert.ok(db.prepare("SELECT COUNT(*) n FROM ingest_log WHERE event_type='ingest_update'").get().n >= 1, 'an ingest_update row was logged');
+  const updForThisArtifact = db.prepare("SELECT COUNT(*) n FROM ingest_log WHERE event_type='ingest_update' AND json_extract(details,'$.artifact_id') = ?").get(after.id).n;
+  assert.ok(updForThisArtifact >= 1, 'an ingest_update row was logged for THIS artifact');
 });
 
 test('importContacts (#94): a changed re-import respects a UI-removed alias (#111) and does not rewrite the entity profile (#97)', async () => {

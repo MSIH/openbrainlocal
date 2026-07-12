@@ -421,7 +421,13 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
 // forward rather than re-persisting the card's PHOTO. Caller embeds `vec` before this txn opens.
 const updateOneTxn = db.transaction((c, existing, textRepr, vec) => {
   const entityId = getSelfEntityId(existing.id);
-  const existingExtra = existing.extra_json ? JSON.parse(existing.extra_json) : {};
+  // Guard the parse: extra_json is our own JSON, but a manual edit / older-version / partial write
+  // could be malformed — a raw JSON.parse throw would abort the whole import. Treat it as empty
+  // (log, never swallow) so the re-import still refreshes text_repr; only the carried-forward photo
+  // metadata is lost in that (rare) case.
+  let existingExtra = {};
+  try { if (existing.extra_json) existingExtra = JSON.parse(existing.extra_json); }
+  catch (err) { console.error(`contacts: malformed extra_json on re-import of artifact ${existing.id}, treating as empty`, err); }
   const extra = existingExtra.photo ? { ...structuredFields(c), photo: existingExtra.photo } : structuredFields(c);
   upsertArtifactTxn(
     { type: 'contact', source: 'vcard', source_id: c.uid, text_repr: textRepr, extra_json: JSON.stringify(extra) },
