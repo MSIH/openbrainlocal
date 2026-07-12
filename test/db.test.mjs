@@ -383,3 +383,11 @@ test('schema (#110): a born-tight, clean DB logs no not_null rebuild and no inte
   assert.ok(!rows.some((r) => /not_null/.test(r.details || '')), 'no NOT NULL rebuild on a DB born tight from CREATE TABLE');
   assert.ok(!rows.some((r) => { try { return (JSON.parse(r.details).foreign_key_violations || []).length > 0; } catch { return false; } }), 'no FK violations logged on a clean DB');
 });
+
+test('schema (#110): storeArtifactTxn throws (not silently drops) a link missing role', () => {
+  const e = Number(insertEntityStmt.run('person', 'Roleless Link Person', null).lastInsertRowid);
+  assert.throws(
+    () => storeArtifactTxn({ type: 'note', source: uniqueSource(), text_repr: 'roleless link' }, f32(0.4), [{ entity_id: e }]),
+    /link requires entity_id and role/,
+  );
+});

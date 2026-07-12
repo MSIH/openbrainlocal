@@ -402,7 +402,11 @@ export const storeArtifactTxn = db.transaction((artifact, float32Vector, links =
   // sqlite-vec vec0 PKs MUST bind as BigInt; a plain Number throws (data-model.md rule 1).
   insertVecArtifactStmt.run(BigInt(id), float32Vector);
   for (const l of links) {
-    insertLinkStmt.run(id, l.entity_id, l.role ?? null, l.confidence ?? 1.0);
+    // entity_id + role are the entity_links PK and role is NOT NULL (#110); a missing one would be
+    // silently dropped by INSERT OR IGNORE (it swallows constraint violations, incl. NOT NULL), so
+    // fail fast and surface the caller's bug rather than lose the link (design-philosophy §1).
+    if (l.entity_id == null || l.role == null) throw new Error(`storeArtifactTxn: link requires entity_id and role — got ${JSON.stringify(l)}`);
+    insertLinkStmt.run(id, l.entity_id, l.role, l.confidence ?? 1.0);
   }
   return { id, deduped: false };
 });
