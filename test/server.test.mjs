@@ -6,6 +6,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import path from 'node:path';
 import { useTempDb, startFakeOllama, f32 } from './helpers.mjs';
 
 const API_KEY = 'test-key-0123456789-not-the-placeholder';
@@ -183,7 +184,7 @@ test('/api/v1/entities/photos (#84): only photographed live person entities, for
   const { contacts } = await res.json();
   const found = contacts.find((c) => c.entity_id === photographed);
   assert.ok(found, 'the photographed contact is returned');
-  assert.equal(found.raw_path, '/raw/contacts/rest-photo.jpg');
+  assert.equal(found.raw_path, path.resolve('/raw/contacts/rest-photo.jpg'));
   assert.ok(!contacts.some((c) => c.entity_id === noPhoto), 'a contact with no preserved photo is excluded');
 });
 
