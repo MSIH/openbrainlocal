@@ -75,6 +75,21 @@ Stop the moment a decision needs judgment about a *person* rather than a *record
 
 ---
 
+## Ingest order & what happens on a no-match
+
+**The order is two tiers, not a five-step chain.**
+
+1. **Tier 1 — contacts (recommended first).** Importing people first seeds the graph — each becomes an `entity` + its aliases — so Tier-2 hints resolve the moment they arrive instead of waiting to self-heal (see below). It's the recommended order, not an enforced one.
+2. **Tier 2 — everything else** (photos, emails, documents, texts): ingest in **any order**. Tier-2 artifacts carry entity *hints* (an email address, a phone, a name) that link to the *entities* contacts created — they never link to each other, so no Tier-2 source depends on another. Photos-before-emails, emails-before-texts: it doesn't matter.
+
+**Contacts-first is a recommendation, not a hard requirement.** An artifact ingested before its contact exists is **not** dropped or rejected:
+
+- It is stored, embedded, and FTS-indexed like any other artifact — fully recallable by **meaning, keyword, time, and place** immediately.
+- Only the **entity link** is deferred: the unmatched hint is staged in `unresolved_aliases` (see [`03-ob2-design.md §2.2`](03-ob2-design.md) and [`04-connector-contract.md §4`](04-connector-contract.md)). Until it resolves, that artifact won't surface under `about_entity("<person>")` or an entity-filtered search — everything else about it works.
+- When you later import the matching contact, the stage resolves **automatically** (`resolveStagedArtifactHints` runs on every contact import) and every queued artifact links to the new person — no re-ingest, no separate command (#102). A one-shot `npm run backfill:links` heals anything staged before that mechanism existed.
+
+So the cost of ingesting out of order is temporary (missing person links until the contact lands), never permanent — which is why contacts-first is the *recommended* sequence rather than an enforced one.
+
 ## Other sources
 
-*Placeholder — photo-prep and document-prep checklists will land here as the [`photo-exif`](../connectors/photo-exif/) and [`documents`](../connectors/documents/) pipelines mature. The same principle applies: cheap normalization at the source, judgment in-system.*
+Source-side prep checklists for other Tier-2 inputs — photos ([`photo-exif`](../connectors/photo-exif/)) and documents ([`documents`](../connectors/documents/)) — will be added here as those pipelines mature. The same principle carries over: cheap normalization at the source, judgment in-system.
