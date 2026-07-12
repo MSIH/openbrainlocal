@@ -24,7 +24,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   db, storeArtifactTxn, sha256, logEvent,
-  insertEntityStmt, insertAliasStmt, resolveEntityIds, normalizeName, normalizePhone, nameVariants,
+  insertEntityStmt, insertAliasUnlessTombstoned, resolveEntityIds, normalizeName, normalizePhone, nameVariants,
   canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
   resolveStagedArtifactHints,
 } from './db.js';
@@ -381,10 +381,12 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
   // (#93) so a related-name reference that drops the middle name or pairs a nickname with the
   // surname still resolves. INSERT OR IGNORE makes the (nick-only) overlap with the base case safe.
   // `derive` is off for orgs — a company name has no given/family to reduce (#93 review).
+  // Through the tombstone guard (#111) so a re-import can't resurrect an alias the user deliberately
+  // removed in the UI. INSERT OR IGNORE inside the helper keeps the nick-only overlap safe.
   for (const alias of nameVariants({ fn: c.fn, given: c.name?.given, family: c.name?.family, additional: c.name?.additional, nicknames: c.nicknames, derive: !c.isCompany }))
-    insertAliasStmt.run(entityId, alias, 'name');
-  for (const e of c.emails) insertAliasStmt.run(entityId, normalizeName(e), 'email');
-  for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasStmt.run(entityId, d, 'phone'); }
+    insertAliasUnlessTombstoned(entityId, alias, 'name');
+  for (const e of c.emails) insertAliasUnlessTombstoned(entityId, normalizeName(e), 'email');
+  for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasUnlessTombstoned(entityId, d, 'phone'); }
   // Retroactively link artifacts whose hints were staged before this person's aliases existed
   // (#102). Unconditional (a dedup-merge can pool new aliases too); idempotent, so a re-import
   // forms 0 new links. This is the automatic steady-state path — not a scheduled job.

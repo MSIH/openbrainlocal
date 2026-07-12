@@ -326,7 +326,7 @@ Near-term community-obvious connectors that need **zero core changes** once this
 
 ## 11. Open Questions (deliberately unresolved in v1)
 
-- **Deletion/tombstones** — when a source deletes an item (a recalled message, a deleted photo), should connectors be able to propagate that? Leaning yes-eventually via `DELETE /api/v1/ingest/:source/:source_id`, but the memory-system philosophy ("memories don't un-happen") argues for a `superseded` flag over hard deletes. Deferred.
+- **Deletion/tombstones (artifacts)** — when a source deletes an item (a recalled message, a deleted photo), should connectors be able to propagate that? Leaning yes-eventually via `DELETE /api/v1/ingest/:source/:source_id`, but the memory-system philosophy ("memories don't un-happen") argues for a `superseded` flag over hard deletes. Deferred. **Partially resolved for entity aliases (#111):** a UI-removed contact alias now records an `alias_tombstones` row so an additive re-import/edit/hint can't silently resurrect it (an explicit re-add clears it) — the alias sub-case of "represent that a value is no longer known" is handled; artifact-level deletion/supersession is still deferred.
 - **Connector-supplied embeddings** — explicitly rejected for v1 (breaks the model-swap freedom in §3); revisit only if a connector emerges with a genuinely better representation (e.g., CLIP for visual similarity — which doc 03 §3.3 already scopes as a *core* second index, not a connector concern).
 - **Backpressure on the event lane** — is a per-stream events/day cap needed, or is rate limiting enough? Wait for real abuse before adding knobs (lazy-branching doctrine).
 - **Per-connector keys** — committed direction (§7), unscheduled.

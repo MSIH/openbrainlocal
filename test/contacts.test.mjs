@@ -17,7 +17,7 @@ const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-test-contacts-raw-'));
 process.env.CONTACTS_RAW_DIR = rawDir;
 
 const { parsePhoto, persistContactPhoto, importContacts, parseVCards, contactTextRepr } = await import('../src/contacts.js');
-const { db, getArtifactById, nameVariants, storeArtifactTxn, resolveEntityHints, insertEntityStmt, insertAliasStmt } = await import('../src/db.js');
+const { db, getArtifactById, nameVariants, storeArtifactTxn, resolveEntityHints, insertEntityStmt, insertAliasStmt, resolveEntityIds, removeAlias } = await import('../src/db.js');
 const { VECTOR_DIMENSION } = await import('../src/config.js');
 const { backfillEntityLinks } = await import('../scripts/backfill-entity-links.js');
 
@@ -340,4 +340,21 @@ test('resolveStagedArtifactHints: same-role email+name hints keep deterministic 
   const links = db.prepare('SELECT confidence FROM entity_links WHERE artifact_id=? AND entity_id=? AND role=?').all(artifactId, entity.id, 'sender');
   assert.equal(links.length, 1, 'the two same-role hints collapse to one link');
   assert.equal(links[0].confidence, 1.0, 'the deterministic email link wins the collision, not the capped name');
+});
+
+test('importContacts (#111): a later import does not resurrect an alias removed via the UI', async () => {
+  // First import: Jane, with a nickname + email.
+  await importContacts(vcard('FN:Jane Tombstone\nNICKNAME:Janie\nEMAIL:jane.tomb@example.com\nUID:jane-tomb-1'));
+  const [id] = resolveEntityIds('jane.tomb@example.com');
+  assert.ok(id, 'entity created on first import');
+  assert.ok(resolveEntityIds('janie').includes(id), 'nickname resolves after first import');
+
+  // User removes the "janie" alias in the UI.
+  removeAlias(id, 'janie', 'name');
+  assert.ok(!resolveEntityIds('janie').includes(id), 'nickname no longer resolves after removal');
+
+  // A later import under a DIFFERENT uid resolves to the SAME entity via the shared email and would
+  // re-add "janie" — the tombstone must suppress it (the #94-blocking resurrection repro).
+  await importContacts(vcard('FN:Jane Tombstone\nNICKNAME:Janie\nEMAIL:jane.tomb@example.com\nUID:jane-tomb-2'));
+  assert.ok(!resolveEntityIds('janie').includes(id), 'the UI-removed nickname is NOT resurrected by a later import');
 });
