@@ -306,7 +306,14 @@ export function contactTextRepr(c) {
   if (c.phones.length) parts.push(`Phone: ${c.phones.join(', ')}`);
   if (c.birthday) parts.push(`Birthday: ${c.birthday}`);
   for (const d of c.dates) parts.push(`${d.type}: ${formatVcardDate(d.value)}`);
-  if (c.address) parts.push(`Address: ${c.address}`);
+  // All addresses, not just the last-parsed scalar `c.address` (#92): a contact with several
+  // mailing addresses must be recallable by any of them. filter(Boolean) drops an empty ADR
+  // (a component-only line like `ADR:;;;;;;` flattens to '') so we don't emit a bare "Address: ",
+  // matching the old `if (c.address)` skip; de-dup (vCard/CSV often carry near-identical variants);
+  // the '; ' separator avoids collision with the ', ' inside one flattened address (the ADR join
+  // above). c.addresses is always defined ([] default in finalizeCard).
+  const uniqueAddresses = [...new Set(c.addresses.filter(Boolean))];
+  if (uniqueAddresses.length) parts.push(`Address: ${uniqueAddresses.join('; ')}`);
   for (const r of c.relatedNames) parts.push(`${r.type}: ${r.name}`);
   if (c.urls.length) parts.push(`URL: ${c.urls.join(', ')}`);
   if (c.im.length) parts.push(`IM: ${c.im.map((i) => (i.service ? `${i.service}:${i.handle}` : i.handle)).join(', ')}`);
