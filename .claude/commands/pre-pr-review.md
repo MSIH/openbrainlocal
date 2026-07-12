@@ -76,7 +76,7 @@ After the PR is created, request a Copilot review. The mechanism differs by envi
   ```bash
   gh api "repos/MSIH/life-context/pulls/<n>/requested_reviewers" -X POST -f "reviewers[]=copilot-pull-request-reviewer[bot]"
   ```
-- **Cloud / remote (no `gh`; GitHub via MCP):** use the GitHub MCP tool `request_copilot_review` (`owner`, `repo`, `pullNumber`) — the `github/github-mcp-server` tool that POSTs `/repos/{owner}/{repo}/pulls/{pullNumber}/copilot/review`. Confirm the exact tool name against the GitHub MCP server wired into the session.
+- **Cloud / remote (no `gh`; GitHub via MCP):** use the GitHub MCP tool `mcp__github__request_copilot_review` (`owner`, `repo`, `pullNumber`) — the `github/github-mcp-server` tool `request_copilot_review`, surfaced with the `mcp__github__` prefix (like `mcp__github__create_pull_request` in Step 3), that POSTs `/repos/{owner}/{repo}/pulls/{pullNumber}/copilot/review`. Confirm the exact tool name against the GitHub MCP server wired into the session.
 
 Other bots (Greptile/CodeRabbit) auto-trigger if installed. Bot reviews are comment-only — they never block merge. Surface errors verbatim; don't retry on org/license errors.
 
