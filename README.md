@@ -58,6 +58,8 @@ npm run import:contacts contacts.vcf
 
 Any embedded contact photo is decoded and preserved to `CONTACTS_RAW_DIR` (default `raw/contacts`, override in `.env`) — the future seed for face-recognition-based photo↔contact linking.
 
+**Ingest order.** There are two tiers, not a five-step chain: **Tier 1 — contacts** (they seed the entity graph); **Tier 2 — everything else** (photos, emails, documents, texts), in *any* order. Tier-2 sources link to *entities*, never to each other, so nothing among them depends on the rest. Contacts-first is a recommendation, not a hard constraint: an artifact ingested before its contact exists is still stored and fully searchable (by meaning, keyword, time, place) — only the person link is deferred, and it forms automatically when that contact is later imported (see [`docs/08-preparing-contacts.md`](docs/08-preparing-contacts.md#ingest-order--what-happens-on-a-no-match)).
+
 Real imports are messy. Curate contacts — fix emails/phones/addresses, set a photo, and wire up relationships (spouse/parent/child/`worksAt`) — in the browser at **`http://localhost:3000/ui/contacts.html`** (enter your `LIFECONTEXT_API_KEY` once). See [`docs/09-contacts-ui.md`](docs/09-contacts-ui.md).
 
 Consolidate each day's artifacts into one searchable daily digest (schedule it nightly — see [`docs/06-consolidation.md`](docs/06-consolidation.md)):
