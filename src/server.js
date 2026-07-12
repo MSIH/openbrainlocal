@@ -453,9 +453,32 @@ app.post('/api/v1/entities/merge', requireAuth, wrap(async (req, res) => {
 
 // #84 — photographed contacts, for photo-exif's face-worker suggest-labels command to use as
 // reference faces. Read-only; core never touches face descriptors (doc 04 §11, both directions).
+// Shared contact-photo resolver (#112): the single precedence BOTH the UI route and the
+// face-match source honor — the uploaded UI override (attrs.photoFile, confined to
+// CONTACT_PHOTO_DIR + existence-checked) wins over the imported vCard photo (raw_path). Returns an
+// absolute path that exists on disk, or null. Defined before the first user (this /photos route)
+// so the two readers share one definition rather than diverging as they did before #112.
+const CONTACT_PHOTO_DIR = path.resolve(CONTACTS_RAW_DIR);
+const fileExists = async (p) => { try { await access(p); return true; } catch { return false; } };
+async function resolveContactPhotoFile({ photoFile, rawPath }) {
+  if (photoFile) {
+    const resolved = path.resolve(CONTACT_PHOTO_DIR, photoFile);
+    if (resolved.startsWith(CONTACT_PHOTO_DIR + path.sep) && await fileExists(resolved)) return resolved;
+  }
+  if (rawPath && await fileExists(rawPath)) return rawPath;
+  return null;
+}
+
 app.get('/api/v1/entities/photos', requireAuth, wrap(async (req, res) => {
   const { limit } = ContactPhotosQuerySchema.parse(req.query);
-  res.json({ contacts: listContactPhotos(limit ?? 100) });
+  // Apply the shared precedence to each candidate pair; drop contacts whose current photo isn't on
+  // disk. Output keeps the `raw_path` FIELD NAME (fetchContactPhotos' wire contract) but its value
+  // is now the RESOLVED current photo — the uploaded override if present, else the imported vCard.
+  const resolved = await Promise.all(listContactPhotos(limit ?? 100).map(async (r) => {
+    const file = await resolveContactPhotoFile({ photoFile: r.photo_file, rawPath: r.raw_path });
+    return file ? { entity_id: r.entity_id, name: r.name, raw_path: file } : null;
+  }));
+  res.json({ contacts: resolved.filter(Boolean) });
 }));
 
 // --- CONTACTS CURATION SURFACE (#96) ---
@@ -540,26 +563,15 @@ app.post('/api/v1/entities/:id/photo', requireAuth, express.raw({ type: () => tr
 // Photo download: the uploaded override (attrs.photoFile, confined to CONTACTS_RAW_DIR) wins over
 // the imported vCard photo (raw_path); 404 when the contact has neither. The UI fetches this with
 // the key header and renders the blob (a plain <img src> can't send x-api-key).
-const CONTACT_PHOTO_DIR = path.resolve(CONTACTS_RAW_DIR);
-const fileExists = async (p) => { try { await access(p); return true; } catch { return false; } };
 app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
   const { id } = IdParamSchema.parse(req.params);
   const profile = getEntityProfile(id);
   if (!profile) return res.status(404).json({ error: "Not found" });
-  let file = null;
-  const uploaded = profile.entity.attrs?.photoFile;
-  if (uploaded) {
-    const resolved = path.resolve(CONTACT_PHOTO_DIR, uploaded);
-    if (resolved.startsWith(CONTACT_PHOTO_DIR + path.sep) && await fileExists(resolved)) file = resolved;
-  }
-  if (!file) {
-    const imported = getContactPhotoRawPath(id);
-    if (imported && await fileExists(imported)) file = imported;
-  }
+  const file = await resolveContactPhotoFile({ photoFile: profile.entity.attrs?.photoFile, rawPath: getContactPhotoRawPath(id) });
   if (!file) return res.status(404).json({ error: "No photo" });
   // dotfiles:'allow' — send() defaults to 'ignore', which 404s any path whose segments start with
-  // a dot (e.g. a data dir under a hidden ancestor). The path is already confined + stat'd above,
-  // so serving it is safe; send still sets Content-Type from the extension.
+  // a dot (e.g. a data dir under a hidden ancestor). The path is already confined + stat'd (in
+  // resolveContactPhotoFile), so serving it is safe; send still sets Content-Type from the extension.
   res.sendFile(file, { dotfiles: 'allow' });
 }));
 

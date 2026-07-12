@@ -7,6 +7,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import path from 'node:path';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { useTempDb, startFakeOllama, f32 } from './helpers.mjs';
 
 const API_KEY = 'test-key-0123456789-not-the-placeholder';
@@ -15,6 +17,12 @@ const fake = await startFakeOllama();
 process.env.LIFECONTEXT_API_KEY = API_KEY;
 process.env.OLLAMA_BASE_URL = fake.baseUrl;
 process.env.PORT = '0'; // ephemeral port — avoids collisions with a real running server
+// Real on-disk photo store: the /entities/photos + /:id/photo routes existence-check files (#112),
+// so contact photos in these tests must be real files under CONTACTS_RAW_DIR. Set before the app
+// import — server.js resolves CONTACT_PHOTO_DIR from CONTACTS_RAW_DIR at load.
+const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-server-raw-'));
+process.env.CONTACTS_RAW_DIR = rawDir;
+const writePhoto = (name) => { const p = path.join(rawDir, name); writeFileSync(p, 'img-bytes'); return p; };
 
 const { app, serverInstance, secureCompare } = await import('../src/server.js');
 const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn, upsertEntityRelation } = await import('../src/db.js');
@@ -32,6 +40,7 @@ after(async () => {
   db.close();
   await fake.close();
   cleanup();
+  rmSync(rawDir, { recursive: true, force: true });
 });
 
 const post = (path, body, headers = {}) =>
@@ -164,10 +173,11 @@ test('/api/v1/entities/duplicates + /api/v1/entities/merge (#75): surfaces, merg
 });
 
 test('/api/v1/entities/photos (#84): only photographed live person entities, for face-worker reference matching', async () => {
+  const importedPath = writePhoto('rest-photo.jpg');
   const photographed = Number(insertEntityStmt.run('person', 'REST Photo Person', JSON.stringify({})).lastInsertRowid);
   insertAliasStmt.run(photographed, 'rest photo person', 'name');
   storeArtifactTxn(
-    { type: 'contact', source: 'rest-photo-test', source_id: `contact-${photographed}`, text_repr: 'REST Photo Person contact card', raw_path: '/raw/contacts/rest-photo.jpg' },
+    { type: 'contact', source: 'rest-photo-test', source_id: `contact-${photographed}`, text_repr: 'REST Photo Person contact card', raw_path: importedPath },
     f32(0.5),
     [{ entity_id: photographed, role: 'self', confidence: 1.0 }],
   );
@@ -184,8 +194,50 @@ test('/api/v1/entities/photos (#84): only photographed live person entities, for
   const { contacts } = await res.json();
   const found = contacts.find((c) => c.entity_id === photographed);
   assert.ok(found, 'the photographed contact is returned');
-  assert.equal(found.raw_path, path.resolve('/raw/contacts/rest-photo.jpg'));
+  assert.equal(found.raw_path, importedPath);
   assert.ok(!contacts.some((c) => c.entity_id === noPhoto), 'a contact with no preserved photo is excluded');
+});
+
+test('/api/v1/entities/photos (#112): honors the uploaded-photo precedence for face matching', async () => {
+  // (a) uploaded-only — attrs.photoFile set, NO imported raw_path. Pre-#112 this was dropped
+  // (WHERE raw_path IS NOT NULL); it must now appear with the uploaded file (the core bug).
+  const uploadedFile = writePhoto('uploaded-only.jpg');
+  const uploadedOnly = Number(insertEntityStmt.run('person', 'Uploaded Only Person', JSON.stringify({ photoFile: 'uploaded-only.jpg' })).lastInsertRowid);
+  insertAliasStmt.run(uploadedOnly, 'uploaded only person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: 'prec-test', source_id: `contact-${uploadedOnly}`, text_repr: 'Uploaded Only Person contact card' },
+    f32(0.5), [{ entity_id: uploadedOnly, role: 'self', confidence: 1.0 }],
+  );
+  // (b) both — uploaded override wins over the imported vCard photo.
+  const bothUpload = writePhoto('both-upload.jpg');
+  const bothImport = writePhoto('both-import.jpg');
+  const both = Number(insertEntityStmt.run('person', 'Both Photos Person', JSON.stringify({ photoFile: 'both-upload.jpg' })).lastInsertRowid);
+  insertAliasStmt.run(both, 'both photos person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: 'prec-test', source_id: `contact-${both}`, text_repr: 'Both Photos Person contact card', raw_path: bothImport },
+    f32(0.5), [{ entity_id: both, role: 'self', confidence: 1.0 }],
+  );
+  // (c) missing uploaded file on disk → fall back to the imported photo (mirrors the UI route).
+  const fallbackImport = writePhoto('fallback-import.jpg');
+  const fallback = Number(insertEntityStmt.run('person', 'Fallback Person', JSON.stringify({ photoFile: 'ghost-missing.jpg' })).lastInsertRowid);
+  insertAliasStmt.run(fallback, 'fallback person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: 'prec-test', source_id: `contact-${fallback}`, text_repr: 'Fallback Person contact card', raw_path: fallbackImport },
+    f32(0.5), [{ entity_id: fallback, role: 'self', confidence: 1.0 }],
+  );
+
+  const res = await get('/api/v1/entities/photos?limit=200', { 'x-api-key': API_KEY });
+  assert.equal(res.status, 200);
+  const { contacts } = await res.json();
+  const byId = new Map(contacts.map((c) => [c.entity_id, c]));
+  assert.equal(byId.get(uploadedOnly)?.raw_path, uploadedFile, 'uploaded-only contact appears with the uploaded file');
+  assert.equal(byId.get(both)?.raw_path, bothUpload, 'uploaded override wins over imported');
+  assert.equal(byId.get(fallback)?.raw_path, fallbackImport, 'missing uploaded file falls back to imported');
+  // Wire contract unchanged: every entry is { entity_id, name, raw_path } with an absolute path.
+  for (const c of contacts) {
+    assert.ok(typeof c.entity_id === 'number' && typeof c.name === 'string' && path.isAbsolute(c.raw_path),
+      'each entry is {entity_id, name, absolute raw_path}');
+  }
 });
 
 test('/api/about_entity (#88): an org carries its employees in relations_in (reverse worksAt edge)', async () => {
