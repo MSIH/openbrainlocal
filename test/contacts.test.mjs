@@ -16,7 +16,7 @@ process.env.OLLAMA_BASE_URL = fake.baseUrl;
 const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-test-contacts-raw-'));
 process.env.CONTACTS_RAW_DIR = rawDir;
 
-const { parsePhoto, persistContactPhoto, importContacts, parseVCards } = await import('../src/contacts.js');
+const { parsePhoto, persistContactPhoto, importContacts, parseVCards, contactTextRepr } = await import('../src/contacts.js');
 const { db, getArtifactById, nameVariants } = await import('../src/db.js');
 
 after(async () => { db.close(); await fake.close(); cleanup(); rmSync(rawDir, { recursive: true, force: true }); });
@@ -181,6 +181,28 @@ test('parseVCards: Google/Android X-SPOUSE / X-CHILD parse into relatedNames wit
     { type: 'child', name: 'Some Kid' },
     { type: 'manager', name: 'The Boss' },
   ]);
+});
+
+test('contactTextRepr: embeds ALL addresses (not just the last), de-duped, empties dropped (#92)', () => {
+  const [c] = parseVCards(vcard(
+    'FN:Multi Addr\n' +
+    'ADR;TYPE=HOME:;;12 Barkwood Court;Rockville;MD;20850;US\n' +
+    'ADR;TYPE=WORK:;;9 Nicholson Lane;Rockville;MD;20852;US\n' +
+    'ADR;TYPE=HOME:;;12 Barkwood Court;Rockville;MD;20850;US\n' +   // exact dup of the first
+    'ADR;TYPE=OTHER:;;;;;;'                                          // empty ADR -> flattens to ''
+  ));
+  const text = contactTextRepr(c);
+  assert.match(text, /Barkwood Court/);                              // non-last address present
+  assert.match(text, /Nicholson Lane/);                              // last address present
+  assert.equal((text.match(/Barkwood Court/g) || []).length, 1);     // de-duped
+  assert.doesNotMatch(text, /Address: ;|; ;|; \./);                  // no bare/empty entry from the empty ADR
+});
+
+test('contactTextRepr: single address is unchanged (regression) and no address emits no Address line', () => {
+  const [one] = parseVCards(vcard('FN:One Addr\nADR;TYPE=HOME:;;5013 Russett Rd;Rockville;MD;20853;US'));
+  assert.match(contactTextRepr(one), /Address: 5013 Russett Rd, Rockville, MD, 20853, US\./);
+  const [none] = parseVCards(vcard('FN:No Addr\nEMAIL:noaddr@example.com'));
+  assert.doesNotMatch(contactTextRepr(none), /Address:/);
 });
 
 test('nameVariants: middle name yields a given+family alias; two-token name adds no redundant duplicate', () => {
