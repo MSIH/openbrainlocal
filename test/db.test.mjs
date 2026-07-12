@@ -13,6 +13,7 @@ const {
   db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById,
   insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates, listContactPhotos,
   resolveEntityIds, getEntity, upsertEntityRelation, listEntities,
+  addAlias, removeAlias, insertAliasUnlessTombstoned,
 } = await import('../src/db.js');
 
 after(() => { db.close(); cleanup(); });
@@ -390,4 +391,41 @@ test('schema (#110): storeArtifactTxn throws (not silently drops) a link missing
     () => storeArtifactTxn({ type: 'note', source: uniqueSource(), text_repr: 'roleless link' }, f32(0.4), [{ entity_id: e }]),
     /link requires entity_id and role/,
   );
+});
+
+test('alias tombstone (#111): removeAlias tombstones; additive re-add suppressed; explicit addAlias clears', () => {
+  const e = Number(insertEntityStmt.run('person', 'Tombstone Person', null).lastInsertRowid);
+  addAlias(e, 'betsy', 'name');
+  assert.ok(resolveEntityIds('betsy').includes(e), 'alias resolves after add');
+  removeAlias(e, 'betsy', 'name');
+  assert.ok(!resolveEntityIds('betsy').includes(e), 'removed alias no longer resolves');
+  // simulate an import/re-import/edit/hint trying to re-add it → suppressed by the tombstone
+  assert.equal(insertAliasUnlessTombstoned(e, 'betsy', 'name'), 0, 'additive re-add is a no-op');
+  assert.ok(!resolveEntityIds('betsy').includes(e), 'still not resolvable after an additive attempt');
+  // explicit user re-add overrides: clears the tombstone and inserts
+  addAlias(e, 'betsy', 'name');
+  assert.ok(resolveEntityIds('betsy').includes(e), 'explicit addAlias overrides the tombstone');
+  // tombstone cleared → a later additive insert is allowed again (dup here, but not suppressed)
+  removeAlias(e, 'betsy', 'name');
+  addAlias(e, 'betsy', 'name');
+  assert.ok(resolveEntityIds('betsy').includes(e), 're-removal then re-add works (tombstone lifecycle)');
+});
+
+test('alias tombstone (#111): scoped per entity — a tombstone on one entity does not suppress another', () => {
+  const a = Number(insertEntityStmt.run('person', 'Chris One', null).lastInsertRowid);
+  const b = Number(insertEntityStmt.run('person', 'Chris Two', null).lastInsertRowid);
+  addAlias(a, 'chrisx', 'handle');
+  removeAlias(a, 'chrisx', 'handle'); // tombstone on a only
+  assert.equal(insertAliasUnlessTombstoned(a, 'chrisx', 'handle'), 0, 'suppressed on the tombstoned entity');
+  assert.equal(insertAliasUnlessTombstoned(b, 'chrisx', 'handle'), 1, 'allowed on a different entity');
+  assert.ok(resolveEntityIds('chrisx').includes(b));
+});
+
+test('alias tombstone (#111): tombstone insert is idempotent (re-removal adds 0 rows)', () => {
+  const e = Number(insertEntityStmt.run('person', 'Idem Tombstone', null).lastInsertRowid);
+  addAlias(e, 'idemtomb', 'handle');
+  removeAlias(e, 'idemtomb', 'handle');
+  removeAlias(e, 'idemtomb', 'handle'); // second removal — OR IGNORE, no duplicate
+  const n = db.prepare('SELECT COUNT(*) AS n FROM alias_tombstones WHERE entity_id = ? AND alias = ? AND alias_type = ?').get(e, 'idemtomb', 'handle').n;
+  assert.equal(n, 1, 'exactly one tombstone row despite two removals');
 });

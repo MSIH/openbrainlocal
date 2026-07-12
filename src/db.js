@@ -57,6 +57,20 @@ db.exec(`
     UNIQUE(alias, alias_type)
   );
   CREATE INDEX IF NOT EXISTS idx_aliases_entity ON entity_aliases(entity_id);
+
+  -- Deliberately-removed aliases (#111). A removal records a tombstone here so a later ADDITIVE
+  -- write (contact import/re-import #94, a profile edit, hint resolution) can't silently resurrect
+  -- it; an explicit user addAlias clears the tombstone (user intent overrides). Scoped per entity —
+  -- removing "chris" from one person doesn't suppress it on another. Append-only + idempotent via
+  -- the UNIQUE key, same discipline as entity_aliases/entity_relations.
+  CREATE TABLE IF NOT EXISTS alias_tombstones (
+    entity_id  INTEGER NOT NULL REFERENCES entities(id),
+    alias      TEXT NOT NULL,           -- normalized identically to entity_aliases
+    alias_type TEXT NOT NULL,           -- email|phone|name|handle
+    removed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(entity_id, alias, alias_type)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tombstone_lookup ON alias_tombstones(entity_id, alias, alias_type);
   CREATE TABLE IF NOT EXISTS entity_links (
     artifact_id INTEGER REFERENCES artifacts(id),
     entity_id   INTEGER REFERENCES entities(id),
@@ -129,7 +143,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS ingest_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved|relation_removed|entity_created|entity_edited|entity_merged|alias_added|alias_removed|schema_migration|integrity_check
+    event_type  TEXT NOT NULL,          -- migrate|import_contacts|store_note|dedup_skip|ingest_create|ingest_update|relation_added|relation_resolved|relation_removed|entity_created|entity_edited|entity_merged|alias_added|alias_removed|alias_tombstone_cleared|schema_migration|integrity_check
     actor       TEXT,
     details     TEXT                    -- JSON
   );
@@ -1046,6 +1060,19 @@ const profileArtifactsStmt = db.prepare(`
 `);
 const updateEntityRowStmt = db.prepare('UPDATE entities SET canonical_name = COALESCE(?, canonical_name), attrs_json = ? WHERE id = ?');
 const deleteAliasStmt = db.prepare('DELETE FROM entity_aliases WHERE entity_id = ? AND alias = ? AND alias_type = ?');
+// Alias tombstones (#111): a removal records one here; additive inserts consult it, an explicit
+// add clears it. All callers pass an ALREADY-normalized alias (same normalization as entity_aliases).
+const insertTombstoneStmt = db.prepare('INSERT OR IGNORE INTO alias_tombstones (entity_id, alias, alias_type) VALUES (?, ?, ?)');
+const deleteTombstoneStmt = db.prepare('DELETE FROM alias_tombstones WHERE entity_id = ? AND alias = ? AND alias_type = ?');
+const hasTombstoneStmt = db.prepare('SELECT 1 FROM alias_tombstones WHERE entity_id = ? AND alias = ? AND alias_type = ?');
+// The additive-insert guard: import/re-import (#94), profile edits, and hint resolution route alias
+// creation through this so a tombstoned (deliberately-removed) alias is NOT resurrected. Returns the
+// number of rows inserted (0 when suppressed by a tombstone or an OR IGNORE duplicate). The alias
+// must already be normalized. Explicit user re-adds (addAlias) bypass this and clear the tombstone.
+export function insertAliasUnlessTombstoned(entityId, alias, aliasType) {
+  if (hasTombstoneStmt.get(entityId, alias, aliasType)) return 0;
+  return insertAliasStmt.run(entityId, alias, aliasType).changes;
+}
 const getRelationByIdStmt = db.prepare('SELECT * FROM entity_relations WHERE id = ?');
 const deleteRelationStmt = db.prepare('DELETE FROM entity_relations WHERE id = ?');
 // The self-linked contact artifact's photo (most-recent, mirroring listContactPhotos' subquery).
@@ -1108,9 +1135,9 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
   for (const e of emails) assertNoAliasConflict(-1, e, 'email');
   for (const p of phones) assertNoAliasConflict(-1, p, 'phone');
   const id = Number(insertEntityStmt.run(kind, canonical_name, JSON.stringify(attrs)).lastInsertRowid);
-  for (const alias of nameVariants({ fn: canonical_name, nicknames: attrs.nicknames, derive: kind === 'person' })) insertAliasStmt.run(id, alias, 'name');
-  for (const e of emails) insertAliasStmt.run(id, e, 'email');
-  for (const p of phones) insertAliasStmt.run(id, p, 'phone');
+  for (const alias of nameVariants({ fn: canonical_name, nicknames: attrs.nicknames, derive: kind === 'person' })) insertAliasUnlessTombstoned(id, alias, 'name');
+  for (const e of emails) insertAliasUnlessTombstoned(id, e, 'email');
+  for (const p of phones) insertAliasUnlessTombstoned(id, p, 'phone');
   logEvent('entity_created', 'contacts-ui', { entity_id: id, kind, canonical_name });
   return id;
 });
@@ -1132,11 +1159,11 @@ export const updateEntityAttrs = db.transaction((id, { canonical_name = null, at
   for (const e of newEmails) if (!oldEmails.includes(e)) assertNoAliasConflict(id, e, 'email');
   for (const p of newPhones) if (!oldPhones.includes(p)) assertNoAliasConflict(id, p, 'phone');
   if (canonical_name && canonical_name !== cur.canonical_name)
-    for (const alias of nameVariants({ fn: canonical_name, nicknames: next.nicknames, derive: cur.kind === 'person' })) insertAliasStmt.run(id, alias, 'name');
-  for (const e of newEmails) if (!oldEmails.includes(e)) insertAliasStmt.run(id, e, 'email');
-  for (const e of oldEmails) if (!newEmails.includes(e)) deleteAliasStmt.run(id, e, 'email');
-  for (const p of newPhones) if (!oldPhones.includes(p)) insertAliasStmt.run(id, p, 'phone');
-  for (const p of oldPhones) if (!newPhones.includes(p)) deleteAliasStmt.run(id, p, 'phone');
+    for (const alias of nameVariants({ fn: canonical_name, nicknames: next.nicknames, derive: cur.kind === 'person' })) insertAliasUnlessTombstoned(id, alias, 'name');
+  for (const e of newEmails) if (!oldEmails.includes(e)) insertAliasUnlessTombstoned(id, e, 'email');
+  for (const e of oldEmails) if (!newEmails.includes(e)) { deleteAliasStmt.run(id, e, 'email'); insertTombstoneStmt.run(id, e, 'email'); } // tombstone so a re-import can't re-add it (#111)
+  for (const p of newPhones) if (!oldPhones.includes(p)) insertAliasUnlessTombstoned(id, p, 'phone');
+  for (const p of oldPhones) if (!newPhones.includes(p)) { deleteAliasStmt.run(id, p, 'phone'); insertTombstoneStmt.run(id, p, 'phone'); }
   updateEntityRowStmt.run(canonical_name, JSON.stringify(next), id);
   logEvent('entity_edited', 'contacts-ui', { entity_id: id, before, after: next, renamed_to: canonical_name && canonical_name !== cur.canonical_name ? canonical_name : null });
   return { updated: true };
@@ -1147,6 +1174,8 @@ export const addAlias = db.transaction((id, alias, alias_type) => {
   const a = normalizeAlias(alias, alias_type);
   if (!a) { const err = new Error('empty alias'); err.code = 'BAD_ALIAS'; throw err; }
   assertNoAliasConflict(id, a, alias_type);
+  // Explicit user re-add overrides a prior removal (#111): clear the tombstone, then insert directly.
+  if (deleteTombstoneStmt.run(id, a, alias_type).changes > 0) logEvent('alias_tombstone_cleared', 'contacts-ui', { entity_id: id, alias: a, alias_type });
   const added = insertAliasStmt.run(id, a, alias_type).changes > 0;
   if (added) logEvent('alias_added', 'contacts-ui', { entity_id: id, alias: a, alias_type });
   return { added };
@@ -1155,7 +1184,14 @@ export const addAlias = db.transaction((id, alias, alias_type) => {
 export const removeAlias = db.transaction((id, alias, alias_type) => {
   const a = normalizeAlias(alias, alias_type);
   const removed = deleteAliasStmt.run(id, a, alias_type).changes > 0;
-  if (removed) logEvent('alias_removed', 'contacts-ui', { entity_id: id, alias: a, alias_type });
+  if (removed) {
+    // Durably record the removal (#111) so an additive re-add (import/re-import/edit/hint) can't
+    // silently resurrect it — the tombstone is the append-only memory the bare delete lacked
+    // (idempotent, OR IGNORE). Only when a row was actually removed: `removed` implies an
+    // entity_aliases row existed, so (FK, #110) the entity exists and the tombstone insert is safe.
+    insertTombstoneStmt.run(id, a, alias_type);
+    logEvent('alias_removed', 'contacts-ui', { entity_id: id, alias: a, alias_type });
+  }
   return { removed };
 });
 
@@ -1202,3 +1238,4 @@ function safeJson(s) {
 
 // Entity write statements exposed for the contacts connector (composes its own txn).
 export { insertEntityStmt, insertAliasStmt, selectIdByHashStmt };
+// insertAliasUnlessTombstoned is exported at its definition (used by the contacts importer, #111).
