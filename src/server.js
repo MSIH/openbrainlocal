@@ -570,8 +570,9 @@ app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
   const file = await resolveContactPhotoFile({ photoFile: profile.entity.attrs?.photoFile, rawPath: getContactPhotoRawPath(id) });
   if (!file) return res.status(404).json({ error: "No photo" });
   // dotfiles:'allow' — send() defaults to 'ignore', which 404s any path whose segments start with
-  // a dot (e.g. a data dir under a hidden ancestor). The path is already confined + stat'd (in
-  // resolveContactPhotoFile), so serving it is safe; send still sets Content-Type from the extension.
+  // a dot (e.g. a data dir under a hidden ancestor). resolveContactPhotoFile already validated it
+  // (an uploaded photoFile is confined to CONTACT_PHOTO_DIR; both branches are existence-checked via
+  // access()), so serving it is safe; send still sets Content-Type from the extension.
   res.sendFile(file, { dotfiles: 'allow' });
 }));
 
