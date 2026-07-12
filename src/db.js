@@ -515,8 +515,12 @@ export function resolveEntityHints(artifactId, hints) {
 // The entity's own aliases, and the staged artifact hints matching one (alias, alias_type).
 // alias_type != 'relation' keeps person<->person relation staging (resolveRelationHints) out —
 // though entity_aliases never holds a 'relation' type anyway, so the guard is belt-and-suspenders.
-const selectEntityAliasesStmt = db.prepare(`SELECT alias, alias_type FROM entity_aliases WHERE entity_id = ?`);
-const selectArtifactHintsStmt = db.prepare(`SELECT artifact_id, role, hint_confidence FROM unresolved_aliases WHERE alias = ? AND alias_type = ? AND alias_type != 'relation'`);
+// ORDER BY deterministic-first: when multiple hints share one (artifact, entity, role) they collide
+// on entity_links' PK and INSERT OR IGNORE keeps the FIRST — so email/phone (1.0) must be tried
+// before name/handle, or a capped-0.9 name link would wrongly shadow a deterministic match. Within
+// a type, higher supplied confidence wins.
+const selectEntityAliasesStmt = db.prepare(`SELECT alias, alias_type FROM entity_aliases WHERE entity_id = ? ORDER BY CASE alias_type WHEN 'email' THEN 0 WHEN 'phone' THEN 0 ELSE 1 END`);
+const selectArtifactHintsStmt = db.prepare(`SELECT artifact_id, role, hint_confidence FROM unresolved_aliases WHERE alias = ? AND alias_type = ? AND alias_type != 'relation' ORDER BY hint_confidence DESC`);
 
 /**
  * Retroactively link artifacts whose connector hints (doc 04 §4) were staged in

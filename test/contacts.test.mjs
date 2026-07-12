@@ -321,3 +321,23 @@ test('backfill:links: heals an artifact staged before its (externally-created) e
   // Idempotent: a second sweep forms 0 new links.
   assert.equal(backfillEntityLinks().linksFormed, 0, 'second backfill forms nothing new');
 });
+
+test('resolveStagedArtifactHints: same-role email+name hints keep deterministic 1.0 (email tried before name)', async () => {
+  // Both hints share role 'sender' -> they collide on entity_links' (artifact,entity,role) PK, so
+  // only the first INSERT OR IGNORE wins. Name aliases are inserted before email on import, so
+  // without deterministic-first ordering the capped-0.9 name link would shadow the 1.0 email.
+  const { id: artifactId } = storeArtifactTxn(
+    { type: 'email', source: 'gmail', source_id: 'msg:samerole:1', text_repr: 'Email from Same Role Sender' },
+    new Float32Array(VECTOR_DIMENSION), [],
+  );
+  resolveEntityHints(artifactId, [
+    { alias: 'Same Role Sender', alias_type: 'name', role: 'sender', confidence: 0.9 },
+    { alias: 'same.role@example.com', alias_type: 'email', role: 'sender' },
+  ]);
+  await importContacts(vcard('FN:Same Role Sender\nEMAIL:same.role@example.com'));
+
+  const entity = db.prepare("SELECT id FROM entities WHERE canonical_name='Same Role Sender'").get();
+  const links = db.prepare('SELECT confidence FROM entity_links WHERE artifact_id=? AND entity_id=? AND role=?').all(artifactId, entity.id, 'sender');
+  assert.equal(links.length, 1, 'the two same-role hints collapse to one link');
+  assert.equal(links[0].confidence, 1.0, 'the deterministic email link wins the collision, not the capped name');
+});
