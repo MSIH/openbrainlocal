@@ -47,7 +47,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .row { padding: 10px 16px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; gap: 10px; align-items: center; }
 .row:hover { background: var(--chip); }
 .row.selected { background: var(--chip); box-shadow: inset 3px 0 0 var(--accent); }
-.row .avatar { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; background: var(--chip); flex: none; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+.row .avatar { position: relative; width: 34px; height: 34px; border-radius: 50%; object-fit: cover; background: var(--chip); flex: none; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+/* Small camera badge on the avatar corner for contacts that have a photo (#113). */
+.row .photo-badge { position: absolute; bottom: -2px; right: -2px; font-size: 10px; line-height: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 50%; padding: 1px; }
 .row .rname { font-weight: 600; }
 .row .rmeta { color: var(--muted); font-size: 12px; }
 .kind-badge { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }

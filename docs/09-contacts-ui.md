@@ -27,7 +27,7 @@ Core-owned curation surface — never a connector concern (contract §1.2), same
 
 | Method + path | Body / query | Result |
 |---|---|---|
-| `GET /api/v1/entities` | `?query&kind&limit&offset` | `{ entities: [{id, kind, canonical_name, attrs}] }` |
+| `GET /api/v1/entities` | `?query&kind&limit&offset` | `{ entities: [{id, kind, canonical_name, attrs, hasPhoto}] }` |
 | `GET /api/v1/entities/:id` | — | `{ entity, aliases[], relations[], relations_in[], artifacts[] }` |
 | `POST /api/v1/entities` | `{ kind: person\|org, canonical_name, attrs? }` | `201 { id }` |
 | `PATCH /api/v1/entities/:id` | `{ canonical_name?, attrs? }` | `{ updated: true }` |
@@ -65,6 +65,9 @@ Backing helpers live in `src/db.js` (`listEntities`, `getEntityProfile`, `create
   → the imported vCard photo (`raw_path`) → none. The UI fetches `/photo` as a blob with the key
   header and renders it (a plain `<img src>` can't send `x-api-key`). Cap: `CONTACT_PHOTO_MAX_BYTES`
   (default 10 MB → `413`); non-image `Content-Type` → `415`. Uploaded files are gitignored (`raw/`).
+  The **list** marks which contacts have a photo with a small 📷 badge on the avatar, driven by
+  `hasPhoto` on `GET /api/v1/entities` (uploaded `photoFile` OR imported `raw_path`) — no per-row
+  image fetch (#113). This is the same "effective photo" precedence the face-match source uses (#112).
 
 ## Boundaries (out of scope)
 

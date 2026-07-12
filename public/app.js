@@ -99,8 +99,12 @@ function renderList(entities) {
   for (const e of entities) {
     const attrs = e.attrs || {};
     const meta = attrs.emails?.[0] || attrs.phones?.[0] || attrs.org || '';
+    // Avatar shows initials; a 📷 badge marks contacts that have a photo (uploaded or imported) —
+    // hasPhoto comes from the list endpoint, so no per-row image fetch here.
+    const avatar = el('div', { class: 'avatar' }, initials(e.canonical_name));
+    if (e.hasPhoto) avatar.append(el('span', { class: 'photo-badge', title: 'Has a photo' }, '📷'));
     const row = el('div', { class: 'row' + (e.id === currentId ? ' selected' : ''), 'data-id': e.id, onclick: () => selectContact(e.id) },
-      el('div', { class: 'avatar' }, initials(e.canonical_name)),
+      avatar,
       el('div', {},
         el('div', { class: 'rname' }, e.canonical_name, e.kind === 'org' ? ' ' : '', e.kind === 'org' ? el('span', { class: 'kind-badge' }, 'org') : ''),
         meta ? el('div', { class: 'rmeta' }, meta) : ''),
