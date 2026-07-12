@@ -79,7 +79,7 @@ Stop the moment a decision needs judgment about a *person* rather than a *record
 
 **The order is two tiers, not a five-step chain.**
 
-1. **Tier 1 — contacts.** Import these *first*: every person becomes an `entity` + its aliases, seeding the graph everything else resolves against.
+1. **Tier 1 — contacts (recommended first).** Importing people first seeds the graph — each becomes an `entity` + its aliases — so Tier-2 hints resolve the moment they arrive instead of waiting to self-heal (see below). It's the recommended order, not an enforced one.
 2. **Tier 2 — everything else** (photos, emails, documents, texts): ingest in **any order**. Tier-2 artifacts carry entity *hints* (an email address, a phone, a name) that link to the *entities* contacts created — they never link to each other, so no Tier-2 source depends on another. Photos-before-emails, emails-before-texts: it doesn't matter.
 
 **Contacts-first is a recommendation, not a hard requirement.** An artifact ingested before its contact exists is **not** dropped or rejected:
@@ -92,4 +92,4 @@ So the cost of ingesting out of order is temporary (missing person links until t
 
 ## Other sources
 
-*Placeholder — photo-prep and document-prep checklists will land here as the [`photo-exif`](../connectors/photo-exif/) and [`documents`](../connectors/documents/) pipelines mature. The same principle applies: cheap normalization at the source, judgment in-system.*
+Source-side prep checklists for other Tier-2 inputs — photos ([`photo-exif`](../connectors/photo-exif/)) and documents ([`documents`](../connectors/documents/)) — will be added here as those pipelines mature. The same principle carries over: cheap normalization at the source, judgment in-system.
