@@ -12,7 +12,7 @@ const { cleanup } = useTempDb();
 const {
   db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById,
   insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates, listContactPhotos,
-  resolveEntityIds, getEntity, upsertEntityRelation,
+  resolveEntityIds, getEntity, upsertEntityRelation, listEntities,
 } = await import('../src/db.js');
 
 after(() => { db.close(); cleanup(); });
@@ -312,6 +312,24 @@ test('listContactPhotos: only live person entities with a preserved contact phot
   mergeEntities(photographed.entityId, absorbTarget.entityId);
   const afterMerge = listContactPhotos(100);
   assert.ok(!afterMerge.some((p) => p.entity_id === absorbTarget.entityId), 'a tombstoned entity is excluded from contact-photo listings');
+});
+
+test('listEntities: hasPhoto true for an imported raw_path OR an uploaded photoFile, false otherwise (#113)', () => {
+  const imported = makePerson('Photo Imported Person', { rawPath: '/raw/contacts/imp.jpg' });
+  // Uploaded-only: an entity with attrs.photoFile but a self-linked artifact WITHOUT a raw_path
+  // (the #97 UI-upload shape) — has_photo (SQL, raw_path) is false, so hasPhoto must come from photoFile.
+  const uploadedId = Number(insertEntityStmt.run('person', 'Photo Uploaded Person', JSON.stringify({ photoFile: 'abc123.jpg' })).lastInsertRowid);
+  insertAliasStmt.run(uploadedId, 'photo uploaded person', 'name');
+  storeArtifactTxn(
+    { type: 'contact', source: uniqueSource(), source_id: `contact-${uploadedId}`, text_repr: 'Photo Uploaded Person contact card' },
+    f32(0.5), [{ entity_id: uploadedId, role: 'self', confidence: 1.0 }],
+  );
+  const none = makePerson('Photo None Person', {});
+
+  const byId = new Map(listEntities({ limit: 500 }).map((e) => [e.id, e]));
+  assert.equal(byId.get(imported.entityId)?.hasPhoto, true, 'imported raw_path -> hasPhoto true');
+  assert.equal(byId.get(uploadedId)?.hasPhoto, true, 'uploaded attrs.photoFile -> hasPhoto true');
+  assert.equal(byId.get(none.entityId)?.hasPhoto, false, 'no photo -> hasPhoto false');
 });
 
 test('listContactPhotos: dedups an entity with two self-linked photographed artifacts to one row, and resolves a relative raw_path to absolute (#84)', () => {

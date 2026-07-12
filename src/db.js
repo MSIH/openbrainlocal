@@ -914,7 +914,12 @@ export function listContactPhotos(limit = 100) {
 // curation state (raw `contact` artifacts stay append-only; nothing here touches them), and every
 // mutation logs to ingest_log with before/after so the derived record's history is reconstructable.
 const listEntitiesStmt = db.prepare(`
-  SELECT id, kind, canonical_name, attrs_json FROM entities
+  SELECT id, kind, canonical_name, attrs_json,
+    EXISTS (
+      SELECT 1 FROM entity_links el JOIN artifacts a ON a.id = el.artifact_id
+      WHERE el.entity_id = entities.id AND el.role = 'self' AND a.raw_path IS NOT NULL
+    ) AS has_photo
+  FROM entities
   WHERE merged_into IS NULL
     AND (@kind IS NULL OR kind = @kind)
     AND (@like IS NULL
@@ -961,9 +966,14 @@ const PROFILE_ARTIFACT_LIMIT = 10;
 
 export function listEntities({ kind = null, query = null, limit = 50, offset = 0 } = {}) {
   const like = query && query.trim() ? `%${normalizeName(query)}%` : null;
-  return listEntitiesStmt.all({ kind, like, limit, offset }).map((e) => ({
-    id: e.id, kind: e.kind, canonical_name: e.canonical_name, attrs: e.attrs_json ? safeJson(e.attrs_json) : null,
-  }));
+  return listEntitiesStmt.all({ kind, like, limit, offset }).map((e) => {
+    const attrs = e.attrs_json ? safeJson(e.attrs_json) : null;
+    // hasPhoto: same "effective photo" precedence as the /photo route + #112 — an uploaded
+    // override (attrs.photoFile) OR an imported vCard photo (self-linked artifact raw_path,
+    // computed as has_photo in SQL). Lets the list badge which contacts have a picture without
+    // fetching any image.
+    return { id: e.id, kind: e.kind, canonical_name: e.canonical_name, attrs, hasPhoto: Boolean(e.has_photo) || Boolean(attrs?.photoFile) };
+  });
 }
 
 export function getEntityProfile(id) {
