@@ -17,7 +17,9 @@ const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-test-contacts-raw-'));
 process.env.CONTACTS_RAW_DIR = rawDir;
 
 const { parsePhoto, persistContactPhoto, importContacts, parseVCards, contactTextRepr } = await import('../src/contacts.js');
-const { db, getArtifactById, nameVariants } = await import('../src/db.js');
+const { db, getArtifactById, nameVariants, storeArtifactTxn, resolveEntityHints, insertEntityStmt, insertAliasStmt } = await import('../src/db.js');
+const { VECTOR_DIMENSION } = await import('../src/config.js');
+const { backfillEntityLinks } = await import('../scripts/backfill-entity-links.js');
 
 after(async () => { db.close(); await fake.close(); cleanup(); rmSync(rawDir, { recursive: true, force: true }); });
 
@@ -260,4 +262,82 @@ test('importContacts: X-SPOUSE relation forms across a middle-name variant, rega
   const to = db.prepare("SELECT id FROM entities WHERE canonical_name='Zoe Beatrix Quill'").get();
   const edge = db.prepare('SELECT relation_type FROM entity_relations WHERE from_entity_id=? AND to_entity_id=?').get(from.entity_id, to.id);
   assert.equal(edge?.relation_type, 'spouse', 'spouse edge formed from referrer to the middle-name entity');
+});
+
+// --- Retroactive linking of staged artifact hints (#102) ---
+
+test('importContacts: retroactively links an artifact whose hint was staged before the contact existed (#102)', async () => {
+  // Ingest an artifact hinting an email (deterministic) + a name for a person not yet in the graph.
+  // Both miss, so both stage in unresolved_aliases and no entity_links form.
+  const { id: artifactId } = storeArtifactTxn(
+    { type: 'photo', source: 'photo-exif', source_id: 'IMG_RETRO_1.jpg', text_repr: 'Photo with Retro Friend' },
+    new Float32Array(VECTOR_DIMENSION), [],
+  );
+  const staged = resolveEntityHints(artifactId, [
+    { alias: 'retro.friend@example.com', alias_type: 'email', role: 'pictured' },
+    { alias: 'Retro Friend', alias_type: 'name', role: 'mentioned', confidence: 0.8 },
+  ]);
+  assert.equal(staged.resolved, 0);
+  assert.equal(staged.unresolved, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM entity_links WHERE artifact_id=?').get(artifactId).n, 0, 'no link before the contact exists');
+
+  // Import the contact -> resolveStagedArtifactHints links the queued artifact automatically (no
+  // separate command). Distinct roles => two distinct entity_links (same role would collide on the
+  // (artifact,entity,role) PK and only the first alias iterated would win).
+  const summary = await importContacts(vcard('FN:Retro Friend\nEMAIL:retro.friend@example.com'));
+  assert.equal(summary.linksFormed, 2, 'both staged hints link on import');
+
+  const entity = db.prepare("SELECT id FROM entities WHERE canonical_name='Retro Friend'").get();
+  const emailLink = db.prepare('SELECT confidence FROM entity_links WHERE artifact_id=? AND entity_id=? AND role=?').get(artifactId, entity.id, 'pictured');
+  const nameLink = db.prepare('SELECT confidence FROM entity_links WHERE artifact_id=? AND entity_id=? AND role=?').get(artifactId, entity.id, 'mentioned');
+  assert.equal(emailLink?.confidence, 1.0, 'email hint links at deterministic confidence 1.0');
+  assert.equal(nameLink?.confidence, 0.8, 'name hint keeps its (sub-cap) supplied confidence');
+
+  // Idempotent: a second import forms 0 new links, leaving exactly the two.
+  const second = await importContacts(vcard('FN:Retro Friend\nEMAIL:retro.friend@example.com'));
+  assert.equal(second.linksFormed, 0, 'no new links on re-import');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM entity_links WHERE artifact_id=?').get(artifactId).n, 2, 'still exactly two links');
+});
+
+test('backfill:links: heals an artifact staged before its (externally-created) entity existed (#102)', async () => {
+  // Stage a hint that misses, THEN create the entity + alias directly (bypassing importContacts,
+  // so the auto-resolve on import never runs) — the exact "stranded before the resolver shipped"
+  // state that `npm run backfill:links` exists to heal.
+  const { id: artifactId } = storeArtifactTxn(
+    { type: 'email', source: 'gmail', source_id: 'msg:backfill:1', text_repr: 'Email from Backfill Person' },
+    new Float32Array(VECTOR_DIMENSION), [],
+  );
+  assert.equal(resolveEntityHints(artifactId, [{ alias: 'backfill.person@example.com', alias_type: 'email', role: 'sender' }]).unresolved, 1);
+
+  const entityId = Number(insertEntityStmt.run('person', 'Backfill Person', null).lastInsertRowid);
+  insertAliasStmt.run(entityId, 'backfill.person@example.com', 'email');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM entity_links WHERE artifact_id=?').get(artifactId).n, 0, 'still stranded before backfill');
+
+  const first = backfillEntityLinks();
+  assert.ok(first.linksFormed >= 1, 'backfill forms the stranded link');
+  const link = db.prepare('SELECT confidence FROM entity_links WHERE artifact_id=? AND entity_id=? AND role=?').get(artifactId, entityId, 'sender');
+  assert.equal(link?.confidence, 1.0, 'email hint links at deterministic confidence 1.0');
+
+  // Idempotent: a second sweep forms 0 new links.
+  assert.equal(backfillEntityLinks().linksFormed, 0, 'second backfill forms nothing new');
+});
+
+test('resolveStagedArtifactHints: same-role email+name hints keep deterministic 1.0 (email tried before name)', async () => {
+  // Both hints share role 'sender' -> they collide on entity_links' (artifact,entity,role) PK, so
+  // only the first INSERT OR IGNORE wins. Name aliases are inserted before email on import, so
+  // without deterministic-first ordering the capped-0.9 name link would shadow the 1.0 email.
+  const { id: artifactId } = storeArtifactTxn(
+    { type: 'email', source: 'gmail', source_id: 'msg:samerole:1', text_repr: 'Email from Same Role Sender' },
+    new Float32Array(VECTOR_DIMENSION), [],
+  );
+  resolveEntityHints(artifactId, [
+    { alias: 'Same Role Sender', alias_type: 'name', role: 'sender', confidence: 0.9 },
+    { alias: 'same.role@example.com', alias_type: 'email', role: 'sender' },
+  ]);
+  await importContacts(vcard('FN:Same Role Sender\nEMAIL:same.role@example.com'));
+
+  const entity = db.prepare("SELECT id FROM entities WHERE canonical_name='Same Role Sender'").get();
+  const links = db.prepare('SELECT confidence FROM entity_links WHERE artifact_id=? AND entity_id=? AND role=?').all(artifactId, entity.id, 'sender');
+  assert.equal(links.length, 1, 'the two same-role hints collapse to one link');
+  assert.equal(links[0].confidence, 1.0, 'the deterministic email link wins the collision, not the capped name');
 });

@@ -26,6 +26,7 @@ import {
   db, storeArtifactTxn, sha256, logEvent,
   insertEntityStmt, insertAliasStmt, resolveEntityIds, normalizeName, normalizePhone, nameVariants,
   canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
+  resolveStagedArtifactHints,
 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { CONTACTS_RAW_DIR } from './config.js';
@@ -384,6 +385,10 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
     insertAliasStmt.run(entityId, alias, 'name');
   for (const e of c.emails) insertAliasStmt.run(entityId, normalizeName(e), 'email');
   for (const p of c.phones) { const d = normalizePhone(p); if (d) insertAliasStmt.run(entityId, d, 'phone'); }
+  // Retroactively link artifacts whose hints were staged before this person's aliases existed
+  // (#102). Unconditional (a dedup-merge can pool new aliases too); idempotent, so a re-import
+  // forms 0 new links. This is the automatic steady-state path — not a scheduled job.
+  const linksFormed = resolveStagedArtifactHints(entityId);
 
   const extra = photo ? { ...structuredFields(c), photo } : structuredFields(c);
   const res = storeArtifactTxn(
@@ -403,12 +408,12 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
       : c.relatedNames;
     linkRelations(entityId, res.id, relations);
   }
-  return { entityCreated, artifactId: res.id, deduped: res.deduped };
+  return { entityCreated, artifactId: res.id, deduped: res.deduped, linksFormed };
 });
 
 export async function importContacts(text) {
   const cards = parseVCards(text);
-  let entitiesCreated = 0, artifacts = 0, skipped = 0, photos = 0;
+  let entitiesCreated = 0, artifacts = 0, skipped = 0, photos = 0, linksFormed = 0;
   for (const c of cards) {
     const textRepr = contactTextRepr(c);
     const contentHash = sha256(c.raw);
@@ -421,13 +426,14 @@ export async function importContacts(text) {
     const r = importOneTxn(c, textRepr, contentHash, vec, photo);
     if (r.deduped) skipped++; else artifacts++;
     if (r.entityCreated) entitiesCreated++;
+    linksFormed += r.linksFormed;
     // Only count a photo actually attached to a newly-stored artifact — on the rare dedup race
     // (a concurrent import commits the same (source, source_id) between this loop's pre-check
     // and the transaction), storeArtifactTxn returns the pre-existing row untouched and the
     // file persistContactPhoto just wrote is orphaned, not attached; don't claim it as counted.
     if (photo && !r.deduped) photos++;
   }
-  const summary = { cards: cards.length, entitiesCreated, artifacts, skipped, photos };
+  const summary = { cards: cards.length, entitiesCreated, artifacts, skipped, photos, linksFormed };
   logEvent('import_contacts', 'contacts.js', summary);
   return summary;
 }
