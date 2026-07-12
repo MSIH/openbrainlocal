@@ -49,7 +49,7 @@ Nothing is sent for a cluster until you name it — an unnamed cluster is just a
 
 #### `suggest-labels` — pre-name clusters from contact photos (#84)
 
-Speeds up labeling by using each contact's own preserved photo (core's vCard `PHOTO` import, #74) as a reference face. It only ever **prints** candidate matches to stderr — it never writes `cluster.label` and never emits an ingest hint. You still confirm with the existing `label <id> "<name>"` command; a wrong auto-label would be worse than an anonymous cluster.
+Speeds up labeling by using each contact's **current** photo as a reference face — the UI-uploaded override (`attrs.photoFile`, #97) if present, else the imported vCard photo (core's `PHOTO` import, #74) — the same photo the contacts UI shows (`GET /api/v1/entities/photos` applies that precedence, #112). It only ever **prints** candidate matches to stderr — it never writes `cluster.label` and never emits an ingest hint. You still confirm with the existing `label <id> "<name>"` command; a wrong auto-label would be worse than an anonymous cluster.
 
 ```bash
 node face-worker.js suggest-labels

@@ -879,15 +879,18 @@ export function listProbableDuplicates(limit = 20) {
 // back to a tombstoned e.id) — kept anyway as defense-in-depth, matching this file's dominant
 // style of explicit liveness checks (getLiveEntityStmt, listLivePersonEntitiesStmt).
 const listContactPhotosStmt = db.prepare(`
-  SELECT entity_id, name, raw_path FROM (
+  SELECT entity_id, name, photo_file, raw_path FROM (
     SELECT e.id AS entity_id, e.canonical_name AS name,
+      -- Uploaded UI override (#97), a bare basename; json_valid guards a malformed attrs_json
+      -- (unconstrained TEXT) so json_extract can't throw at query time (mirrors the #88 migration).
+      CASE WHEN json_valid(e.attrs_json) THEN json_extract(e.attrs_json, '$.photoFile') END AS photo_file,
       (SELECT a.raw_path FROM entity_links el JOIN artifacts a ON a.id = el.artifact_id
        WHERE el.entity_id = e.id AND el.role = 'self' AND a.raw_path IS NOT NULL
        ORDER BY a.id DESC LIMIT 1) AS raw_path
     FROM entities e
     WHERE e.kind = 'person' AND e.merged_into IS NULL
   )
-  WHERE raw_path IS NOT NULL
+  WHERE photo_file IS NOT NULL OR raw_path IS NOT NULL
   ORDER BY entity_id
   LIMIT ?
 `);
@@ -896,6 +899,10 @@ const listContactPhotosStmt = db.prepare(`
  * List photographed contacts for reference-face matching. Read-only; core never computes or
  * compares face descriptors itself — that stays connector-local (doc 04 §11 rejects
  * connector-supplied embeddings, and the inverse holds too: core doesn't do connector-side ML).
+ * Returns BOTH photo candidates per contact — the uploaded UI override (`photo_file`, bare
+ * basename) and the imported vCard photo (`raw_path`) — so the server can apply the same
+ * uploaded-wins precedence as GET /api/v1/entities/:id/photo (#112). db.js stays fs-free: it does
+ * not resolve/confine `photo_file` (no CONTACTS_RAW_DIR here) — the server's resolver does that.
  * `raw_path` is passed through path.resolve() before returning. contacts.js now stores an
  * already-absolute raw_path (resolved at import time, against that import's own cwd — the only
  * moment the correct base directory is unambiguous), so this is a no-op for new rows; it's a
@@ -905,7 +912,11 @@ const listContactPhotosStmt = db.prepare(`
  * happens to share import's cwd — best-effort for pre-existing data, not a general guarantee.
  */
 export function listContactPhotos(limit = 100) {
-  return listContactPhotosStmt.all(limit).map((r) => ({ ...r, raw_path: path.resolve(r.raw_path) }));
+  return listContactPhotosStmt.all(limit).map((r) => ({
+    entity_id: r.entity_id, name: r.name,
+    photo_file: r.photo_file ?? null,
+    raw_path: r.raw_path ? path.resolve(r.raw_path) : null, // only resolve a present imported path
+  }));
 }
 
 // --- Contacts curation surface (#96) ---
