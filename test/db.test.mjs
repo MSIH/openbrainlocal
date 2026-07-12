@@ -303,7 +303,7 @@ test('listContactPhotos: only live person entities with a preserved contact phot
   );
 
   const photos = listContactPhotos(100);
-  assert.ok(photos.some((p) => p.entity_id === photographed.entityId && p.raw_path === '/raw/contacts/aaa.jpg'));
+  assert.ok(photos.some((p) => p.entity_id === photographed.entityId && p.raw_path === path.resolve('/raw/contacts/aaa.jpg')));
   assert.ok(!photos.some((p) => p.entity_id === noPhoto.entityId), 'a contact with no preserved photo is excluded');
   assert.ok(!photos.some((p) => p.entity_id === company), 'a company entity is excluded even with a raw_path');
 
@@ -331,6 +331,6 @@ test('listContactPhotos: dedups an entity with two self-linked photographed arti
 
   const rows = listContactPhotos(100).filter((p) => p.entity_id === entityId);
   assert.equal(rows.length, 1, 'exactly one row per entity, even with two self-linked photographed artifacts');
-  assert.ok(rows[0].raw_path.endsWith('raw/contacts/second.jpg'), 'the most recently created contact artifact\'s photo wins');
+  assert.ok(rows[0].raw_path.split(path.sep).join('/').endsWith('raw/contacts/second.jpg'), 'the most recently created contact artifact\'s photo wins');
   assert.ok(path.isAbsolute(rows[0].raw_path), 'a relative raw_path (CONTACTS_RAW_DIR default) is resolved to an absolute path');
 });
