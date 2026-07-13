@@ -169,10 +169,14 @@ $('askForm').addEventListener('submit', (e) => {
   $('ask').value = '';
 });
 
-// --- mode toggle ---
+// --- mode toggle (button group: keep aria-pressed in sync with the .active class) ---
 for (const b of $('modeToggle').querySelectorAll('button')) b.addEventListener('click', () => {
   mode = b.dataset.mode;
-  for (const x of $('modeToggle').querySelectorAll('button')) x.classList.toggle('active', x === b);
+  for (const x of $('modeToggle').querySelectorAll('button')) {
+    const on = x === b;
+    x.classList.toggle('active', on);
+    x.setAttribute('aria-pressed', String(on));
+  }
   $('ask').focus();
 });
 

@@ -114,7 +114,10 @@ legend { padding: 0 6px; color: var(--muted); font-size: 13px; text-transform: u
 .card-links { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .card .chip.entity { color: var(--accent); border: 1px solid var(--border); background: transparent; }
 
-.askbar { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--border); background: var(--panel); }
-.askbar input { flex: 1; max-width: 820px; margin: 0 auto; }
+/* Center the input+button group on the transcript's ~820px column: the input grows but caps at
+   760px, so on wide screens the leftover space is distributed by justify-content (not dumped as a
+   gap after a full-width input, which would strand the button at the far right). */
+.askbar { display: flex; gap: 10px; justify-content: center; padding: 14px 16px; border-top: 1px solid var(--border); background: var(--panel); }
+.askbar input { flex: 1 1 auto; max-width: 760px; }
 .askbar button { flex: none; }
 .empty.err { color: var(--danger); }
