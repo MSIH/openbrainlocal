@@ -96,6 +96,29 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_unresolved_alias ON unresolved_aliases(alias, alias_type);
 
+  -- Proposed entities (#119): the human-approval gate for entities auto-proposed from ARTIFACT
+  -- signals (a document vendor, an email sender) via an entity hint's suggested_kind flag. An
+  -- unmatched such hint stages a proposal here INSTEAD of minting the entity, so low-signal
+  -- senders (noreply@, marketing, one-off vendors) can't silently pollute the graph. Approve →
+  -- create + retroactively link; reject → kept (append-only) so re-ingest never re-raises it.
+  -- Gates ONLY the connector-ingest lane; contact import (trusted) creates entities directly.
+  -- UNIQUE makes proposeEntity idempotent, mirroring unresolved_aliases' discipline.
+  CREATE TABLE IF NOT EXISTS proposed_entities (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    suggested_kind     TEXT NOT NULL,                   -- person|org
+    suggested_name     TEXT NOT NULL,
+    alias              TEXT NOT NULL,                   -- normalized resolution key
+    alias_type         TEXT NOT NULL,                   -- email|phone|name|handle
+    artifact_id        INTEGER REFERENCES artifacts(id),
+    source             TEXT,
+    confidence         REAL,
+    status             TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
+    resolved_entity_id INTEGER REFERENCES entities(id),
+    created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(suggested_name, alias, alias_type)
+  );
+  CREATE INDEX IF NOT EXISTS idx_proposed_status ON proposed_entities(status);
+
   -- Entity<->entity edges (issue #37; person->org added #88). entity_links joins
   -- artifacts->entities; this joins entities to each other (spouse/child/parent/…, and a
   -- person's worksAt->org). Append-only + idempotent via the UNIQUE key + OR IGNORE, mirroring
@@ -371,6 +394,18 @@ const selectNameAliasesStmt = db.prepare(`SELECT alias FROM entity_aliases WHERE
 const selectRelationHintsStmt = db.prepare(`SELECT artifact_id, role FROM unresolved_aliases WHERE alias = ? AND alias_type = 'relation'`);
 // The self-entity of a contact artifact — the "from" side of a staged relation.
 const selectSelfEntityStmt = db.prepare(`SELECT entity_id FROM entity_links WHERE artifact_id = ? AND role = 'self' LIMIT 1`);
+// Proposed entities (#119): stage / list / read / transition rows in proposed_entities.
+const insertProposalStmt = db.prepare(`
+  INSERT OR IGNORE INTO proposed_entities (suggested_kind, suggested_name, alias, alias_type, artifact_id, source, confidence)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+`);
+const listProposalsStmt = db.prepare(`
+  SELECT id, suggested_kind, suggested_name, alias, alias_type, artifact_id, source, confidence, status, resolved_entity_id, created_at
+  FROM proposed_entities WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ?
+`);
+const getProposalStmt = db.prepare('SELECT * FROM proposed_entities WHERE id = ?');
+const setProposalStatusStmt = db.prepare('UPDATE proposed_entities SET status = ? WHERE id = ?');
+const setProposalResolvedStmt = db.prepare(`UPDATE proposed_entities SET status = 'approved', resolved_entity_id = ? WHERE id = ?`);
 
 // The 11 artifact columns storeArtifactTxn writes; callers pass a partial and we fill nulls.
 const ARTIFACT_FIELDS = ['type', 'source', 'source_id', 'content_hash', 'occurred_at',
@@ -606,6 +641,10 @@ function hintConfidence(aliasType, supplied) {
  */
 export function resolveEntityHints(artifactId, hints) {
   let resolved = 0, unresolved = 0;
+  // #119: the artifact's source is stamped on any proposal staged below — fetch it once here,
+  // not per hint, since it's constant across the loop (only read when a suggested_kind miss occurs).
+  let artifactSource = null, sourceFetched = false;
+  const sourceOf = () => { if (!sourceFetched) { artifactSource = getArtifactStmt.get(artifactId)?.source ?? null; sourceFetched = true; } return artifactSource; };
   for (const hint of hints) {
     const aliasType = hint.alias_type ?? null;
     // '' rather than null: SQLite UNIQUE indexes don't treat NULL as equal to NULL, so a
@@ -621,6 +660,20 @@ export function resolveEntityHints(artifactId, hints) {
     } else {
       insertUnresolvedStmt.run(artifactId, alias, aliasType ?? '', role, hint.confidence ?? null);
       unresolved++;
+      // #119: a hint carrying suggested_kind asks to CREATE (not just link) an entity — stage it
+      // for human review instead of minting it, so low-signal senders never auto-pollute the graph.
+      // The unresolved_aliases row above still stands, so approving later retroactively links this artifact.
+      if (hint.suggested_kind) {
+        proposeEntity({
+          suggested_kind: hint.suggested_kind,
+          name: hint.alias,
+          alias,
+          alias_type: aliasType ?? '',
+          artifact_id: artifactId,
+          source: sourceOf(),
+          confidence: hint.confidence ?? null,
+        });
+      }
     }
   }
   return { resolved, unresolved };
@@ -1141,6 +1194,57 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
   for (const p of phones) insertAliasUnlessTombstoned(id, p, 'phone');
   logEvent('entity_created', 'contacts-ui', { entity_id: id, kind, canonical_name });
   return id;
+});
+
+// --- PROPOSED ENTITIES (#119): human-approval gate for entities auto-proposed from artifacts ---
+// Stage a proposal (no entity is minted). Plain function (no transaction of its own): it runs
+// INSIDE resolveEntityHints, which runs inside the caller's ingest transaction. Hoisted so
+// resolveEntityHints (defined earlier) can call it. Idempotent via the table's UNIQUE key.
+function proposeEntity({ suggested_kind, name, alias, alias_type, artifact_id = null, source = null, confidence = null }) {
+  insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence);
+}
+
+// List proposals by status (default the review queue: pending), newest first.
+export function listProposedEntities(status = 'pending', limit = 20) {
+  return listProposalsStmt.all(status, limit);
+}
+
+// Approve a pending proposal: create the entity, seed its aliases (name variants + the exact staged
+// key so email/phone/handle hints resolve too), mark the proposal approved, then
+// resolveStagedArtifactHints so the originating artifact(s) link. One transaction — a mid-way
+// failure rolls back to no entity, proposal still pending.
+export const approveProposedEntity = db.transaction((id) => {
+  const p = getProposalStmt.get(id);
+  if (!p) { const err = new Error(`proposal ${id} not found`); err.code = 'NOT_FOUND'; throw err; }
+  if (p.status !== 'pending') { const err = new Error(`proposal ${id} already ${p.status}`); err.code = 'ALREADY_RESOLVED'; throw err; }
+  // If an entity already carries this exact (alias, alias_type) — e.g. a contact was imported
+  // after the proposal was staged — link to it instead of minting a duplicate (review note #119).
+  const existing = resolveAliasByTypeStmt.all(p.alias, p.alias_type);
+  let entityId, created = false;
+  if (existing.length) {
+    entityId = existing[0].entity_id;
+  } else {
+    entityId = Number(insertEntityStmt.run(p.suggested_kind, p.suggested_name, '{}').lastInsertRowid);
+    for (const v of nameVariants({ fn: p.suggested_name, derive: p.suggested_kind === 'person' })) insertAliasUnlessTombstoned(entityId, v, 'name');
+    insertAliasUnlessTombstoned(entityId, p.alias, p.alias_type);
+    created = true;
+  }
+  setProposalResolvedStmt.run(entityId, id);
+  const linked = resolveStagedArtifactHints(entityId);
+  logEvent('proposed_entity_approved', 'proposed-entities', { proposal_id: id, entity_id: entityId, created, suggested_kind: p.suggested_kind, suggested_name: p.suggested_name, linked });
+  return { entity_id: entityId };
+});
+
+// Reject a proposal — status='rejected', retained (append-only) so re-ingest never re-raises it.
+export const rejectProposedEntity = db.transaction((id) => {
+  const p = getProposalStmt.get(id);
+  if (!p) { const err = new Error(`proposal ${id} not found`); err.code = 'NOT_FOUND'; throw err; }
+  // Can't reject an already-approved proposal — that would flip status approved→rejected while the
+  // created entity lives on, mislabeling the audit trail. Re-rejecting a rejected one is a no-op.
+  if (p.status === 'approved') { const err = new Error(`proposal ${id} already approved`); err.code = 'ALREADY_RESOLVED'; throw err; }
+  setProposalStatusStmt.run('rejected', id);
+  logEvent('proposed_entity_rejected', 'proposed-entities', { proposal_id: id, suggested_name: p.suggested_name });
+  return { rejected: true };
 });
 
 // Overwrite a contact's editable attrs (+ optional rename), reconciling email/phone aliases to

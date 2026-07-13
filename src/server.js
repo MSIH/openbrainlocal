@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 
 import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
-import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType } from './db.js';
+import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, listProposedEntities, approveProposedEntity, rejectProposedEntity } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
@@ -114,6 +114,12 @@ const AddRelationSchema = z.object({
   relation_type: z.string().trim().min(1).optional(),
   raw_label: z.string().trim().min(1).optional(),
 }).refine((v) => v.relation_type || v.raw_label, { message: 'relation_type or raw_label required' });
+// Proposed-entities review queue (#119): the human-approval gate for entities the connector-ingest
+// lane proposed creating from an artifact signal (vendor/sender). Core-owned, same family as merge.
+const ProposedQuerySchema = z.object({
+  status: z.enum(['pending', 'approved', 'rejected']).optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
+});
 
 // --- OUTPUT FORMATTERS (MCP tools return text) ---
 const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
@@ -361,6 +367,76 @@ function buildMcpServer() {
     }
   );
 
+  server.registerTool(
+    "list_proposed_entities",
+    {
+      title: "List proposed entities awaiting review",
+      description:
+        "List entities the connector-ingest lane PROPOSED creating from an artifact signal (e.g. a document " +
+        "vendor, an email sender) but that no human has approved yet. Review, then approve_proposed_entity or " +
+        "reject_proposed_entity. Read-only — proposes nothing itself.",
+      inputSchema: {
+        status: z.enum(['pending', 'approved', 'rejected']).optional().describe("Filter by status (default pending)."),
+        limit: z.coerce.number().int().positive().max(100).optional().describe("Max rows to return (default 20)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ status = 'pending', limit = 20 }) => {
+      const rows = listProposedEntities(status, limit);
+      if (rows.length === 0) return { content: [{ type: "text", text: `No ${status} proposed entities.` }] };
+      const txt = rows
+        .map((p) => `- (#${p.id}) [${p.suggested_kind}] "${p.suggested_name}" via ${p.alias_type} "${p.alias}"${p.source ? ` from ${p.source}` : ""} — ${p.status}`)
+        .join("\n");
+      return { content: [{ type: "text", text: txt }] };
+    }
+  );
+
+  server.registerTool(
+    "approve_proposed_entity",
+    {
+      title: "Approve a proposed entity",
+      description:
+        "Approve a pending proposed entity (from list_proposed_entities): create it and retroactively link the " +
+        "artifact(s) that referenced it. This is the gate that keeps low-signal senders out of the graph.",
+      inputSchema: {
+        id: z.coerce.number().int().positive().describe("proposed_entities id to approve."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ id }) => {
+      try {
+        const { entity_id } = approveProposedEntity(id);
+        return { content: [{ type: "text", text: `Approved proposal #${id} → created entity #${entity_id} and linked its artifacts.` }] };
+      } catch (err) {
+        console.error("approve_proposed_entity tool failed:", err);
+        return { content: [{ type: "text", text: `Approve failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "reject_proposed_entity",
+    {
+      title: "Reject a proposed entity",
+      description:
+        "Reject a proposed entity so it is not created. The proposal is retained (never re-raised on re-ingest). " +
+        "Use for low-signal senders/vendors you don't want on the graph.",
+      inputSchema: {
+        id: z.coerce.number().int().positive().describe("proposed_entities id to reject."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ id }) => {
+      try {
+        rejectProposedEntity(id);
+        return { content: [{ type: "text", text: `Rejected proposal #${id}. It will not be re-raised.` }] };
+      } catch (err) {
+        console.error("reject_proposed_entity tool failed:", err);
+        return { content: [{ type: "text", text: `Reject failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
   return server;
 }
 
@@ -503,6 +579,31 @@ app.post('/api/v1/entities', requireAuth, wrap(async (req, res) => {
   const body = CreateEntitySchema.parse(req.body);
   try { res.status(201).json({ id: createEntity(body) }); }
   catch (err) { mapEntityError(err, res); }
+}));
+
+// Proposed-entities review queue (#119). Literal '/proposed*' paths MUST precede the '/:id' route
+// below, or Express matches "proposed" as an :id (which then fails IdParamSchema coercion).
+app.get('/api/v1/entities/proposed', requireAuth, wrap(async (req, res) => {
+  const { status, limit } = ProposedQuerySchema.parse(req.query);
+  res.json({ proposals: listProposedEntities(status ?? 'pending', limit ?? 20) });
+}));
+
+app.post('/api/v1/entities/proposed/:id/approve', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  try { res.json(approveProposedEntity(id)); }
+  catch (err) {
+    if (err.code === 'ALREADY_RESOLVED') return res.status(409).json({ error: err.message });
+    mapEntityError(err, res); // NOT_FOUND → 404, else rethrow to the generic middleware
+  }
+}));
+
+app.post('/api/v1/entities/proposed/:id/reject', requireAuth, wrap(async (req, res) => {
+  const { id } = IdParamSchema.parse(req.params);
+  try { res.json(rejectProposedEntity(id)); }
+  catch (err) {
+    if (err.code === 'ALREADY_RESOLVED') return res.status(409).json({ error: err.message });
+    mapEntityError(err, res); // NOT_FOUND → 404, else rethrow to the generic middleware
+  }
 }));
 
 app.get('/api/v1/entities/:id', requireAuth, wrap(async (req, res) => {

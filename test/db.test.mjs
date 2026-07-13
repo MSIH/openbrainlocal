@@ -14,6 +14,7 @@ const {
   insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates, listContactPhotos,
   resolveEntityIds, getEntity, upsertEntityRelation, listEntities,
   addAlias, removeAlias, insertAliasUnlessTombstoned,
+  listProposedEntities, approveProposedEntity, rejectProposedEntity,
 } = await import('../src/db.js');
 
 after(() => { db.close(); cleanup(); });
@@ -428,4 +429,87 @@ test('alias tombstone (#111): tombstone insert is idempotent (re-removal adds 0 
   removeAlias(e, 'idemtomb', 'handle'); // second removal — OR IGNORE, no duplicate
   const n = db.prepare('SELECT COUNT(*) AS n FROM alias_tombstones WHERE entity_id = ? AND alias = ? AND alias_type = ?').get(e, 'idemtomb', 'handle').n;
   assert.equal(n, 1, 'exactly one tombstone row despite two removals');
+});
+
+// --- Proposed entities (#119): the human-approval gate for entities auto-proposed from artifacts ---
+const orgHint = (name) => [{ alias: name, alias_type: 'name', role: 'mentioned', suggested_kind: 'org' }];
+
+test('proposed entities (#119): an unmatched hint with suggested_kind stages a proposal and mints nothing', () => {
+  const source = uniqueSource();
+  const { id } = upsertArtifactTxn(
+    { type: 'document', source, source_id: 'receipt-1', text_repr: 'ACME Hardware receipt' },
+    f32(0.5), orgHint('ACME Hardware'),
+  );
+  const p = listProposedEntities('pending', 1000).find((x) => x.suggested_name === 'ACME Hardware');
+  assert.ok(p, 'a pending proposal was staged');
+  assert.equal(p.suggested_kind, 'org');
+  assert.equal(resolveEntityIds('ACME Hardware').length, 0, 'no entity was minted');
+  assert.equal(getArtifactById(id).links.length, 0, 'no link formed yet');
+});
+
+test('proposed entities (#119): a hint WITHOUT suggested_kind stages no proposal', () => {
+  const source = uniqueSource();
+  upsertArtifactTxn(
+    { type: 'document', source, source_id: 'nokind', text_repr: 'no-kind hint' },
+    f32(0.5), [{ alias: 'NoKind Inc', alias_type: 'name', role: 'mentioned' }],
+  );
+  assert.equal(listProposedEntities('pending', 1000).some((x) => x.suggested_name === 'NoKind Inc'), false);
+});
+
+test('proposed entities (#119): a matching hint links and ignores suggested_kind (no proposal)', () => {
+  const eid = Number(insertEntityStmt.run('org', 'Existing Org', '{}').lastInsertRowid);
+  insertAliasStmt.run(eid, 'existing org', 'name'); // normalized name alias
+  const source = uniqueSource();
+  const { id } = upsertArtifactTxn(
+    { type: 'document', source, source_id: 'match', text_repr: 'doc mentioning existing org' },
+    f32(0.5), orgHint('Existing Org'),
+  );
+  assert.ok(getArtifactById(id).links.some((l) => l.entity_id === eid), 'linked to the existing entity');
+  assert.equal(listProposedEntities('pending', 1000).some((x) => x.suggested_name === 'Existing Org'), false);
+});
+
+test('proposed entities (#119): approve creates the entity and retroactively links the staged artifact', () => {
+  const source = uniqueSource();
+  const { id } = upsertArtifactTxn(
+    { type: 'document', source, source_id: 'receipt-2', text_repr: 'BetaCorp invoice' },
+    f32(0.5), orgHint('BetaCorp'),
+  );
+  const p = listProposedEntities('pending', 1000).find((x) => x.suggested_name === 'BetaCorp');
+  const { entity_id } = approveProposedEntity(p.id);
+  assert.ok(entity_id > 0);
+  assert.equal(getEntity(entity_id).kind, 'org', 'created as an org');
+  assert.ok(getArtifactById(id).links.some((l) => l.entity_id === entity_id), 'staged artifact linked on approve');
+  const approved = listProposedEntities('approved', 1000).find((x) => x.id === p.id);
+  assert.ok(approved && approved.resolved_entity_id === entity_id, 'proposal marked approved + resolved');
+  assert.equal(listProposedEntities('pending', 1000).some((x) => x.id === p.id), false, 'no longer pending');
+});
+
+test('proposed entities (#119): re-ingesting the same artifact stages no duplicate proposal', () => {
+  const source = uniqueSource();
+  upsertArtifactTxn({ type: 'document', source, source_id: 'gamma', text_repr: 'GammaLLC one' }, f32(0.50), orgHint('GammaLLC'));
+  const after1 = listProposedEntities('pending', 1000).filter((x) => x.suggested_name === 'GammaLLC').length;
+  upsertArtifactTxn({ type: 'document', source, source_id: 'gamma', text_repr: 'GammaLLC two' }, f32(0.51), orgHint('GammaLLC'));
+  const after2 = listProposedEntities('pending', 1000).filter((x) => x.suggested_name === 'GammaLLC').length;
+  assert.equal(after1, 1);
+  assert.equal(after2, 1, 're-ingest is idempotent — no duplicate proposal');
+});
+
+test('proposed entities (#119): reject retains the proposal (rejected) and mints nothing', () => {
+  const source = uniqueSource();
+  upsertArtifactTxn({ type: 'document', source, source_id: 'spam', text_repr: 'SpamCo ad' }, f32(0.5), orgHint('SpamCo'));
+  const p = listProposedEntities('pending', 1000).find((x) => x.suggested_name === 'SpamCo');
+  rejectProposedEntity(p.id);
+  assert.equal(resolveEntityIds('SpamCo').length, 0, 'no entity minted on reject');
+  assert.ok(listProposedEntities('rejected', 1000).some((x) => x.id === p.id), 'proposal retained as rejected');
+  assert.equal(listProposedEntities('pending', 1000).some((x) => x.id === p.id), false, 'not in the pending queue');
+});
+
+test('proposed entities (#119): approve is not repeatable (already-resolved throws)', () => {
+  const source = uniqueSource();
+  const { id } = upsertArtifactTxn({ type: 'document', source, source_id: 'dupapprove', text_repr: 'DeltaCo bill' }, f32(0.5), orgHint('DeltaCo'));
+  const p = listProposedEntities('pending', 1000).find((x) => x.suggested_name === 'DeltaCo');
+  approveProposedEntity(p.id);
+  assert.throws(() => approveProposedEntity(p.id), /already approved/);
+  assert.throws(() => rejectProposedEntity(p.id), /already approved/, 'cannot reject an approved proposal');
+  assert.ok(id > 0);
 });

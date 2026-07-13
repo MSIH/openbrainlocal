@@ -46,6 +46,11 @@ const HintSchema = z.object({
   alias_type: z.enum(ALIAS_TYPES),
   role: z.enum(HINT_ROLES).optional(),
   confidence: z.number().optional(), // clamped/sanitized core-side (db.js hintConfidence)
+  // #119: opt-in creation intent. When present AND the hint doesn't match an existing entity,
+  // core STAGES a proposed_entities row for human review instead of minting the entity — the
+  // anti-pollution gate for seed-from-artifacts (vendor/sender). A connector still asserts no
+  // ID (contract §1.2 / rule #3): it proposes a kind; core decides.
+  suggested_kind: z.enum(['person', 'org']).optional(),
 }).strict();
 
 // Strict payload schema (doc 04 §3). `.strict()` → an unknown top-level key is 422, not a
