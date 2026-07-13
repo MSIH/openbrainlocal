@@ -746,6 +746,23 @@ export function upsertEntityRelation({ from_entity_id, to_entity_id, relation_ty
 }
 
 /**
+ * Resolve an org by name, or create it (kind='org') and seed its name aliases so pending relation
+ * hints for that name resolve. For a person's employer field (#125) — trusted, deliberate contact
+ * data, so NOT gated by the proposed-entities approval queue (which governs artifact-derived
+ * entities). Idempotent: resolve-first means an existing org card (imported before or after) or a
+ * re-import forms zero new entities. `derive:false` — a company name has no given/family to reduce
+ * ("Bank of America" must not become "bank america"), mirroring the org-card alias seeding in
+ * contacts.js. Returns the org entity id.
+ */
+export function ensureOrgEntity(name) {
+  const existing = resolveEntityIds(name);
+  if (existing.length) return existing[0];
+  const id = insertEntityStmt.run('org', name, '{}').lastInsertRowid;
+  for (const alias of nameVariants({ fn: name, derive: false })) insertAliasUnlessTombstoned(id, alias, 'name');
+  return id;
+}
+
+/**
  * Stage a relation whose related name doesn't resolve yet: recorded on the owner's contact
  * artifact in unresolved_aliases (alias_type='relation', role=raw label). When the related
  * person is later imported, resolveRelationHints forms the edge. Idempotent via the table's

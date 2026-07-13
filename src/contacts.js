@@ -26,7 +26,7 @@ import {
   db, storeArtifactTxn, upsertArtifactTxn, getArtifactBySource, getSelfEntityId, sha256, logEvent,
   insertEntityStmt, insertAliasUnlessTombstoned, resolveEntityIds, normalizeName, normalizePhone, nameVariants,
   canonicalRelationType, upsertEntityRelation, stageRelationHint, resolveRelationHints,
-  resolveStagedArtifactHints,
+  resolveStagedArtifactHints, ensureOrgEntity,
 } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { CONTACTS_RAW_DIR } from './config.js';
@@ -351,6 +351,15 @@ function linkRelations(fromEntityId, artifactId, relatedNames) {
     if (targets.length) {
       for (const toId of targets) {
         upsertEntityRelation({ from_entity_id: fromEntityId, to_entity_id: toId, relation_type: relationType, raw_label: rel.type, confidence: 1.0, source: 'vcard' });
+      }
+    } else if (relationType === 'worksAt') {
+      // The employer named on a person's card has no matching org contact yet: mint the org now
+      // (#125) instead of only staging. Trusted contact data, so NOT gated by the proposed-entities
+      // queue. ONLY worksAt auto-creates its target — a person named as someone's sister must stay
+      // staged (below), never mint a stub person. Idempotent via ensureOrgEntity's resolve-first.
+      const orgId = ensureOrgEntity(rel.name);
+      if (orgId !== fromEntityId) {
+        upsertEntityRelation({ from_entity_id: fromEntityId, to_entity_id: orgId, relation_type: relationType, raw_label: rel.type, confidence: 1.0, source: 'vcard' });
       }
     } else {
       stageRelationHint(artifactId, rel.name, rel.type);

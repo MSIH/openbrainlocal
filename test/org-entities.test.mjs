@@ -41,12 +41,15 @@ test('company vCard -> kind=org; person vCard -> kind=person; re-import is idemp
 
 test('person with ORG then the company contact -> worksAt edge (person->org); about_entity shows both sides', async () => {
   await importContacts(vcard('FN:Alice Worker\nEMAIL:alice@acme.example\nORG:Acme;Engineering'));
-  // Before the company exists, the ORG name is staged, never fabricated into an org entity.
-  assert.equal(kindOf('Acme'), undefined, 'no org entity invented from a free-text ORG string');
-  assert.equal(stagedWorksAt('acme').length, 1, 'the worksAt hint is staged on the person artifact');
+  // #125: an employer with no contact yet is auto-created as an org NOW (trusted contact data),
+  // so the worksAt edge forms immediately rather than staging.
+  assert.equal(kindOf('Acme'), 'org', 'the employer org is minted from the ORG field');
+  assert.equal(stagedWorksAt('acme').length, 0, 'edge formed directly, nothing left staged');
 
+  // Importing the company card later dedups onto that org (name alias 'acme'), no duplicate.
   await importContacts(vcard('FN:Acme\nX-ABSHOWAS:COMPANY\nEMAIL:contact@acme.example'));
   assert.equal(kindOf('Acme'), 'org');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM entities WHERE canonical_name = 'Acme'").get().n, 1, 'no duplicate org');
 
   const person = aboutEntity('Alice Worker').entities[0];
   const edge = person.relations.find((r) => r.relation_type === 'worksAt');
@@ -69,12 +72,31 @@ test('reverse import order (company first, then the person) forms the same works
   assert.ok(org.relations_in.some((r) => r.relation_type === 'worksAt' && r.name === 'Bob Staff'));
 });
 
-test('a person whose ORG matches no company contact fabricates no org entity, leaves a staged hint', async () => {
+test('#125: a person whose ORG has no company contact mints the org + worksAt edge; idempotent; non-worksAt still stages', async () => {
   await importContacts(vcard('FN:Carol Solo\nEMAIL:carol@example.com\nORG:Nonexistent Co;Sales'));
-  assert.equal(kindOf('Nonexistent Co'), undefined, 'no entity created for an unmatched ORG');
-  assert.equal(stagedWorksAt('nonexistent co').length, 1, 'the hint stays staged, resolvable later');
-  // Match is on the ORG NAME (parts[0]), not the joined "org, department" display string.
-  assert.equal(stagedWorksAt('nonexistent co, sales').length, 0);
+  assert.equal(kindOf('Nonexistent Co'), 'org', 'the unmatched employer is auto-created as an org (#125)');
+  assert.equal(stagedWorksAt('nonexistent co').length, 0, 'edge formed, not staged');
+  const carol = aboutEntity('Carol Solo').entities[0];
+  assert.ok(carol.relations.some((r) => r.relation_type === 'worksAt' && r.name === 'Nonexistent Co'), 'worksAt edge person->org');
+  // Match/mint is on the ORG NAME (parts[0]), not the joined "org, department" display string.
+  assert.equal(kindOf('Nonexistent Co, Sales'), undefined);
+
+  // Re-import: resolve-first + OR IGNORE edge => 0 new orgs, 0 new edges.
+  const orgs = () => db.prepare("SELECT COUNT(*) n FROM entities WHERE kind = 'org'").get().n;
+  const edges = () => db.prepare("SELECT COUNT(*) n FROM entity_relations WHERE relation_type = 'worksAt'").get().n;
+  const orgsBefore = orgs();
+  const edgesBefore = edges();
+  await importContacts(vcard('FN:Carol Solo\nEMAIL:carol@example.com\nORG:Nonexistent Co;Sales'));
+  assert.equal(orgs(), orgsBefore, 're-import mints no new org');
+  assert.equal(edges(), edgesBefore, 're-import forms no new edge');
+
+  // Only worksAt auto-creates its target: a non-worksAt unresolved relation must still just stage,
+  // never mint a stub person.
+  await importContacts(vcard('FN:Dave Lone\nEMAIL:dave@example.com\nX-SPOUSE:Ghost Partner'));
+  assert.equal(kindOf('Ghost Partner'), undefined, 'a spouse with no contact mints no stub person');
+  assert.equal(
+    db.prepare("SELECT COUNT(*) n FROM unresolved_aliases WHERE alias = 'ghost partner' AND alias_type = 'relation'").get().n,
+    1, 'the spouse relation stays staged');
 });
 
 test('an org contact never self-links via its own ORG line', async () => {
