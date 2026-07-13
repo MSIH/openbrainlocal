@@ -13,9 +13,10 @@ const {
   db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById,
   insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates, listContactPhotos,
   resolveEntityIds, getEntity, upsertEntityRelation, listEntities,
-  addAlias, removeAlias, insertAliasUnlessTombstoned,
+  addAlias, removeAlias, insertAliasUnlessTombstoned, normalizePhone,
   listProposedEntities, approveProposedEntity, rejectProposedEntity,
 } = await import('../src/db.js');
+const { backfillPhoneAliases } = await import('../scripts/backfill-phone-aliases.js');
 
 after(() => { db.close(); cleanup(); });
 
@@ -512,4 +513,67 @@ test('proposed entities (#119): approve is not repeatable (already-resolved thro
   assert.throws(() => approveProposedEntity(p.id), /already approved/);
   assert.throws(() => rejectProposedEntity(p.id), /already approved/, 'cannot reject an approved proposal');
   assert.ok(id > 0);
+});
+
+test('normalizePhone (#129): US +1 and bare 10-digit collapse to one key; non-NANP untouched', () => {
+  assert.equal(normalizePhone('+1 (256) 468-0130'), '2564680130', 'US +1 with punctuation → 10-digit key');
+  assert.equal(normalizePhone('1-256-468-0130'), '2564680130', 'leading 1, no + → 10-digit key');
+  assert.equal(normalizePhone('(256) 468-0130'), '2564680130', 'bare 10-digit unchanged');
+  assert.equal(normalizePhone('+44 20 7946 0958'), '442079460958', 'non-NANP international is NOT stripped');
+  assert.equal(normalizePhone('468-0130'), '4680130', '7-digit local is unchanged (leading 1-strip does not apply)');
+});
+
+test('normalizePhone (#129): a contact aliased +1 resolves from the bare-10-digit form and vice versa', () => {
+  const a = Number(insertEntityStmt.run('person', 'Plus One', null).lastInsertRowid);
+  insertAliasUnlessTombstoned(a, normalizePhone('+12564680130'), 'phone'); // aliased in +1 form
+  assert.ok(resolveEntityIds('(256) 468-0130').includes(a), '+1-aliased contact resolves from bare 10-digit lookup');
+
+  const b = Number(insertEntityStmt.run('person', 'Bare Ten', null).lastInsertRowid);
+  insertAliasUnlessTombstoned(b, normalizePhone('(415) 555-0130'), 'phone'); // aliased in bare form
+  assert.ok(resolveEntityIds('+1 415 555 0130').includes(b), 'bare-aliased contact resolves from +1 lookup');
+});
+
+test('backfill:phones (#129): re-aliases an old +1 key under the canonical key, and flags a cross-entity collision', () => {
+  // Simulate pre-change data by inserting the raw 11-digit key directly (bypassing normalizePhone).
+  const solo = Number(insertEntityStmt.run('person', 'Solo Backfill', null).lastInsertRowid);
+  insertAliasStmt.run(solo, '17776665555', 'phone'); // old digit-strip-only form, no competitor
+  const owner = Number(insertEntityStmt.run('person', 'Canon Owner', null).lastInsertRowid);
+  insertAliasStmt.run(owner, '8887776666', 'phone'); // already-canonical form
+  const loser = Number(insertEntityStmt.run('person', 'Old Form Loser', null).lastInsertRowid);
+  insertAliasStmt.run(loser, '18887776666', 'phone'); // same number as owner, but +1 form
+
+  const s = backfillPhoneAliases();
+
+  // Solo: canonical key added, now resolvable from either form.
+  assert.ok(resolveEntityIds('(777) 666-5555').includes(solo), 'solo old-form number resolves under the canonical key after backfill');
+  // Loser: its canonical key is owned by `owner`, so the add is suppressed and reported as a collision.
+  assert.ok(
+    s.collisionDetails.some((c) => c.canonical === '8887776666' && c.loser === loser && c.owner === owner),
+    'the cross-entity canonical collision is surfaced in collisionDetails',
+  );
+
+  const s2 = backfillPhoneAliases(); // idempotent
+  assert.equal(s2.aliasesAdded, 0, 'second run adds no new canonical aliases (every alias is now canonical)');
+  assert.ok(
+    s2.collisionDetails.some((c) => c.canonical === '8887776666' && c.loser === loser && c.owner === owner),
+    'the collision is still reported on rerun — the loser still cannot claim the owner-held key',
+  );
+});
+
+test('backfill:phones (#129): a canonical key tombstoned for this entity is NOT a false-positive collision (Copilot #131)', () => {
+  // Entity T deliberately removed the canonical key (#111 tombstone) but still holds the old +1 form;
+  // entity O owns the canonical key. The backfill must treat T's suppressed add as a removal, not a
+  // cross-entity collision — else it would wrongly report "unreachable until merged".
+  const t = Number(insertEntityStmt.run('person', 'Tomb Loser', null).lastInsertRowid);
+  insertAliasStmt.run(t, '15554443333', 'phone');    // old +1 form, still on T
+  addAlias(t, '5554443333', 'phone');                // T had the canonical key...
+  removeAlias(t, '5554443333', 'phone');             // ...then removed it → tombstone on T, row deleted
+  const owner = Number(insertEntityStmt.run('person', 'Tomb Owner', null).lastInsertRowid);
+  insertAliasStmt.run(owner, '5554443333', 'phone'); // NOW O claims the canonical key (T freed it)
+
+  const s = backfillPhoneAliases();
+  assert.ok(
+    !s.collisionDetails.some((c) => c.loser === t && c.canonical === '5554443333'),
+    'a tombstoned canonical key is not reported as a cross-entity collision',
+  );
 });
