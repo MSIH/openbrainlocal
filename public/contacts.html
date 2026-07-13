@@ -27,6 +27,7 @@
       <button data-kind="org" type="button">Orgs</button>
     </div>
     <button id="newContact" type="button" class="primary">+ New</button>
+    <button id="duplicates" type="button" title="Review probable duplicate contacts">Duplicates</button>
     <button id="saveTop" type="button" class="primary" hidden>Save</button>
     <button id="keyEdit" type="button" class="ghost" title="Change API key">🔑</button>
   </header>
@@ -36,6 +37,17 @@
     <section class="detail" id="detail">
       <p class="empty">Select a contact, or create one.</p>
     </section>
+
+    <!-- Duplicates review overlay (#120): consumes GET /entities/duplicates + POST /entities/merge.
+         Fixed drawer over the content; hidden until the topbar Duplicates button (or a 409 alias
+         conflict) opens it. -->
+    <div id="dupPanel" class="duppanel" hidden>
+      <div class="dup-headbar">
+        <h2>Probable duplicates</h2>
+        <button id="dupClose" type="button" class="ghost" title="Close">✕</button>
+      </div>
+      <div id="dupList"></div>
+    </div>
   </main>
 
   <div id="toast" class="toast" hidden></div>

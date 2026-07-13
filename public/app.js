@@ -64,15 +64,19 @@ $('keyEdit').addEventListener('click', () => showKeyBar());
 
 // --- toast ---
 let toastTimer;
-function toast(msg, isErr = false) {
+// action (optional): { label, onClick } renders an inline button in the toast (e.g. the 409
+// "Review duplicates" affordance). A toast carrying an action lingers longer so it's clickable.
+function toast(msg, isErr = false, action = null) {
   const t = $('toast');
-  t.textContent = msg; t.className = 'toast' + (isErr ? ' err' : ''); t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 3200);
+  t.replaceChildren(document.createTextNode(msg));
+  if (action) t.append(' ', el('button', { type: 'button', class: 'toast-action', onclick: () => { t.hidden = true; action.onClick(); } }, action.label));
+  t.className = 'toast' + (isErr ? ' err' : ''); t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), action ? 8000 : 3200);
 }
 function reportError(err) {
   if (err instanceof ApiError && err.status === 409 && err.data?.conflict) {
     const c = err.data.conflict;
-    toast(`That ${c.alias_type} already belongs to contact #${c.entity_id}. Merge them from the duplicates tool instead.`, true);
+    toast(`That ${c.alias_type} already belongs to contact #${c.entity_id}.`, true, { label: 'Review duplicates', onClick: openDuplicates });
   } else if (!(err instanceof ApiError && err.status === 401)) {
     toast(err.message || 'Request failed', true);
   }
@@ -349,6 +353,60 @@ async function removeRelation(entityId, relationId, r) {
   try { await api('DELETE', `/api/v1/entities/${entityId}/relations/${relationId}`, {}); toast('Relationship removed.'); await selectContact(entityId); }
   catch (err) { reportError(err); }
 }
+
+// --- duplicates + merge (#120) ---
+// Consumes GET /api/v1/entities/duplicates and POST /api/v1/entities/merge (server-owned; connectors
+// may never merge — contract §1.2). Merge is one-way: the absorbed id is tombstoned (entities.merged_into),
+// never deleted, so the survivor is the user's explicit choice.
+function openDuplicates() { $('dupPanel').hidden = false; loadDuplicates(); }
+function closeDuplicates() { $('dupPanel').hidden = true; }
+
+async function loadDuplicates() {
+  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
+  try {
+    const { pairs = [] } = await api('GET', '/api/v1/entities/duplicates?limit=50');
+    renderDuplicates(pairs);
+  } catch (err) { reportError(err); }
+}
+
+function renderDuplicates(pairs) {
+  const wrap = $('dupList');
+  wrap.replaceChildren();
+  if (!pairs.length) { wrap.append(el('p', { class: 'empty' }, 'No probable duplicates.')); return; }
+  for (const p of pairs) {
+    // A radio per side picks the survivor (default: the first, higher-ranked side); the other is absorbed.
+    const grp = `keep-${p.a.id}-${p.b.id}`;
+    const inputA = el('input', { type: 'radio', name: grp, checked: true });
+    const inputB = el('input', { type: 'radio', name: grp });
+    const choice = (input, side) => el('label', { class: 'dup-choice' }, input,
+      el('span', { class: 'dup-name' }, side.name || `#${side.id}`), el('span', { class: 'dup-id' }, `#${side.id}`));
+    const mergeBtn = el('button', { type: 'button', class: 'primary' }, 'Merge');
+    mergeBtn.addEventListener('click', () => {
+      const keepId = inputA.checked ? p.a.id : p.b.id;
+      const absorbId = inputA.checked ? p.b.id : p.a.id;
+      mergePair(keepId, absorbId);
+    });
+    wrap.append(el('div', { class: 'dup-pair' },
+      el('div', { class: 'dup-top' }, el('span', { class: 'dup-score' }, String(p.score)), el('span', { class: 'dup-reason' }, p.reason || '')),
+      el('div', { class: 'dup-choices' }, choice(inputA, p.a), choice(inputB, p.b)),
+      el('div', { class: 'dup-actions' }, el('span', { class: 'hint' }, 'Keep the selected contact; the other is merged in (one-way).'), mergeBtn)));
+  }
+}
+
+async function mergePair(keepId, absorbId) {
+  if (!confirm(`Merge contact #${absorbId} into #${keepId}? This is one-way and cannot be undone.`)) return;
+  try {
+    const { moved = {} } = await api('POST', '/api/v1/entities/merge', { body: { keep_id: keepId, absorb_id: absorbId } });
+    toast(`Merged: ${moved.aliases || 0} aliases, ${moved.links || 0} links, ${moved.relations || 0} relations.`);
+    // If the open contact was the one absorbed, its detail is now a tombstone — follow to the survivor.
+    if (currentId === absorbId) selectContact(keepId);
+    loadList();
+    loadDuplicates();
+  } catch (err) { reportError(err); }
+}
+
+$('duplicates').addEventListener('click', openDuplicates);
+$('dupClose').addEventListener('click', closeDuplicates);
 
 // --- new contact ---
 $('newContact').addEventListener('click', async () => {
