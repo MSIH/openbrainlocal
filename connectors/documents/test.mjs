@@ -17,6 +17,7 @@ import { truncateHeadTail, collapseWhitespace, buildHeader, buildTextRepr } from
 import { parsePdfDate, needsOcr } from './lib/pdf.js';
 import { parseCoreXml, extractPptxText, decodeXmlEntities, loadZip } from './lib/ooxml.js';
 import { formatOf } from './lib/extract.js';
+import { parseExtraction, vendorHintFor, extractExtraFor } from './lib/extract-fields.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // import.meta.dirname needs Node 20.11+; this connector's floor is 20.0
 
@@ -477,6 +478,149 @@ test('scan.js: oversize file skipped without ingest or manifest entry', async ()
     // no file — equivalent to an empty manifest
   }
   assert.deepEqual(manifest, {}, 'not manifested — raising the limit later picks it up');
+});
+
+// --- vendor extraction (#123) ---
+
+test('parseExtraction: coerces types, tolerates fences/prose, garbage -> all null', () => {
+  const ok = parseExtraction('```json\n{"vendor":"  ACME Hardware ","amount":"$1,240.50","currency":"usd","doc_date":"2026-03-04","doc_kind":"Receipt"}\n```');
+  assert.deepEqual(ok, { vendor: 'ACME Hardware', amount: 1240.5, currency: 'USD', doc_date: '2026-03-04', doc_kind: 'receipt' });
+  // Prose around the object; a numeric amount; an out-of-vocab doc_kind and a malformed date drop to null.
+  const prose = parseExtraction('Here you go: {"vendor":null,"amount":42,"currency":"EUR","doc_date":"03/04/2026","doc_kind":"memo"} — done');
+  assert.deepEqual(prose, { vendor: null, amount: 42, currency: 'EUR', doc_date: null, doc_kind: null });
+  // Non-JSON / empty / non-string all collapse to the empty shape rather than throwing.
+  for (const bad of ['no json here', '', null, undefined, '{not json}']) {
+    assert.deepEqual(parseExtraction(bad), { vendor: null, amount: null, currency: null, doc_date: null, doc_kind: null });
+  }
+  // "null" as a literal string and a currency that isn't 3 letters are rejected.
+  assert.deepEqual(parseExtraction('{"vendor":"null","currency":"dollars","amount":"n/a"}'),
+    { vendor: null, amount: null, currency: null, doc_date: null, doc_kind: null });
+  // A shape-valid but impossible date is rejected, not silently rolled over to a real one.
+  assert.equal(parseExtraction('{"doc_date":"2026-13-45"}').doc_date, null);
+  assert.equal(parseExtraction('{"doc_date":"2026-02-30"}').doc_date, null);
+  assert.equal(parseExtraction('{"doc_date":"2026-02-28"}').doc_date, '2026-02-28');
+});
+
+test('vendorHintFor: org hint only for a vendor kind WITH a vendor', () => {
+  assert.deepEqual(vendorHintFor({ vendor: 'ACME', doc_kind: 'receipt' }),
+    [{ alias: 'ACME', alias_type: 'name', role: 'mentioned', suggested_kind: 'org' }]);
+  assert.deepEqual(vendorHintFor({ vendor: 'ACME', doc_kind: 'invoice' }).length, 1);
+  assert.deepEqual(vendorHintFor({ vendor: 'ACME', doc_kind: 'letter' }), [], 'non-vendor kind emits no hint');
+  assert.deepEqual(vendorHintFor({ vendor: null, doc_kind: 'receipt' }), [], 'no vendor => no hint');
+});
+
+test('extractExtraFor: vendor kinds carry spend fields; others record only doc_kind', () => {
+  assert.deepEqual(extractExtraFor({ vendor: 'ACME', amount: 42.5, currency: 'USD', doc_date: '2026-03-04', doc_kind: 'receipt' }),
+    { doc_kind: 'receipt', vendor: 'ACME', amount: 42.5, currency: 'USD', doc_date: '2026-03-04' });
+  assert.deepEqual(extractExtraFor({ vendor: null, doc_kind: 'letter' }), { doc_kind: 'letter' }, 'no vendor fields for a non-vendor kind');
+  assert.deepEqual(extractExtraFor({ vendor: null, doc_kind: null }), {}, 'unclassified doc adds nothing');
+});
+
+// End-to-end: one mock server answers BOTH the chat endpoint (/v1/chat/completions) and ingest
+// (/api/v1/ingest), so the worker's LLM call and upsert are both observed.
+function vendorMockServer(chatContent) {
+  return startMockServer((req, body, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url.endsWith('/chat/completions')) {
+      res.end(JSON.stringify({ choices: [{ message: { content: chatContent } }] }));
+    } else if (!body.text_repr) {
+      // Mirror the server's schema (text_repr is required, .min(1)) so a worker that forgets to
+      // resend it fails the test instead of silently passing against a lenient mock.
+      res.statusCode = 422;
+      res.end(JSON.stringify({ error: 'validation', issues: [{ path: ['text_repr'] }] }));
+    } else {
+      res.end(JSON.stringify({ id: 1, created: false, resolved_entities: 0, unresolved_aliases: 1 }));
+    }
+  });
+}
+
+test('vendor-worker.js: a receipt gains extra fields + an org vendor hint; queue drained', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'documents-vendor-'));
+  writeFileSync(path.join(tmp, 'receipt.pdf'), 'dummy');
+  const queuePath = path.join(tmp, 'extract-queue.json');
+  const statKey = statKeyOf(statSync(path.join(tmp, 'receipt.pdf')));
+  writeFileSync(queuePath, JSON.stringify({
+    'receipt.pdf': { statKey, extra: { format: 'pdf', needs_ocr: false, ocr_done: false }, text_repr: 'Document (PDF): receipt.pdf\nACME Hardware\nTotal: $42.50\n2026-03-04' },
+  }));
+
+  const { server, port, requests } = await vendorMockServer(JSON.stringify({
+    vendor: 'ACME Hardware', amount: 42.5, currency: 'USD', doc_date: '2026-03-04', doc_kind: 'receipt',
+  }));
+  const result = await run('vendor-worker.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    DOCUMENTS_SCAN_ROOT: tmp,
+    DOCUMENTS_EXTRACT_QUEUE_PATH: queuePath,
+    DOCUMENTS_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`,
+    DOCUMENTS_EXTRACT_THROTTLE_MS: '0',
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+
+  const ingest = requests.find((r) => r.url.endsWith('/api/v1/ingest'));
+  assert.ok(ingest, 'an ingest upsert was sent');
+  assert.equal(ingest.body.source_id, 'receipt.pdf');
+  assert.equal(ingest.body.text_repr, 'Document (PDF): receipt.pdf\nACME Hardware\nTotal: $42.50\n2026-03-04', 'text_repr resent unchanged (schema requires it; identical => no re-embed)');
+  assert.equal(ingest.body.extra.vendor, 'ACME Hardware');
+  assert.equal(ingest.body.extra.amount, 42.5);
+  assert.equal(ingest.body.extra.doc_kind, 'receipt');
+  assert.equal(ingest.body.extra.format, 'pdf', 'prior extra preserved (resent whole)');
+  assert.deepEqual(ingest.body.entity_hints, [{ alias: 'ACME Hardware', alias_type: 'name', role: 'mentioned', suggested_kind: 'org' }]);
+  assert.deepEqual(JSON.parse(readFileSync(queuePath, 'utf8')), {}, 'queue drained on success');
+});
+
+test('vendor-worker.js: a non-vendor doc records doc_kind but emits no vendor fields or hint', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'documents-vendor-none-'));
+  writeFileSync(path.join(tmp, 'letter.pdf'), 'dummy');
+  const queuePath = path.join(tmp, 'extract-queue.json');
+  const statKey = statKeyOf(statSync(path.join(tmp, 'letter.pdf')));
+  writeFileSync(queuePath, JSON.stringify({
+    'letter.pdf': { statKey, extra: { format: 'pdf', needs_ocr: false }, text_repr: 'Document (PDF): letter.pdf\nDear Sir, ...' },
+  }));
+
+  const { server, port, requests } = await vendorMockServer(JSON.stringify({
+    vendor: null, amount: null, currency: null, doc_date: null, doc_kind: 'letter',
+  }));
+  const result = await run('vendor-worker.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    DOCUMENTS_SCAN_ROOT: tmp,
+    DOCUMENTS_EXTRACT_QUEUE_PATH: queuePath,
+    DOCUMENTS_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`,
+    DOCUMENTS_EXTRACT_THROTTLE_MS: '0',
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+
+  const ingest = requests.find((r) => r.url.endsWith('/api/v1/ingest'));
+  assert.ok(ingest, 'the doc_kind classification is still recorded');
+  assert.equal(ingest.body.extra.doc_kind, 'letter');
+  assert.equal(ingest.body.extra.vendor, undefined, 'no vendor field on a non-vendor doc');
+  assert.equal(ingest.body.entity_hints, undefined, 'no entity hint on a non-vendor doc');
+});
+
+test('vendor-worker.js: stale statKey entry dropped without a chat or ingest call', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'documents-vendor-stale-'));
+  const queuePath = path.join(tmp, 'extract-queue.json');
+  // Points at a file that doesn't exist -> stale -> dropped before any network call.
+  writeFileSync(queuePath, JSON.stringify({ 'gone.pdf': { statKey: '1:1', extra: { format: 'pdf' }, text_repr: 'x' } }));
+
+  const { server, port, requests } = await vendorMockServer('{}');
+  const result = await run('vendor-worker.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
+    LIFECONTEXT_API_KEY: 'test-key',
+    DOCUMENTS_SCAN_ROOT: tmp,
+    DOCUMENTS_EXTRACT_QUEUE_PATH: queuePath,
+    DOCUMENTS_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`,
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /dropping stale extraction queue entry gone\.pdf/);
+  assert.equal(requests.length, 0, 'no chat or ingest call for a stale entry');
+  assert.deepEqual(JSON.parse(readFileSync(queuePath, 'utf8')), {});
 });
 
 test('ocr-worker.js: stale statKey entry dropped without ingest; queue rewritten', async () => {
