@@ -197,7 +197,7 @@ function renderDetail(profile) {
 
   // save handler collects name + attrs (preserving unedited attr keys). Shared by the bottom
   // "Save changes" and the top-bar "Save" (#127) via the module-level currentSave.
-  const doSave = () => saveContact({
+  const doSave = () => saveContact(entity.id, {
     canonical_name: nameInput.value.trim(),
     attrs: {
       ...attrs,
@@ -207,7 +207,9 @@ function renderDetail(profile) {
     },
   });
   currentSave = doSave;
-  $('saveTop').hidden = false; // reveal the top-bar Save now that a contact is open
+  // Reveal the top-bar Save once a contact is open. Intentionally hidden (not a dead greyed
+  // 'disabled' button) before the first selection; the UI has no deselect, so it stays visible after.
+  $('saveTop').hidden = false;
   detail.append(el('div', { class: 'actions' }, el('button', { type: 'button', class: 'primary', onclick: doSave }, 'Save changes')));
 
   detail.append(renderAliases(entity.id, aliases));
@@ -220,11 +222,14 @@ async function loadPhoto(id, photoEl) {
   if (url && currentId === id) { lastPhotoURL = url; const img = el('img', { class: 'photo', src: url, alt: 'photo' }); photoEl.replaceWith(img); }
 }
 
-async function saveContact(payload) {
+async function saveContact(id, payload) {
+  // Save against the entity the form was built for — NOT the global currentId, which selectContact
+  // sets before its GET resolves, so a Save during a load would otherwise PATCH the newly-selected
+  // contact with the previously-displayed form (#127 review).
   try {
-    await api('PATCH', `/api/v1/entities/${currentId}`, { body: payload });
+    await api('PATCH', `/api/v1/entities/${id}`, { body: payload });
     toast('Saved.');
-    await selectContact(currentId);
+    await selectContact(id);
     loadList();
   } catch (err) { reportError(err); }
 }
