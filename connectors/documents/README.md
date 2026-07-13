@@ -31,7 +31,7 @@ The worker follows photo-exif's caption-worker pattern: it never queries the ser
 
 ### `vendor-worker.js` (#123)
 Turns bills/receipts/invoices/prescriptions from undifferentiated `document` artifacts into records that can seed a vendor org and answer "what did I spend at *X*".
-1. Drains the extraction queue (`DOCUMENTS_EXTRACT_QUEUE_PATH`) written by `scan.js` (text-layer docs) and `ocr-worker.js` (OCR'd image PDFs). Each entry carries the file's `statKey`, its complete current `extra`, and the extraction-capped `text` (`DOCUMENTS_EXTRACT_MAX_CHARS`, default 4000 — vendor/amount/date sit at the top of a receipt).
+1. Drains the extraction queue (`DOCUMENTS_EXTRACT_QUEUE_PATH`) written by `scan.js` (text-layer docs) and `ocr-worker.js` (OCR'd image PDFs). Each entry carries the file's `statKey`, its complete current `extra`, and its full `text_repr` — which the worker resends unchanged on the upsert *and* feeds to the extractor, capped to the leading `DOCUMENTS_EXTRACT_MAX_CHARS` chars (default 4000 — vendor/amount/date sit at the top of a receipt).
 2. Asks a local OpenAI-compatible chat model (`DOCUMENTS_LLM_*`, Ollama by default) for strict JSON `{vendor, amount, currency, doc_date, doc_kind}`. This is *extraction*, not embedding, so a connector may call it (contract §1.2); it never computes an embedding or imports `src/`.
 3. Upserts the **same** `(source, source_id)` with those fields in `extra_json` (`text_repr`/`occurred_at`/`raw_path`/`content_hash` untouched, per doc 04 §3).
 4. For a **vendor** document (`doc_kind` ∈ receipt/invoice/bill/prescription) it emits the vendor as an entity hint `{alias, alias_type:'name', role:'mentioned', suggested_kind:'org'}`. An unknown vendor is staged in core's **proposed-entities approval queue** (#130) for review — never silently minted, and the connector asserts no entity id (rule #3). A non-vendor document records only its `doc_kind` (no vendor fields, no hint).
@@ -50,7 +50,7 @@ Turns bills/receipts/invoices/prescriptions from undifferentiated `document` art
 
 ### Scheduling (config, not code)
 
-Both scripts do one pass and exit. Re-scan on a schedule with cron:
+All three scripts do one pass and exit. Re-scan on a schedule with cron:
 
 ```cron
 # Nightly: pick up new/changed documents, OCR within a bounded window, then extract vendors.
