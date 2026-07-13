@@ -510,5 +510,6 @@ test('proposed entities (#119): approve is not repeatable (already-resolved thro
   const p = listProposedEntities('pending', 1000).find((x) => x.suggested_name === 'DeltaCo');
   approveProposedEntity(p.id);
   assert.throws(() => approveProposedEntity(p.id), /already approved/);
+  assert.throws(() => rejectProposedEntity(p.id), /already approved/, 'cannot reject an approved proposal');
   assert.ok(id > 0);
 });

@@ -600,7 +600,10 @@ app.post('/api/v1/entities/proposed/:id/approve', requireAuth, wrap(async (req, 
 app.post('/api/v1/entities/proposed/:id/reject', requireAuth, wrap(async (req, res) => {
   const { id } = IdParamSchema.parse(req.params);
   try { res.json(rejectProposedEntity(id)); }
-  catch (err) { mapEntityError(err, res); }
+  catch (err) {
+    if (err.code === 'ALREADY_RESOLVED') return res.status(409).json({ error: err.message });
+    mapEntityError(err, res); // NOT_FOUND → 404, else rethrow to the generic middleware
+  }
 }));
 
 app.get('/api/v1/entities/:id', requireAuth, wrap(async (req, res) => {

@@ -1239,6 +1239,9 @@ export const approveProposedEntity = db.transaction((id) => {
 export const rejectProposedEntity = db.transaction((id) => {
   const p = getProposalStmt.get(id);
   if (!p) { const err = new Error(`proposal ${id} not found`); err.code = 'NOT_FOUND'; throw err; }
+  // Can't reject an already-approved proposal — that would flip status approved→rejected while the
+  // created entity lives on, mislabeling the audit trail. Re-rejecting a rejected one is a no-op.
+  if (p.status === 'approved') { const err = new Error(`proposal ${id} already approved`); err.code = 'ALREADY_RESOLVED'; throw err; }
   setProposalStatusStmt.run('rejected', id);
   logEvent('proposed_entity_rejected', 'proposed-entities', { proposal_id: id, suggested_name: p.suggested_name });
   return { rejected: true };
