@@ -38,13 +38,13 @@
       <p class="empty">Select a contact, or create one.</p>
     </section>
 
-    <!-- Duplicates review overlay (#120): consumes GET /entities/duplicates + POST /entities/merge.
-         Fixed drawer over the content; hidden until the topbar Duplicates button (or a 409 alias
-         conflict) opens it. -->
-    <div id="dupPanel" class="duppanel" hidden>
+    <!-- Duplicates review overlay (#120): consumes GET /api/v1/entities/duplicates + POST
+         /api/v1/entities/merge. Fixed drawer over the content; hidden until the topbar Duplicates
+         button (or a 409 alias conflict) opens it. role=dialog + focus move/restore in app.js. -->
+    <div id="dupPanel" class="duppanel" role="dialog" aria-modal="true" aria-labelledby="dupTitle" hidden>
       <div class="dup-headbar">
-        <h2>Probable duplicates</h2>
-        <button id="dupClose" type="button" class="ghost" title="Close">✕</button>
+        <h2 id="dupTitle">Probable duplicates</h2>
+        <button id="dupClose" type="button" class="ghost" title="Close" aria-label="Close duplicates panel">✕</button>
       </div>
       <div id="dupList"></div>
     </div>

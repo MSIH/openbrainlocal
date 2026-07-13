@@ -358,8 +358,20 @@ async function removeRelation(entityId, relationId, r) {
 // Consumes GET /api/v1/entities/duplicates and POST /api/v1/entities/merge (server-owned; connectors
 // may never merge — contract §1.2). Merge is one-way: the absorbed id is tombstoned (entities.merged_into),
 // never deleted, so the survivor is the user's explicit choice.
-function openDuplicates() { $('dupPanel').hidden = false; loadDuplicates(); }
-function closeDuplicates() { $('dupPanel').hidden = true; }
+// Focus management for the role=dialog overlay: move focus into the panel on open and restore it
+// to whatever was focused (the Duplicates button, or a toast action) on close.
+let dupReturnFocus = null;
+function openDuplicates() {
+  dupReturnFocus = document.activeElement;
+  $('dupPanel').hidden = false;
+  $('dupClose').focus();
+  loadDuplicates();
+}
+function closeDuplicates() {
+  $('dupPanel').hidden = true;
+  if (dupReturnFocus && typeof dupReturnFocus.focus === 'function') dupReturnFocus.focus();
+  dupReturnFocus = null;
+}
 
 async function loadDuplicates() {
   if (!apiKey()) return showKeyBar('Enter your API key to begin.');
@@ -407,6 +419,8 @@ async function mergePair(keepId, absorbId) {
 
 $('duplicates').addEventListener('click', openDuplicates);
 $('dupClose').addEventListener('click', closeDuplicates);
+// Escape closes the dialog (focus is inside the panel while it's open, so the handler receives it).
+$('dupPanel').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDuplicates(); });
 
 // --- new contact ---
 $('newContact').addEventListener('click', async () => {
