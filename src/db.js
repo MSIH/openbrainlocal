@@ -566,7 +566,13 @@ export function logEvent(eventType, actor, details) {
 }
 
 export const normalizeName = (s) => s.trim().toLowerCase();
-export const normalizePhone = (s) => s.replace(/\D/g, '');
+// Digit-strip, then canonicalize the NANP country code: an 11-digit key beginning with `1`
+// (US/Canada) drops the leading `1` so `+1 (256) 468-0130`, `1-256-468-0130`, and
+// `(256) 468-0130` all collapse to `2564680130` and resolve to one contact (#129). Assumption:
+// an 11-digit key starting with `1` is a US country code. Non-NANP international (e.g. `+44…`),
+// bare 10-digit, and 7-digit local numbers are left untouched. Not full E.164 (would need a
+// default region + libphonenumber) — out of scope; this covers US-with/without-`+1`.
+export const normalizePhone = (s) => { const d = s.replace(/\D/g, ''); return /^1\d{10}$/.test(d) ? d.slice(1) : d; };
 
 // The set of name aliases a person should answer to (#93). Always the full FN + each verbatim
 // nickname; when `derive` is on (persons, not orgs) we also add:
@@ -1140,7 +1146,11 @@ const notFound = (id) => { const err = new Error(`entity ${id} not found (or mer
 // email/phone aliases are globally UNIQUE(alias, alias_type). Adding one already owned by a
 // DIFFERENT live entity would silently no-op (insertAliasStmt is OR IGNORE) and quietly fail to
 // take effect — surface it as a conflict instead so the UI can offer a merge (mergeEntities).
-// name/handle aliases are intentionally shareable (two people named "chris"), so they're exempt.
+// name/handle aliases are exempt from this friendly pre-check only: the UNIQUE(alias, alias_type)
+// constraint still applies to them (an alias value is single-owner per type — two people named
+// "chris" can't both hold ('chris','name')), so a same-type name/handle collision falls through to
+// OR IGNORE and silently no-ops (first-writer-wins) rather than raising ALIAS_CONFLICT. They are not
+// truly shareable; the exemption just means such a collision fails silently instead of loudly.
 function assertNoAliasConflict(entityId, normAlias, aliasType) {
   if (aliasType !== 'email' && aliasType !== 'phone') return;
   const other = resolveAliasByTypeStmt.all(normAlias, aliasType).map((r) => r.entity_id).find((eid) => eid !== entityId);
