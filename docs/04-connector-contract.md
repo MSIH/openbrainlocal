@@ -256,9 +256,11 @@ Registered artifact types (v1), each with planner policy `{default_searchable, d
 Ambient session types (`visit`, `listening_session`, `browsing_session`) default out of search per
 the §5 retrieval policy but are digest-eligible — they're exactly what a daily digest
 summarizes. `contact` is reference data, not a daily event, so it's not digest-eligible;
-`digest` itself is excluded from digest-eligibility to avoid recursive summarization. Planner
-*enforcement* of these flags (actually excluding non-searchable types from default search)
-lands with a later milestone — today the flags are data only.
+`digest` itself is excluded from digest-eligibility to avoid recursive summarization.
+`default_searchable` *is enforced* by `hybridSearch` (#121): a search with no `types` filter is
+restricted to the `default_searchable:true` set, so ambient session/visit artifacts never pollute
+ordinary recall — they surface only when their type is named explicitly (`types:['visit']`).
+`digest_eligible` is likewise enforced by the timeline's per-day digest substitution.
 
 Registered event streams (v1): `music`, `browsing`, `location`, `terminal`.
 
