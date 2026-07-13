@@ -25,6 +25,10 @@ const MANIFEST_PATH = process.env.DOCUMENTS_MANIFEST_PATH
   || path.join(os.homedir(), '.life-context', 'documents-manifest.json');
 const OCR_QUEUE_PATH = process.env.DOCUMENTS_OCR_QUEUE_PATH
   || path.join(os.homedir(), '.life-context', 'documents-ocr-queue.json');
+// Vendor-extraction queue (#123): text-bearing docs land here for vendor-worker.js. Image-only PDFs
+// go to the OCR queue first and are enqueued here by ocr-worker.js once they have text.
+const EXTRACT_QUEUE_PATH = process.env.DOCUMENTS_EXTRACT_QUEUE_PATH
+  || path.join(os.homedir(), '.life-context', 'documents-extract-queue.json');
 const MAX_FILE_BYTES = envNumber('DOCUMENTS_MAX_FILE_MB', 50) * 1024 * 1024;
 const TEXT_REPR_MAX_CHARS = textReprMaxChars();
 
@@ -83,6 +87,7 @@ async function main() {
       }
       const flagged = [];
       const cleared = [];
+      const toExtract = [];
       result.results.forEach((r, i) => {
         if (r.error) {
           console.error('documents: item failed', group[i].payload.source_id, r.error, r.issues ?? '');
@@ -94,6 +99,10 @@ async function main() {
           manifest[relPath] = statKey;
           if (payload.extra.needs_ocr) flagged.push({ relPath, statKey, extra: payload.extra });
           else cleared.push(relPath);
+          // Text-bearing docs go to the vendor-extraction queue (#123), carrying their text_repr —
+          // the worker reads it and resends it unchanged. Image-only PDFs have no text yet;
+          // ocr-worker.js enqueues them here after OCR.
+          if (!payload.extra.needs_ocr) toExtract.push({ relPath, statKey, extra: payload.extra, text_repr: payload.text_repr });
         }
       });
       writeJsonFile(MANIFEST_PATH, manifest);
@@ -101,6 +110,11 @@ async function main() {
         updateJsonFile(OCR_QUEUE_PATH, (queue) => {
           for (const { relPath, statKey, extra } of flagged) queue[relPath] = { statKey, extra };
           for (const relPath of cleared) delete queue[relPath];
+        });
+      }
+      if (toExtract.length) {
+        updateJsonFile(EXTRACT_QUEUE_PATH, (queue) => {
+          for (const { relPath, statKey, extra, text_repr } of toExtract) queue[relPath] = { statKey, extra, text_repr };
         });
       }
     }

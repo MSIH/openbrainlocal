@@ -1,6 +1,6 @@
 # documents
 
-Two scripts that make a document tree (PDF/DOCX/XLSX/PPTX) semantically searchable in [LifeContext](https://github.com/msih/life-context), then optionally OCR the scans. One universal connector with per-format extractor modules rather than one connector per format — connectors can't share code across folders, so per-format connectors would duplicate the walk/hash/manifest boilerplate four times over and scan the same tree repeatedly.
+Three scripts that make a document tree (PDF/DOCX/XLSX/PPTX) semantically searchable in [LifeContext](https://github.com/msih/life-context), then optionally OCR the scans and extract vendor/amount/date from bills & receipts. One universal connector with per-format extractor modules rather than one connector per format — connectors can't share code across folders, so per-format connectors would duplicate the walk/hash/manifest boilerplate four times over and scan the same tree repeatedly.
 
 ## Architecture decision: OCR scope
 
@@ -26,7 +26,16 @@ The worker follows photo-exif's caption-worker pattern: it never queries the ser
 3. Drops stale queue entries (file moved/changed — the next scan re-flags if still image-only) and drops files that fail OCR or are deterministically rejected by the server (4xx) with a loud stderr line rather than looping on them forever.
 4. Updates the queue after **every** file via an atomic fresh read-modify-write — kill-safe at any point, and safe against a scan.js run finishing concurrently (both sides merge into the current file rather than overwriting it with a run-start snapshot; a fully lock-free guarantee would need per-entry files, doc 04 §7's spool caveat).
 5. Stops the whole run (rather than failing through the entire queue) if tesseract can't initialize or the LifeContext server is unreachable.
-6. Does its own scheduling for **nothing** — one pass, then exits (see scheduling below).
+6. Enqueues each OCR'd PDF into the **extraction queue** (`DOCUMENTS_EXTRACT_QUEUE_PATH`) once it has a text layer — the path `scan.js` can't take for image-only files (they have no text at scan time), so scanned receipts still reach vendor extraction.
+7. Does its own scheduling for **nothing** — one pass, then exits (see scheduling below).
+
+### `vendor-worker.js` (#123)
+Turns bills/receipts/invoices/prescriptions from undifferentiated `document` artifacts into records that can seed a vendor org and answer "what did I spend at *X*".
+1. Drains the extraction queue (`DOCUMENTS_EXTRACT_QUEUE_PATH`) written by `scan.js` (text-layer docs) and `ocr-worker.js` (OCR'd image PDFs). Each entry carries the file's `statKey`, its complete current `extra`, and its full `text_repr` — which the worker resends unchanged on the upsert *and* feeds to the extractor, capped to the leading `DOCUMENTS_EXTRACT_MAX_CHARS` chars (default 4000 — vendor/amount/date sit at the top of a receipt).
+2. Asks a local OpenAI-compatible chat model (`DOCUMENTS_LLM_*`, Ollama by default) for strict JSON `{vendor, amount, currency, doc_date, doc_kind}`. This is *extraction*, not embedding, so a connector may call it (contract §1.2); it never computes an embedding or imports `src/`.
+3. Upserts the **same** `(source, source_id)` with those fields in `extra_json` (`text_repr`/`occurred_at`/`raw_path`/`content_hash` untouched, per doc 04 §3).
+4. For a **vendor** document (`doc_kind` ∈ receipt/invoice/bill/prescription) it emits the vendor as an entity hint `{alias, alias_type:'name', role:'mentioned', suggested_kind:'org'}`. An unknown vendor is staged in core's **proposed-entities approval queue** (#130) for review — never silently minted, and the connector asserts no entity id (rule #3). A non-vendor document records only its `doc_kind` (no vendor fields, no hint).
+5. Same failure posture as `ocr-worker.js`: a stale queue entry (file changed) is dropped; a per-payload 4xx (not 429) is dropped; an extractor/server error stops the run to resume next time. Kill-safe — the queue entry is removed only after a confirmed upsert.
 
 ## The truncation tradeoff
 
@@ -41,15 +50,17 @@ The worker follows photo-exif's caption-worker pattern: it never queries the ser
 
 ### Scheduling (config, not code)
 
-Both scripts do one pass and exit. Re-scan on a schedule with cron:
+All three scripts do one pass and exit. Re-scan on a schedule with cron:
 
 ```cron
-# Nightly: pick up new/changed documents, then OCR within a bounded window
+# Nightly: pick up new/changed documents, OCR within a bounded window, then extract vendors.
+# Stagger vendor-worker AFTER ocr-worker so scanned receipts (enqueued post-OCR) are extracted too.
 0 1 * * * cd /path/to/life-context/connectors/documents && node scan.js >> ~/.life-context/documents.log 2>&1
 15 1 * * * cd /path/to/life-context/connectors/documents && timeout 4h node ocr-worker.js >> ~/.life-context/documents-ocr.log 2>&1
+30 5 * * * cd /path/to/life-context/connectors/documents && node vendor-worker.js >> ~/.life-context/documents-vendor.log 2>&1
 ```
 
-On Windows, use Task Scheduler with daily triggers running `node scan.js` / `node ocr-worker.js` — see [`../../docs/windows-service-winsw.md`](../../docs/windows-service-winsw.md) for the general Windows-service pattern this project uses. Killing ocr-worker mid-run is safe; it resumes from the queue next time.
+On Windows, use Task Scheduler with daily triggers running `node scan.js` / `node ocr-worker.js` / `node vendor-worker.js` — see [`../../docs/windows-service-winsw.md`](../../docs/windows-service-winsw.md) for the general Windows-service pattern this project uses. Killing any worker mid-run is safe; it resumes from its queue next time.
 
 ## Exit test
 
@@ -63,6 +74,7 @@ A phrase from inside a DOCX recalls its artifact via `POST /api/recall`; a scann
 - **The compressed-size guard doesn't bound decompression** for hostile zip bombs; single OOXML entries are skipped past a 64MB inflated size where jszip exposes it, but this connector assumes you point it at your own documents, not adversarial ones.
 - **A permanently corrupt file is re-attempted and logged every scan** (it never enters the manifest); the fix is moving it out of the tree.
 - **The real rasterize+OCR path has no CI coverage** — `test.mjs` verifies queue mechanics against mocks; actual tesseract output quality/latency is manual verification, same posture as photo-exif's no-VLM-in-CI. If pdfjs+canvas rasterization proves flaky on some corpus, `lib/rasterize.js` is the single swap point for an external poppler `pdftoppm` binary.
+- **Vendor extraction quality depends on the chat model** and has no live-LLM CI — `test.mjs` exercises the JSON coercion, the org-hint gating, and the worker's queue mechanics against a mock chat endpoint, but real vendor/amount accuracy on your corpus is manual verification (same no-live-model posture as OCR). `doc_kind` is the model's classification; a misread receipt yields a wrong/blank vendor, not a crash. Extraction runs on **every text-bearing document**, not only receipts — the model classifies each and only vendor kinds gain fields/hints.
 
 ## Testing without a real document tree
 
@@ -72,7 +84,9 @@ A phrase from inside a DOCX recalls its artifact via `POST /api/recall`; a scann
 
 - `scan.js` — the batch scanner
 - `ocr-worker.js` — the tesseract OCR enrichment worker
+- `vendor-worker.js` — the vendor/amount/date extraction worker (#123)
 - `lib/shared.js` — env loading, directory walk, shared `source_id` computation, ingest client, byte-budgeted batching
+- `lib/extract-fields.js` — the LLM vendor/amount/date extractor + coercion + the org-vendor hint (imported only by vendor-worker.js)
 - `lib/extract.js` — extension → extractor dispatch
 - `lib/pdf.js` — pdfjs text extraction, PDF date parsing, the needs-OCR heuristic
 - `lib/ooxml.js` — docx/xlsx/pptx bodies + shared `docProps/core.xml` date/title parsing

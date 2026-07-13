@@ -39,6 +39,15 @@ export function textReprMaxChars() {
   return Math.min(envNumber('DOCUMENTS_TEXT_REPR_MAX_CHARS', 12000), TEXT_REPR_CEILING_CHARS);
 }
 
+// The leading slice of an artifact's text_repr that vendor-worker.js feeds to the extractor (#123).
+// Vendor/amount/date sit at the top of a bill/receipt, so a bounded head focuses the model and keeps
+// it fast. This caps only the LLM INPUT — the full text_repr is still resent on the upsert unchanged.
+// Default 4000 chars; env-overridable.
+export const EXTRACT_TEXT_CEILING_CHARS = 20000;
+export function extractTextMaxChars() {
+  return Math.min(envNumber('DOCUMENTS_EXTRACT_MAX_CHARS', 4000), EXTRACT_TEXT_CEILING_CHARS);
+}
+
 export const DOCUMENT_EXTENSIONS = new Set(['.pdf', '.docx', '.xlsx', '.pptx']);
 
 // Manual recursive walk rather than fs.readdir's `recursive` option — that option needs

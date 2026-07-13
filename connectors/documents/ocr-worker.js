@@ -31,6 +31,11 @@ const LIFECONTEXT_API_KEY = process.env.LIFECONTEXT_API_KEY;
 const SCAN_ROOT = process.env.DOCUMENTS_SCAN_ROOT;
 const OCR_QUEUE_PATH = process.env.DOCUMENTS_OCR_QUEUE_PATH
   || path.join(os.homedir(), '.life-context', 'documents-ocr-queue.json');
+// Vendor-extraction queue (#123): once OCR gives an image-only PDF a text layer, it becomes a
+// text-bearing doc and is enqueued here for vendor-worker.js — the path scan.js can't take for
+// image-only files (they have no text at scan time). Shares the queue with scan.js's text-layer docs.
+const EXTRACT_QUEUE_PATH = process.env.DOCUMENTS_EXTRACT_QUEUE_PATH
+  || path.join(os.homedir(), '.life-context', 'documents-extract-queue.json');
 const OCR_LANG = process.env.DOCUMENTS_OCR_LANG || 'eng';
 // Where tesseract caches its ~15MB language model — defaulted OUT of the repo/connector dir
 // (tesseract.js downloads into cachePath, which defaults to cwd; an uncontained default
@@ -152,6 +157,7 @@ async function main() {
       }
 
       const { text_repr, extracted_chars, truncated } = buildTextRepr('pdf', entry.extra, relPath, body, TEXT_REPR_MAX_CHARS);
+      const ocrExtra = { ...entry.extra, extracted_chars, truncated, needs_ocr: false, ocr_done: true, ocr_pages: ocrPages };
       try {
         // Present fields only: text_repr + extra. Per doc 04 §3 upsert merge semantics,
         // everything scan.js already stored (occurred_at, raw_path, content_hash) is left
@@ -162,7 +168,7 @@ async function main() {
           source_id: sourceIdFor(relPath),
           type: 'document',
           text_repr,
-          extra: { ...entry.extra, extracted_chars, truncated, needs_ocr: false, ocr_done: true, ocr_pages: ocrPages },
+          extra: ocrExtra,
         });
       } catch (err) {
         // 4xx (bar the client-retried 429) is deterministic for THIS payload — drop it or it
@@ -176,6 +182,16 @@ async function main() {
         }
         console.error(`documents: ingest failed for ${relPath}, stopping run (will resume next time)`, err);
         break;
+      }
+      // Now that OCR gave it a text layer, hand it to the vendor extractor (#123), carrying the OCR'd
+      // text_repr (the worker reads it and resends it unchanged). Skip a page with no recovered text.
+      // Enqueue BEFORE dropping the OCR entry: a kill between the two then just re-OCRs next run
+      // (idempotent upsert + idempotent re-enqueue), never leaving the doc OCR'd-but-never-extracted —
+      // once the OCR entry is dropped, an unchanged file is never re-flagged, so extraction would be lost.
+      if (body) {
+        updateJsonFile(EXTRACT_QUEUE_PATH, (queue) => {
+          queue[relPath] = { statKey: entry.statKey, extra: ocrExtra, text_repr };
+        });
       }
       dropEntry(relPath); // fresh read-modify-write after every success — kill-safe at any point
       remaining--;
