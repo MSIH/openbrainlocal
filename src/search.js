@@ -95,9 +95,6 @@ const candidateStmt = db.prepare(`
     AND (@t1 IS NULL OR date(a.occurred_at) <= date(@t1))
     AND (@place IS NULL OR a.place_label LIKE @place)
 `);
-const knnStmt = db.prepare(
-  'SELECT artifact_id, distance FROM vec_artifacts WHERE embedding MATCH ? AND k = ? ORDER BY distance'
-);
 // Filter-then-rank: KNN constrained to the prefiltered candidate set. sqlite-vec (>= 0.1.6)
 // supports IN constraints on the vec0 primary key in KNN queries — this ranks *within* the
 // candidates instead of hoping a global top-k happens to intersect a tight filter. Compiled
@@ -109,9 +106,6 @@ const knnInStmt = db.prepare(`
     AND artifact_id IN (SELECT value FROM json_each(?))
   ORDER BY distance
 `);
-const ftsStmt = db.prepare(
-  'SELECT rowid AS artifact_id, bm25(artifacts_fts) AS score FROM artifacts_fts WHERE artifacts_fts MATCH ? ORDER BY score LIMIT ?'
-);
 const ftsInStmt = db.prepare(`
   SELECT rowid AS artifact_id, bm25(artifacts_fts) AS score
   FROM artifacts_fts
@@ -134,6 +128,11 @@ const geoBboxStmt = db.prepare(`
 // doesn't summarize (digest_eligible: false, e.g. contact) are never hidden. When the range
 // holds no digests at all, the NOT IN set is empty and this is identical to timelineStmt.
 const DIGEST_ELIGIBLE_JSON = JSON.stringify(TYPE_REGISTRY.filter((t) => t.digest_eligible).map((t) => t.type));
+// default_searchable enforcement (#121): the type set an ordinary no-type search is restricted to.
+// Low-signal session/visit artifacts (default_searchable:false) are excluded so they don't pollute
+// recall — they surface only when their type is named explicitly. Substituted by `prefilter` below
+// whenever the effective type list is empty.
+const SEARCHABLE_TYPES_JSON = JSON.stringify(TYPE_REGISTRY.filter((t) => t.default_searchable).map((t) => t.type));
 const timelineDigestStmt = db.prepare(`
   SELECT * FROM artifacts
   WHERE date(occurred_at) >= date(@start) AND date(occurred_at) <= date(@end)
@@ -265,12 +264,14 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   // couldn't absorb.
   const searchText = [plan.semantic || query, ...unresolvedTerms].join(' ');
 
-  // SQL prefilter -> candidate id set (skip entirely when there are no structured filters).
+  // SQL prefilter -> candidate id set. Always applies a type constraint: the explicit/planner
+  // list when non-empty, else the default_searchable set (#121) — so a no-type search never
+  // surfaces low-signal session/visit artifacts. The prefilter therefore always runs.
   const prefilter = (f) =>
     new Set(
       candidateStmt
         .all({
-          types_json: f.types.length ? JSON.stringify(f.types) : null,
+          types_json: f.types.length ? JSON.stringify(f.types) : SEARCHABLE_TYPES_JSON,
           ents_json: f.entityIds.length ? JSON.stringify(f.entityIds) : null,
           t0: f.t0 || null,
           t1: f.t1 || null,
@@ -292,48 +293,46 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
     return out;
   };
 
-  const hasSqlFilter = effTypes.length || entityIds.length || t0 || t1 || place;
-  let candidates = null;
-  if (hasSqlFilter || geoIds != null) {
-    const sqlSet = hasSqlFilter ? prefilter({ types: effTypes, entityIds, t0, t1, place }) : null;
-    candidates = applyGeo(sqlSet, geoIds);
-    if (candidates.size === 0) {
-      // Planner-overfilter fix (M2 rule: demote, never drop): zero candidates conflates
-      // "caller's explicit filters matched nothing" (honest) with "the LLM invented a
-      // filter" (silent planner failure — e.g. the prompt steers summary queries to
-      // types=['digest'], which must not empty the search when no digests exist for the
-      // period). Retry with only the caller's explicit args — explicit types/time/entities
-      // plus a caller-supplied `near`; place and plan-derived `near` are always dropped here.
-      const caller = {
-        types: types?.length ? types : [],
-        entityIds: entities?.length ? entityIds : [],
-        t0: emptyish(timeRange?.start),
-        t1: emptyish(timeRange?.end),
-        place: null,
-      };
-      const callerGeo = geoFromCaller ? geoIds : null;
-      const callerHasSql = caller.types.length || caller.entityIds.length || caller.t0 || caller.t1;
-      if (callerHasSql || callerGeo != null) {
-        const sqlSet2 = callerHasSql ? prefilter(caller) : null;
-        candidates = applyGeo(sqlSet2, callerGeo);
-        if (candidates.size === 0) return []; // the caller's own filters matched nothing — honest empty
-      } else {
-        candidates = null; // every filter was plan-invented — fall back to pure semantic + keyword
-      }
+  // The prefilter always runs — a type constraint is always present (explicit/planner effTypes,
+  // else the default_searchable default; #121) — so `candidates` is always a Set, never null.
+  let candidates = applyGeo(prefilter({ types: effTypes, entityIds, t0, t1, place }), geoIds);
+  if (candidates.size === 0) {
+    // Planner-overfilter fix (M2 rule: demote, never drop): zero candidates conflates
+    // "caller's explicit filters matched nothing" (honest) with "the LLM invented a
+    // filter" (silent planner failure — e.g. the prompt steers summary queries to
+    // types=['digest'], which must not empty the search when no digests exist for the
+    // period). Retry with only the caller's explicit args — explicit types/time/entities
+    // plus a caller-supplied `near`; place and plan-derived `near` are always dropped here.
+    const caller = {
+      types: types?.length ? types : [],
+      entityIds: entities?.length ? entityIds : [],
+      t0: emptyish(timeRange?.start),
+      t1: emptyish(timeRange?.end),
+      place: null,
+    };
+    const callerGeo = geoFromCaller ? geoIds : null;
+    const callerHasSql = caller.types.length || caller.entityIds.length || caller.t0 || caller.t1;
+    if (callerHasSql || callerGeo != null) {
+      candidates = applyGeo(prefilter(caller), callerGeo);
+      if (candidates.size === 0) return []; // the caller's own filters matched nothing — honest empty
+    } else {
+      // Every filter was plan-invented — fall back to the default search: default_searchable
+      // types only (not all types), so a bad planner filter degrades to normal recall, never
+      // to a widened one that re-admits sessions/visits.
+      candidates = prefilter({ types: [], entityIds: [], t0: null, t1: null, place: null });
     }
   }
-  const candidatesJson = candidates ? JSON.stringify([...candidates]) : null;
+  if (candidates.size === 0) return []; // no default_searchable artifacts to rank
+  const candidatesJson = JSON.stringify([...candidates]);
 
   const k = clamp(limit * KNN_OVERFETCH, KNN_MIN, KNN_MAX);
 
-  // Vector arm — ranked *within* the candidate set when one exists (filter-then-rank).
+  // Vector arm — ranked *within* the candidate set (filter-then-rank).
   // Best-effort; FTS still works if the embedding model is offline.
   let vec = [];
   try {
     const qvec = await embedToFloat32(searchText);
-    vec = candidates
-      ? knnInStmt.all(qvec, Math.min(k, candidates.size), candidatesJson)
-      : knnStmt.all(qvec, k);
+    vec = knnInStmt.all(qvec, Math.min(k, candidates.size), candidatesJson);
   } catch (err) {
     console.error('search: embedding unavailable, FTS-only:', err.message);
   }
@@ -342,7 +341,7 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   const ftsQuery = toFtsQuery(searchText);
   let fts = [];
   if (ftsQuery) {
-    fts = candidates ? ftsInStmt.all(ftsQuery, candidatesJson, k) : ftsStmt.all(ftsQuery, k);
+    fts = ftsInStmt.all(ftsQuery, candidatesJson, k);
   }
 
   const fusedIds = rrf([vec.map((r) => r.artifact_id), fts.map((r) => r.artifact_id)]).slice(0, limit);

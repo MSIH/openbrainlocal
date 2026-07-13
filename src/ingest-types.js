@@ -8,9 +8,9 @@
  * Leaf module: no imports from other src files, so both search.js and a future ingest.js
  * can depend on it without a cycle.
  *
- * default_searchable / digest_eligible are planner policy per doc 04 §6 — enforcement
- * lands with a later milestone, but the flags ship now so the endpoint contract is
- * complete on day one (v1 only ever adds fields).
+ * default_searchable / digest_eligible are planner policy per doc 04 §6. Both are now
+ * enforced: default_searchable by search.js (#121 — a no-type search is restricted to the
+ * searchable set), digest_eligible by the timeline's per-day digest substitution.
  */
 export const TYPE_REGISTRY = Object.freeze([
   { type: 'note', default_searchable: true, digest_eligible: true },
