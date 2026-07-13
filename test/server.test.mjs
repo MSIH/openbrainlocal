@@ -255,3 +255,48 @@ test('/api/about_entity (#88): an org carries its employees in relations_in (rev
   assert.ok(e.relations_in.some((r) => r.relation_type === 'worksAt' && r.name === 'Dana Employee'), 'relations_in lists the employee');
   assert.equal(e.relations.length, 0, 'the org has no outgoing edges');
 });
+
+test('#119 proposed entities: ingest→propose→approve links the artifact; re-approve 409', async () => {
+  const ing = await post('/api/v1/ingest', { source: 'documents', source_id: 'srv-receipt', type: 'document', text_repr: 'ProbeCo invoice total 12.00', entity_hints: [{ alias: 'ProbeCo', alias_type: 'name', role: 'mentioned', suggested_kind: 'org' }] }, { 'x-api-key': API_KEY });
+  assert.ok(ing.status === 201 || ing.status === 200, 'ingest accepted');
+
+  let r = await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY });
+  assert.equal(r.status, 200);
+  const prop = (await r.json()).proposals.find((p) => p.suggested_name === 'ProbeCo');
+  assert.ok(prop && prop.suggested_kind === 'org', 'ProbeCo staged as a pending org proposal');
+
+  let ab = await (await post('/api/about_entity', { name: 'ProbeCo' }, { 'x-api-key': API_KEY })).json();
+  assert.equal(ab.resolved, false, 'no entity before approval');
+
+  r = await fetch(`${base}/api/v1/entities/proposed/${prop.id}/approve`, { method: 'POST', headers: { 'x-api-key': API_KEY } });
+  assert.equal(r.status, 200);
+  assert.ok(Number.isInteger((await r.json()).entity_id));
+
+  ab = await (await post('/api/about_entity', { name: 'ProbeCo' }, { 'x-api-key': API_KEY })).json();
+  assert.equal(ab.resolved, true, 'entity created on approve');
+  assert.ok(ab.entities[0].artifacts.length >= 1, 'origin artifact retroactively linked');
+
+  const again = await fetch(`${base}/api/v1/entities/proposed/${prop.id}/approve`, { method: 'POST', headers: { 'x-api-key': API_KEY } });
+  assert.equal(again.status, 409, 'already-approved proposal is 409');
+});
+
+test('#119 proposed entities: reject retains + auth-gated; no-suggested_kind hint stages nothing', async () => {
+  await post('/api/v1/ingest', { source: 'documents', source_id: 'srv-spam', type: 'document', text_repr: 'JunkCo promo blast', entity_hints: [{ alias: 'JunkCo', alias_type: 'name', role: 'mentioned', suggested_kind: 'org' }] }, { 'x-api-key': API_KEY });
+  let r = await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY });
+  const prop = (await r.json()).proposals.find((p) => p.suggested_name === 'JunkCo');
+  assert.ok(prop, 'JunkCo staged');
+
+  assert.equal((await fetch(`${base}/api/v1/entities/proposed/${prop.id}/reject`, { method: 'POST' })).status, 401, 'reject is auth-gated');
+
+  r = await fetch(`${base}/api/v1/entities/proposed/${prop.id}/reject`, { method: 'POST', headers: { 'x-api-key': API_KEY } });
+  assert.equal(r.status, 200);
+  r = await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY });
+  assert.equal((await r.json()).proposals.some((p) => p.suggested_name === 'JunkCo'), false, 'rejected leaves the pending queue');
+  r = await get('/api/v1/entities/proposed?status=rejected', { 'x-api-key': API_KEY });
+  assert.ok((await r.json()).proposals.some((p) => p.suggested_name === 'JunkCo'), 'rejected proposal retained');
+
+  // a hint WITHOUT suggested_kind must not stage anything
+  await post('/api/v1/ingest', { source: 'documents', source_id: 'srv-plain', type: 'document', text_repr: 'PlainCo memo', entity_hints: [{ alias: 'PlainCo', alias_type: 'name', role: 'mentioned' }] }, { 'x-api-key': API_KEY });
+  r = await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY });
+  assert.equal((await r.json()).proposals.some((p) => p.suggested_name === 'PlainCo'), false, 'no proposal without suggested_kind');
+});
