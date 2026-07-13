@@ -48,6 +48,7 @@ async function fetchPhotoObjectURL(id) {
 // --- state + refs ---
 const $ = (id) => document.getElementById(id);
 let currentId = null, currentProfile = null, currentKind = '', searchTerm = '', lastPhotoURL = null;
+let currentSave = null; // set by renderDetail to the open contact's save closure; used by the top-bar Save (#127)
 
 // --- API key bar ---
 function showKeyBar(msg = '') { $('keyBar').hidden = false; $('keyMsg').textContent = msg; $('keyInput').value = apiKey(); $('keyInput').focus(); }
@@ -194,8 +195,9 @@ function renderDetail(profile) {
     el('div', { class: 'grid2' }, birthday, anniversary, deceased, org, title, department), note);
   detail.append(more);
 
-  // save handler collects name + attrs (preserving unedited attr keys)
-  const save = el('button', { type: 'button', class: 'primary', onclick: () => saveContact({
+  // save handler collects name + attrs (preserving unedited attr keys). Shared by the bottom
+  // "Save changes" and the top-bar "Save" (#127) via the module-level currentSave.
+  const doSave = () => saveContact(entity.id, {
     canonical_name: nameInput.value.trim(),
     attrs: {
       ...attrs,
@@ -203,8 +205,12 @@ function renderDetail(profile) {
       birthday: birthday._collect(), anniversary: anniversary._collect(), deceased: deceased._collect(),
       org: org._collect(), title: title._collect(), department: department._collect(), note: note._collect(),
     },
-  }) }, 'Save changes');
-  detail.append(el('div', { class: 'actions' }, save));
+  });
+  currentSave = doSave;
+  // Reveal the top-bar Save once a contact is open. Intentionally hidden (not a dead greyed
+  // 'disabled' button) before the first selection; the UI has no deselect, so it stays visible after.
+  $('saveTop').hidden = false;
+  detail.append(el('div', { class: 'actions' }, el('button', { type: 'button', class: 'primary', onclick: doSave }, 'Save changes')));
 
   detail.append(renderAliases(entity.id, aliases));
   detail.append(renderRelations(entity.id, relations, relations_in));
@@ -216,11 +222,14 @@ async function loadPhoto(id, photoEl) {
   if (url && currentId === id) { lastPhotoURL = url; const img = el('img', { class: 'photo', src: url, alt: 'photo' }); photoEl.replaceWith(img); }
 }
 
-async function saveContact(payload) {
+async function saveContact(id, payload) {
+  // Save against the entity the form was built for — NOT the global currentId, which selectContact
+  // sets before its GET resolves, so a Save during a load would otherwise PATCH the newly-selected
+  // contact with the previously-displayed form (#127 review).
   try {
-    await api('PATCH', `/api/v1/entities/${currentId}`, { body: payload });
+    await api('PATCH', `/api/v1/entities/${id}`, { body: payload });
     toast('Saved.');
-    await selectContact(currentId);
+    await selectContact(id);
     loadList();
   } catch (err) { reportError(err); }
 }
@@ -247,8 +256,10 @@ function renderAliases(id, aliases) {
   // add name/handle alias
   const aliasInput = el('input', { type: 'text', placeholder: 'add another name or handle' });
   const typeSel = el('select', {}, el('option', { value: 'name' }, 'name'), el('option', { value: 'handle' }, 'handle'));
-  fs.append(el('div', { class: 'addrel', style: 'grid-template-columns:150px 1fr auto' }, typeSel, aliasInput,
-    el('button', { type: 'button', onclick: () => addAlias(id, aliasInput.value.trim(), typeSel.value) }, 'Add alias')));
+  // Add button between the type dropdown and the input (#127) — consistent with the relationship row.
+  fs.append(el('div', { class: 'addrel' }, typeSel,
+    el('button', { type: 'button', onclick: () => addAlias(id, aliasInput.value.trim(), typeSel.value) }, 'Add'),
+    aliasInput));
   return fs;
 }
 async function addAlias(id, alias, alias_type) {
@@ -319,7 +330,8 @@ function buildAddRelation(id) {
     catch (err) { reportError(err); }
   });
 
-  return el('div', {}, el('div', { class: 'addrel' }, typeSel, el('div', {}, target, results), addBtn));
+  // Add button between the type dropdown and the target field (#127).
+  return el('div', {}, el('div', { class: 'addrel' }, typeSel, addBtn, el('div', { class: 'reltarget' }, target, results)));
 }
 
 async function createAndChoose(name, kind, targetInput, cb) {
@@ -349,6 +361,9 @@ $('newContact').addEventListener('click', async () => {
     selectContact(id);
   } catch (err) { reportError(err); }
 });
+
+// Top-bar Save (#127): saves the open contact via the current detail closure. Hidden until one is open.
+$('saveTop').addEventListener('click', () => { if (currentSave) currentSave(); });
 
 // --- search + filter wiring ---
 let searchTimer;

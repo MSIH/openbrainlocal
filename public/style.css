@@ -78,7 +78,9 @@ legend { padding: 0 6px; color: var(--muted); font-size: 13px; text-transform: u
 .rel { display: flex; gap: 8px; align-items: center; margin: 3px 0; }
 .rel .rel-name { flex: 1; }
 .rel .rel-dir { font-size: 11px; color: var(--muted); }
-.addrel { display: grid; grid-template-columns: 150px 1fr auto; gap: 8px; align-items: start; margin-top: 10px; }
+/* [type ▾] [Add] [field] — the Add button sits between the dropdown and the entry field (#127). */
+.addrel { display: grid; grid-template-columns: 150px auto 1fr; gap: 8px; align-items: start; margin-top: 10px; }
+.addrel .reltarget { position: relative; } /* anchor the results dropdown under the field cell */
 .addrel .results { border: 1px solid var(--border); border-radius: 7px; margin-top: 4px; max-height: 160px; overflow-y: auto; background: var(--panel); }
 .addrel .results div { padding: 6px 9px; cursor: pointer; }
 .addrel .results div:hover { background: var(--chip); }
