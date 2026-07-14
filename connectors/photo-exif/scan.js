@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadDotEnvIfPresent, walkImageFiles, sourceIdFor, contentHashOfFile, chunk, ingestClient } from './lib/shared.js';
-import { describePhoto, buildTextRepr } from './lib/describe.js';
+import { describePhoto, buildTextRepr, readSidecar } from './lib/describe.js';
 
 loadDotEnvIfPresent(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -18,6 +18,9 @@ const PHOTO_ROOT = process.env.PHOTO_ROOT;
 const MANIFEST_PATH = process.env.PHOTO_EXIF_MANIFEST_PATH
   || path.join(os.homedir(), '.life-context', 'photo-exif-manifest.json');
 const BATCH_MAX = 100; // contract cap (docs/04-connector-contract.md §2)
+// Google Takeout `people[]` are user-curated face tags — high trust, but core caps name/handle
+// hints at 0.9 regardless (doc 04 §4), so 0.9 is the effective ceiling we ask for (#152).
+const PICTURED_HINT_CONFIDENCE = 0.9;
 
 function readManifest() {
   try {
@@ -35,6 +38,11 @@ function writeManifest(manifest) {
 async function buildPayload(absPath, relPath) {
   const { date, dateStr, latitude, longitude } = await describePhoto(absPath);
   const contentHash = await contentHashOfFile(absPath);
+  // Google Takeout sidecar (#152): people tags → entity_hints, and takenTime/geo as a FALLBACK for
+  // the common case where Takeout stripped the image's own EXIF. EXIF always wins when present; the
+  // sidecar only fills a gap. Best-effort — readSidecar returns null on any miss/parse failure, and
+  // text_repr is left EXIF-only (the caption/face workers rebuild it, so names live in entity_hints).
+  const sidecar = readSidecar(absPath);
 
   const payload = {
     source: 'photo-exif',
@@ -48,11 +56,18 @@ async function buildPayload(absPath, relPath) {
   // occurred_at is when the photo was TAKEN, never a mtime/import-time guess — doc 04 §3 is
   // explicit that a 2019 photo imported today must still sort into 2019, so an unknown date
   // is omitted (and warned on) rather than approximated with something that's actively wrong.
-  if (date) payload.occurred_at = date.toISOString();
-  if (latitude != null) {
-    payload.latitude = latitude;
-    payload.longitude = longitude;
+  const occurred = date ?? sidecar?.takenTime ?? null;
+  if (occurred) payload.occurred_at = occurred.toISOString();
+  const lat = latitude ?? sidecar?.latitude ?? null;
+  const lon = longitude ?? sidecar?.longitude ?? null;
+  if (lat != null && lon != null) {
+    payload.latitude = lat;
+    payload.longitude = lon;
   }
+  const hints = (sidecar?.names ?? []).map((name) => ({
+    alias: name, alias_type: 'name', role: 'pictured', confidence: PICTURED_HINT_CONFIDENCE,
+  }));
+  if (hints.length) payload.entity_hints = hints;
   return payload;
 }
 

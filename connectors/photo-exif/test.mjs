@@ -121,6 +121,74 @@ test('scan.js: EXIF + GPS photo, GPS-only photo, no-metadata photo, unchanged-fi
   assert.equal(requests2.length, 0, 'unchanged files are skipped on re-scan');
 });
 
+test('scan.js: Google Takeout sidecar → pictured hints + takenTime/geo fallback (#152)', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-takeout-'));
+  const sidecar = (mediaName, body) => writeFileSync(path.join(tmp, `${mediaName}.supplemental-metadata.json`), JSON.stringify(body));
+  const noExif = () => Buffer.from(BASE_JPEG_BASE64, 'base64');
+  const TAKEN = 1764458538; // unix seconds — UTC, zone-unambiguous
+  const takenISO = new Date(TAKEN * 1000).toISOString();
+
+  // (a) no EXIF + full sidecar: people → hints, takenTime → occurred_at, real geo → coords
+  writeFileSync(path.join(tmp, 'sidecar-full.jpg'), noExif());
+  sidecar('sidecar-full.jpg', { people: [{ name: 'April Delugach Paine' }, { name: 'Matt Paine' }, { name: 'Amy Schneider' }], photoTakenTime: { timestamp: String(TAKEN) }, geoData: { latitude: 38.8981222, longitude: -77.0334917 } });
+
+  // (b) EXIF present: EXIF date/gps WIN over the sidecar, but people still become hints
+  writeFileSync(path.join(tmp, 'exif-wins.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00', lat: 30.2672, lon: -97.7431 }));
+  sidecar('exif-wins.jpg', { people: [{ name: 'Amy Schneider' }], photoTakenTime: { timestamp: String(TAKEN) }, geoData: { latitude: 10, longitude: 20 } });
+
+  // (c) geoData {0,0} is Google's "no location" sentinel → no coords (but date + hints still set)
+  writeFileSync(path.join(tmp, 'zero-geo.jpg'), noExif());
+  sidecar('zero-geo.jpg', { people: [{ name: 'Amy Schneider' }], photoTakenTime: { timestamp: String(TAKEN) }, geoData: { latitude: 0, longitude: 0 } });
+
+  // (d) duplicate-media naming: sidecar is "<stem><ext>.supplemental-metadata(N).json"
+  writeFileSync(path.join(tmp, 'dup(1).jpg'), noExif());
+  writeFileSync(path.join(tmp, 'dup.jpg.supplemental-metadata(1).json'), JSON.stringify({ people: [{ name: 'Matt Paine' }], photoTakenTime: { timestamp: String(TAKEN) } }));
+
+  // (e) no sidecar and (f) malformed sidecar → EXIF-only, must not throw/abort the scan
+  writeFileSync(path.join(tmp, 'no-sidecar.jpg'), noExif());
+  writeFileSync(path.join(tmp, 'bad-sidecar.jpg'), noExif());
+  writeFileSync(path.join(tmp, 'bad-sidecar.jpg.supplemental-metadata.json'), '{ not valid json');
+
+  const { server, port, requests } = await startMockServer((req, body, res) => {
+    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
+  });
+  const result = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'), TZ: 'UTC',
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  const arts = requests[0].body.artifacts;
+  const by = (id) => arts.find((a) => a.source_id === id);
+
+  const full = by('sidecar-full.jpg');
+  assert.deepEqual(full.entity_hints, [
+    { alias: 'April Delugach Paine', alias_type: 'name', role: 'pictured', confidence: 0.9 },
+    { alias: 'Matt Paine', alias_type: 'name', role: 'pictured', confidence: 0.9 },
+    { alias: 'Amy Schneider', alias_type: 'name', role: 'pictured', confidence: 0.9 },
+  ]);
+  assert.equal(full.occurred_at, takenISO, 'sidecar photoTakenTime fills occurred_at when EXIF has none');
+  assert.equal(full.latitude, 38.8981222);
+  assert.equal(full.longitude, -77.0334917);
+
+  const exif = by('exif-wins.jpg');
+  assert.equal(exif.occurred_at, '2019-03-04T14:30:00.000Z', 'EXIF date wins over the sidecar');
+  assert.equal(exif.latitude, 30.2672, 'EXIF GPS wins over the sidecar');
+  assert.deepEqual(exif.entity_hints, [{ alias: 'Amy Schneider', alias_type: 'name', role: 'pictured', confidence: 0.9 }]);
+
+  const zero = by('zero-geo.jpg');
+  assert.equal(zero.occurred_at, takenISO);
+  assert.equal(zero.latitude, undefined, 'geoData {0,0} is not submitted as a coordinate');
+  assert.equal(zero.longitude, undefined);
+
+  assert.deepEqual(by('dup(1).jpg').entity_hints, [{ alias: 'Matt Paine', alias_type: 'name', role: 'pictured', confidence: 0.9 }], 'duplicate-named sidecar is resolved');
+
+  assert.equal(by('no-sidecar.jpg').entity_hints, undefined, 'no sidecar → no hints');
+  assert.equal(by('no-sidecar.jpg').occurred_at, undefined);
+  assert.equal(by('bad-sidecar.jpg').entity_hints, undefined, 'malformed sidecar → EXIF-only, no crash');
+});
+
 test('scan.js: same filename in different subdirectories gets distinct source_ids', async () => {
   // Regression test: walkImageFiles() used to recompute relPath relative to the CURRENT
   // recursion directory rather than the original root, so "2019/trip/IMG_1234.jpg" and
