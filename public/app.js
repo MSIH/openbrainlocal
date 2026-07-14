@@ -474,7 +474,7 @@ async function approveProposal(id) {
   if (!confirm(`Approve proposal #${id}? This mints (or links) a contact in the graph.`)) return;
   try {
     const { entity_id } = await api('POST', `/api/v1/entities/proposed/${id}/approve`, {});
-    toast(`Approved → contact #${entity_id}.`, false, { label: 'View', onClick: () => selectContact(entity_id) });
+    toast(`Approved → contact #${entity_id}.`, false, { label: 'View', onClick: () => { closeProposed(); selectContact(entity_id); } });
     loadProposed();
     loadList();
   } catch (err) { reportError(err); loadProposed(); } // 409 already-resolved / 404: surface + drop the stale row
