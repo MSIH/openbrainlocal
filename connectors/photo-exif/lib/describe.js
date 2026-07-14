@@ -47,7 +47,7 @@ export function readSidecar(absPath) {
     return null;
   }
   const names = Array.isArray(data.people)
-    ? data.people.map((p) => p?.name).filter((n) => typeof n === 'string' && n.trim())
+    ? data.people.map((p) => (typeof p?.name === 'string' ? p.name.trim() : '')).filter(Boolean)
     : [];
   const ts = Number(data.photoTakenTime?.timestamp);
   const takenTime = Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000) : null;

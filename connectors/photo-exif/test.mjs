@@ -142,7 +142,7 @@ test('scan.js: Google Takeout sidecar → pictured hints + takenTime/geo fallbac
 
   // (d) duplicate-media naming: sidecar is "<stem><ext>.supplemental-metadata(N).json"
   writeFileSync(path.join(tmp, 'dup(1).jpg'), noExif());
-  writeFileSync(path.join(tmp, 'dup.jpg.supplemental-metadata(1).json'), JSON.stringify({ people: [{ name: 'Matt Paine' }], photoTakenTime: { timestamp: String(TAKEN) } }));
+  writeFileSync(path.join(tmp, 'dup.jpg.supplemental-metadata(1).json'), JSON.stringify({ people: [{ name: '  Matt Paine  ' }], photoTakenTime: { timestamp: String(TAKEN) } })); // padded name → asserted trimmed below
 
   // (e) no sidecar and (f) malformed sidecar → EXIF-only, must not throw/abort the scan
   writeFileSync(path.join(tmp, 'no-sidecar.jpg'), noExif());
