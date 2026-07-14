@@ -32,6 +32,7 @@
     </div>
     <button id="newContact" type="button" class="primary">+ New</button>
     <button id="duplicates" type="button" title="Review probable duplicate contacts">Duplicates</button>
+    <button id="proposed" type="button" title="Review auto-proposed contacts awaiting approval">Proposed</button>
     <button id="saveTop" type="button" class="primary" hidden>Save</button>
     <button id="keyEdit" type="button" class="ghost" title="Change API key">🔑</button>
   </header>
@@ -51,6 +52,18 @@
         <button id="dupClose" type="button" class="ghost" title="Close" aria-label="Close duplicates panel">✕</button>
       </div>
       <div id="dupList"></div>
+    </div>
+
+    <!-- Proposed-entities review overlay (#143): consumes GET /api/v1/entities/proposed +
+         POST /api/v1/entities/proposed/:id/{approve,reject} (backend #119). Same drawer pattern
+         as #dupPanel — role=dialog + focus move/restore in app.js. Approve mints/links a contact;
+         Reject marks it rejected (append-only, never re-raised). -->
+    <div id="propPanel" class="duppanel" role="dialog" aria-modal="true" aria-labelledby="propTitle" hidden>
+      <div class="dup-headbar">
+        <h2 id="propTitle">Proposed contacts</h2>
+        <button id="propClose" type="button" class="ghost" title="Close" aria-label="Close proposed contacts panel">✕</button>
+      </div>
+      <div id="propList"></div>
     </div>
   </main>
 

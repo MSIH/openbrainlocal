@@ -422,6 +422,76 @@ $('dupClose').addEventListener('click', closeDuplicates);
 // Escape closes the dialog (focus is inside the panel while it's open, so the handler receives it).
 $('dupPanel').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDuplicates(); });
 
+// --- proposed entities review (#143) ---
+// Human-approval gate for auto-proposed person/org entities (#119 proposed_entities table): email
+// senders, OCR'd doc vendors, etc. land as status='pending' instead of silently minting a contact.
+// Consumes GET /api/v1/entities/proposed + POST /entities/proposed/:id/{approve,reject}. Approve
+// mints (or links to an existing) entity and returns {entity_id}; Reject marks it rejected
+// (append-only — a re-ingest never re-raises it). Same drawer/focus discipline as #dupPanel.
+let propReturnFocus = null;
+function openProposed() {
+  propReturnFocus = document.activeElement;
+  $('propPanel').hidden = false;
+  $('propClose').focus();
+  loadProposed();
+}
+function closeProposed() {
+  $('propPanel').hidden = true;
+  if (propReturnFocus && typeof propReturnFocus.focus === 'function') propReturnFocus.focus();
+  propReturnFocus = null;
+}
+
+async function loadProposed() {
+  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
+  try {
+    const { proposals = [] } = await api('GET', '/api/v1/entities/proposed?status=pending&limit=50');
+    renderProposed(proposals);
+  } catch (err) { reportError(err); }
+}
+
+function renderProposed(proposals) {
+  const wrap = $('propList');
+  wrap.replaceChildren();
+  if (!proposals.length) { wrap.append(el('p', { class: 'empty' }, 'No pending proposals.')); return; }
+  for (const p of proposals) {
+    const approveBtn = el('button', { type: 'button', class: 'primary', onclick: () => approveProposal(p.id) }, 'Approve');
+    const rejectBtn = el('button', { type: 'button', class: 'danger', onclick: () => rejectProposal(p.id) }, 'Reject');
+    wrap.append(el('div', { class: 'dup-pair' },
+      el('div', { class: 'dup-top' },
+        el('span', { class: 'kind-badge' }, p.suggested_kind || '?'),
+        el('span', { class: 'dup-name' }, p.suggested_name || `#${p.id}`),
+        el('span', { class: 'dup-id' }, `#${p.id}`)),
+      el('div', { class: 'prop-fields' },
+        el('span', {}, `${p.alias} (${p.alias_type})`),
+        el('span', { class: 'dup-reason' }, `source: ${p.source ?? '—'}`),
+        el('span', { class: 'dup-reason' }, `confidence: ${p.confidence ?? '—'}`),
+        el('span', { class: 'dup-reason' }, p.created_at || '')),
+      el('div', { class: 'dup-actions' }, approveBtn, rejectBtn)));
+  }
+}
+
+async function approveProposal(id) {
+  if (!confirm(`Approve proposal #${id}? This mints (or links) a contact in the graph.`)) return;
+  try {
+    const { entity_id } = await api('POST', `/api/v1/entities/proposed/${id}/approve`, {});
+    toast(`Approved → contact #${entity_id}.`, false, { label: 'View', onClick: () => selectContact(entity_id) });
+    loadProposed();
+    loadList();
+  } catch (err) { reportError(err); loadProposed(); } // 409 already-resolved / 404: surface + drop the stale row
+}
+
+async function rejectProposal(id) {
+  try {
+    await api('POST', `/api/v1/entities/proposed/${id}/reject`, {});
+    toast('Proposal rejected.');
+    loadProposed();
+  } catch (err) { reportError(err); loadProposed(); } // 409 already-approved / 404: surface + re-fetch
+}
+
+$('proposed').addEventListener('click', openProposed);
+$('propClose').addEventListener('click', closeProposed);
+$('propPanel').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeProposed(); });
+
 // --- new contact ---
 $('newContact').addEventListener('click', async () => {
   const name = prompt('New contact name:');
