@@ -1353,11 +1353,43 @@ export function getContactPhotoRawPath(id) {
   return row?.raw_path ? path.resolve(row.raw_path) : null;
 }
 
+// Handle-annotation for display (#147). A connector bakes raw contact handles into text_repr
+// ("Message from +12406725399: …"); recall reads far better with the resolved name folded in.
+// Non-mutating: derives a display string from text_repr + the artifact's OWN entity links — the
+// stored text_repr (embedded, append-only) is never touched. A handle token is rewritten to
+// "Canonical Name (handle)" ONLY when it resolves — via the same normalizePhone/name path as
+// lookups, so a number stored without the +1 country code still matches (#129) — to exactly one
+// entity this artifact is linked to. An unlinked or ambiguous token (a number quoted inside a
+// message body, or "group chat") is left verbatim, never mis-attributed. The displayed number is
+// the raw handle as stored (lossless); only the match key is normalized.
+//
+// Resolution is scoped to the token's OWN alias_type (email tokens against email aliases, phone
+// tokens against phone aliases) rather than routed through resolveEntityIds — which also tries the
+// phone path on any 7+-digit string. An email like "h1471234567@example.com" would otherwise
+// digit-strip to "1471234567" and match a linked entity's *phone* alias, mis-annotating the email
+// with the wrong contact (Copilot, PR #148).
+const HANDLE_TOKEN_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\+?\d[\d().-]{5,}\d/g;
+const resolveHandleToken = (tok) => {
+  if (tok.includes('@')) return resolveAliasByTypeStmt.all(normalizeName(tok), 'email').map((r) => r.entity_id);
+  const digits = normalizePhone(tok);
+  return digits.length >= 7 ? resolveAliasByTypeStmt.all(digits, 'phone').map((r) => r.entity_id) : [];
+};
+export function annotateHandles(text, links) {
+  if (!text || !links?.length) return text;
+  const nameById = new Map(links.map((l) => [l.entity_id, l.canonical_name]));
+  return text.replace(HANDLE_TOKEN_RE, (tok) => {
+    const matched = resolveHandleToken(tok).filter((id) => nameById.has(id));
+    const name = matched.length === 1 ? nameById.get(matched[0]) : null;
+    return name ? `${name} (${tok})` : tok;
+  });
+}
+
 export function getArtifactById(id) {
   const a = getArtifactStmt.get(id);
   if (!a) return null;
   a.extra = a.extra_json ? safeJson(a.extra_json) : null;
   a.links = getLinksStmt.all(id);
+  a.display_text = annotateHandles(a.text_repr, a.links);
   return a;
 }
 

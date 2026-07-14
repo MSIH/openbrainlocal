@@ -55,7 +55,7 @@ async function executeStore(content) {
 // parse (avoids a per-recall model call and its fallback logging when QUERY_MODEL isn't pulled).
 async function executeRecall(query, limit) {
   const results = await hybridSearch(query, { limit, usePlanner: false });
-  return results.map((a) => ({ content: a.text_repr, created_at: a.occurred_at ?? a.ingested_at, distance: a.distance }));
+  return results.map((a) => ({ content: a.display_text ?? a.text_repr, created_at: a.occurred_at ?? a.ingested_at, distance: a.distance }));
 }
 
 // --- SHARED VALIDATION SCHEMAS (REST + MCP use the same bounds) ---
@@ -123,7 +123,9 @@ const ProposedQuerySchema = z.object({
 
 // --- OUTPUT FORMATTERS (MCP tools return text) ---
 const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
-const artifactLine = (a) => `- [${a.type}${a.occurred_at ? ` · ${a.occurred_at}` : ""}${a.distance != null ? ` · ${a.distance.toFixed(3)}` : ""}] (#${a.id}) ${snippet(a.text_repr)}`;
+// Prefer display_text (#147): the read-time, name-annotated form of text_repr set by getArtifactById.
+// timeline/about_entity rows are fetched without links and lack it — snippet falls back to text_repr.
+const artifactLine = (a) => `- [${a.type}${a.occurred_at ? ` · ${a.occurred_at}` : ""}${a.distance != null ? ` · ${a.distance.toFixed(3)}` : ""}] (#${a.id}) ${snippet(a.display_text ?? a.text_repr)}`;
 
 // --- AUTH ---
 // Query-param fallback name mirrors the `x-api-key` header so the credential is named the same

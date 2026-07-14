@@ -152,6 +152,54 @@ test('resolveEntityHints: deterministic types earn 1.0, name/handle are capped, 
   assert.equal(getArtifactById(id).links.length, linksBefore, 'idempotent — no duplicate links');
 });
 
+// --- display_text handle annotation (#147) ---
+test('display_text (#147): a linked handle in text_repr renders the contact name; text_repr stays raw; unlinked/absent left verbatim', () => {
+  const entityId = Number(insertEntityStmt.run('person', 'Amy Margaret Schneider', null).lastInsertRowid);
+  // Alias stored under the canonical key (no +1, #129) — proves the lookup normalizes the +1 handle.
+  insertAliasStmt.run(entityId, normalizePhone('+12406725399'), 'phone');
+  const raw = 'Message from +12406725399: "call 5551234567 later"'; // second number is NOT a linked entity
+  const { id } = storeArtifactTxn(
+    { type: 'message', source: uniqueSource(), source_id: 'msg-147', text_repr: raw },
+    f32(0.5),
+    [{ entity_id: entityId, role: 'sender', confidence: 1.0 }],
+  );
+  const a = getArtifactById(id);
+  assert.equal(a.text_repr, raw, 'stored text_repr is byte-for-byte unchanged (append-only)');
+  assert.equal(
+    a.display_text,
+    'Message from Amy Margaret Schneider (+12406725399): "call 5551234567 later"',
+    'the linked handle is renamed; the unlinked number in the body is left verbatim',
+  );
+
+  // No links -> display_text is just text_repr (no annotation, no crash).
+  const { id: bare } = storeArtifactTxn(
+    { type: 'note', source: uniqueSource(), source_id: 'note-147', text_repr: 'Message from +12406725399: "hi"' },
+    f32(0.5),
+  );
+  assert.equal(getArtifactById(bare).display_text, 'Message from +12406725399: "hi"');
+});
+
+test('display_text (#147): email tokens resolve by email alias only — a digit-heavy email never matches a phone alias', () => {
+  const entityId = Number(insertEntityStmt.run('person', 'Dana Ortega', null).lastInsertRowid);
+  insertAliasStmt.run(entityId, normalizePhone('+12565550111'), 'phone'); // canonical -> 2565550111
+  insertAliasStmt.run(entityId, 'dana@example.com', 'email');
+  // First email's digits (2565550111) equal Dana's phone; routing an email through the phone path
+  // would mis-annotate it (Copilot, PR #148). Second email is Dana's real address and must annotate.
+  const raw = 'Email from h2565550111@example.com; reply to dana@example.com';
+  const { id } = storeArtifactTxn(
+    { type: 'email', source: uniqueSource(), source_id: 'em-147', text_repr: raw },
+    f32(0.5),
+    [{ entity_id: entityId, role: 'sender', confidence: 1.0 }],
+  );
+  const d = getArtifactById(id).display_text;
+  assert.ok(!d.includes('(h2565550111@example.com)'), 'a digit-heavy email must not match a phone alias');
+  assert.equal(
+    d,
+    'Email from h2565550111@example.com; reply to Dana Ortega (dana@example.com)',
+    'only the real email resolves, via its email alias',
+  );
+});
+
 // --- Entity merge & duplicate detection (#75) ---
 const getRawEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const lastMergeLogStmt = db.prepare("SELECT * FROM ingest_log WHERE event_type = 'entity_merged' ORDER BY id DESC LIMIT 1");
