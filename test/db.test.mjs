@@ -10,7 +10,7 @@ import { useTempDb, f32 } from './helpers.mjs';
 
 const { cleanup } = useTempDb();
 const {
-  db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById,
+  db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById, annotateArtifactRows,
   insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates, listContactPhotos,
   resolveEntityIds, getEntity, upsertEntityRelation, listEntities,
   addAlias, removeAlias, insertAliasUnlessTombstoned, normalizePhone,
@@ -198,6 +198,30 @@ test('display_text (#147): email tokens resolve by email alias only — a digit-
     'Email from h2565550111@example.com; reply to Dana Ortega (dana@example.com)',
     'only the real email resolves, via its email alias',
   );
+});
+
+test('annotateArtifactRows (#149): batch-attaches display_text; linked row annotated, unlinked left raw; empty is safe', () => {
+  const entityId = Number(insertEntityStmt.run('person', 'Bianca Lopez', null).lastInsertRowid);
+  insertAliasStmt.run(entityId, normalizePhone('+12025550143'), 'phone');
+  const { id: linked } = storeArtifactTxn(
+    { type: 'message', source: uniqueSource(), source_id: 'ar-linked', text_repr: 'Message from +12025550143: "hi"' },
+    f32(0.5),
+    [{ entity_id: entityId, role: 'sender', confidence: 1.0 }],
+  );
+  const { id: unlinked } = storeArtifactTxn(
+    { type: 'message', source: uniqueSource(), source_id: 'ar-unlinked', text_repr: 'Message from +19998887777: "yo"' },
+    f32(0.5),
+  );
+  // Raw rows as timeline/about_entity fetch them — no links, no display_text until annotated.
+  const rows = [
+    { id: linked, text_repr: 'Message from +12025550143: "hi"' },
+    { id: unlinked, text_repr: 'Message from +19998887777: "yo"' },
+  ];
+  const out = annotateArtifactRows(rows);
+  assert.equal(out, rows, 'mutates and returns the same array');
+  assert.equal(rows[0].display_text, 'Message from Bianca Lopez (+12025550143): "hi"');
+  assert.equal(rows[1].display_text, 'Message from +19998887777: "yo"', 'unlinked handle left verbatim');
+  assert.equal(annotateArtifactRows([]).length, 0, 'empty input is safe');
 });
 
 // --- Entity merge & duplicate detection (#75) ---
