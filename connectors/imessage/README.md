@@ -42,7 +42,7 @@ macOS has no "read Messages only" permission: Full Disk Access (FDA) is the only
 ```python
 #!/usr/bin/env python3
 """LifeContext iMessage export helper. Only job: snapshot chat.db to the ingest folder."""
-import sqlite3, pathlib
+import os, sqlite3, tempfile, pathlib
 
 HOME    = pathlib.Path.home()
 SRC     = HOME / "Library/Messages/chat.db"
@@ -51,14 +51,24 @@ OUT_DB  = OUT_DIR / "chat.db"
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# sqlite backup API = one consistent snapshot, WAL folded in, source opened read-only
-src = sqlite3.connect(f"file:{SRC}?mode=ro", uri=True)
-dst = sqlite3.connect(str(OUT_DB))
-with dst:
-    src.backup(dst)
-dst.close()
-src.close()
-print(f"snapshot -> {OUT_DB}")
+# Snapshot to a temp file in the same dir, then atomically replace the destination — a reader
+# never sees a half-written DB, and an interrupted run leaves the previous good snapshot intact.
+fd, tmp = tempfile.mkstemp(dir=OUT_DIR, suffix=".tmp")
+os.close(fd)
+try:
+    # sqlite backup API = one consistent snapshot, WAL folded in, source opened read-only.
+    # as_uri() escapes spaces/special chars in the path; ?mode=ro forces read-only open.
+    src = sqlite3.connect(f"{SRC.as_uri()}?mode=ro", uri=True)
+    dst = sqlite3.connect(tmp)
+    with dst:
+        src.backup(dst)
+    dst.close()
+    src.close()
+    os.replace(tmp, OUT_DB)   # atomic on the same filesystem
+    print(f"snapshot -> {OUT_DB}")
+finally:
+    if os.path.exists(tmp):    # replace() consumed it on success; clean up on failure
+        os.remove(tmp)
 
 # Optional: attachments (can be large — enable deliberately). Only needed if core shares this
 # machine's filesystem and you want it to read attachment bytes — see the attachments note below.
@@ -67,7 +77,7 @@ print(f"snapshot -> {OUT_DB}")
 #                 OUT_DIR / "Attachments", dirs_exist_ok=True)
 ```
 
-Using SQLite's `backup()` API rather than `cp` gives a consistent snapshot and folds the `-wal`/`-shm` sidecars in, so the connector reads a single self-contained `chat.db` — no half-written WAL to worry about.
+Using SQLite's `backup()` API rather than `cp` gives a consistent snapshot and folds the `-wal`/`-shm` sidecars in, so the connector reads a single self-contained `chat.db` — no half-written WAL to worry about. Writing to a temp file and `os.replace()`-ing it in means a scan that runs mid-snapshot reads the previous complete DB, never a partial one.
 
 ### 2 — Freeze it into a standalone binary
 
@@ -128,7 +138,10 @@ That's the whole grant. `Terminal`, `python3`, `node`, and the connector itself 
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.local.lc-imessage-export.plist
+# modern macOS (10.11+): bootstrap the agent into your GUI login session
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.local.lc-imessage-export.plist
+# to remove it later: launchctl bootout gui/$(id -u)/com.local.lc-imessage-export
+# (older releases use the now-deprecated `launchctl load … / unload …`)
 ```
 
 **Critical:** `ProgramArguments` must invoke the FDA-granted binary **directly**. Wrap it in `/bin/sh -c "…"` and the process holding the file open becomes `sh`, which does not have FDA — it fails silently.
