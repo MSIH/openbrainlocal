@@ -115,7 +115,7 @@ function searchCard(a) {
       ['place', a.place_label],
       ['distance', `d ${fmtDist(a.distance)}`],
     ]),
-    cardBody(a.text_repr),
+    cardBody(a.display_text ?? a.text_repr), // #147: name-annotated text ("… from Amy Schneider (+1…)"); raw handle if unresolved
     linkChips(a.links));
 }
 
