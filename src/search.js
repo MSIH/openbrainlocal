@@ -8,7 +8,7 @@
  * Search never throws just because Ollama is offline.
  */
 import { z } from 'zod';
-import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, getRelationsTo, mergeEntities, listProbableDuplicates, listContactPhotos } from './db.js';
+import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, getRelationsTo, mergeEntities, listProbableDuplicates, listContactPhotos, annotateArtifactRows } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { geocodePlace, haversineKm } from './geocode.js';
 import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
@@ -366,15 +366,15 @@ export function timeline(start, end, types, limit = 50) {
   if (!types?.length && s && e) {
     const spanDays = (new Date(e) - new Date(s)) / MS_PER_DAY + 1;
     if (spanDays >= DIGEST_TIMELINE_DAYS) {
-      return timelineDigestStmt.all({ start: s, end: e, eligible_json: DIGEST_ELIGIBLE_JSON, limit });
+      return annotateArtifactRows(timelineDigestStmt.all({ start: s, end: e, eligible_json: DIGEST_ELIGIBLE_JSON, limit }));
     }
   }
-  return timelineStmt.all({
+  return annotateArtifactRows(timelineStmt.all({
     start: s,
     end: e,
     types_json: types?.length ? JSON.stringify(types) : null,
     limit,
-  });
+  }));
 }
 
 // Graph-only recall: no embedding. Resolve name -> entity -> recent linked artifacts +
@@ -388,7 +388,7 @@ export function timeline(start, end, types, limit = 50) {
 export function aboutEntity(name, limit = 10) {
   const ids = resolveEntityIds(name);
   if (!ids.length) return { resolved: false, name, entities: [] };
-  const entities = ids.map((id) => ({ entity: getEntity(id), artifacts: aboutStmt.all(id, limit), relations: getRelations(id), relations_in: getRelationsTo(id) }));
+  const entities = ids.map((id) => ({ entity: getEntity(id), artifacts: annotateArtifactRows(aboutStmt.all(id, limit)), relations: getRelations(id), relations_in: getRelationsTo(id) }));
   return { resolved: true, name, entities };
 }
 

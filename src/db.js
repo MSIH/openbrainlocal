@@ -1393,6 +1393,27 @@ export function getArtifactById(id) {
   return a;
 }
 
+// Batch links loader for the read paths that DON'T go through getArtifactById (timeline,
+// about_entity — #149). One query over all row ids (json_each), grouped in JS by artifact_id, so
+// annotating N rows costs a single round-trip, not N. getLinksStmt is single-id and stays private.
+const getLinksForIdsStmt = db.prepare(`
+  SELECT el.artifact_id, el.entity_id, el.role, el.confidence, e.canonical_name, e.kind
+  FROM entity_links el JOIN entities e ON e.id = el.entity_id
+  WHERE el.artifact_id IN (SELECT value FROM json_each(?))
+`);
+// Attach display_text (#147) to a batch of raw artifact rows in place, returning the same array.
+// Same read-time, non-mutating annotation as getArtifactById; a row with no links keeps text_repr.
+export function annotateArtifactRows(rows) {
+  if (!rows?.length) return rows;
+  const linksById = new Map();
+  for (const l of getLinksForIdsStmt.all(JSON.stringify(rows.map((r) => r.id)))) {
+    if (!linksById.has(l.artifact_id)) linksById.set(l.artifact_id, []);
+    linksById.get(l.artifact_id).push(l);
+  }
+  for (const r of rows) r.display_text = annotateHandles(r.text_repr, linksById.get(r.id) ?? []);
+  return rows;
+}
+
 // Raw artifact row by its upsert key, or undefined. Used by the ingest orchestrator to decide
 // whether text_repr changed (and thus whether to re-embed) before opening upsertArtifactTxn.
 export const getArtifactBySource = (source, sourceId) => getArtifactBySourceStmt.get(source, sourceId);

@@ -10,9 +10,9 @@ const { cleanup } = useTempDb();
 const fake = await startFakeOllama();
 process.env.OLLAMA_BASE_URL = fake.baseUrl;
 
-const { rrf, hybridSearch } = await import('../src/search.js');
+const { rrf, hybridSearch, timeline, aboutEntity } = await import('../src/search.js');
 const { executeIngest } = await import('../src/ingest.js');
-const { db } = await import('../src/db.js');
+const { db, insertEntityStmt, insertAliasStmt, normalizePhone } = await import('../src/db.js');
 
 after(async () => { db.close(); await fake.close(); cleanup(); });
 
@@ -44,4 +44,25 @@ test('hybridSearch enforces default_searchable: a no-type search hides a visit; 
   const explicit = (await hybridSearch('hiking trip alpine lakes', { limit: 10, types: ['visit'], usePlanner: false })).map((r) => r.type);
   assert.ok(explicit.includes('visit'), 'an explicit types:[visit] returns the visit — explicit wins over the default');
   assert.ok(!explicit.includes('note'), 'the explicit type filter still excludes other types');
+});
+
+test('timeline + about_entity annotate handles with the resolved contact name (#149)', async () => {
+  // A contact with a phone alias, then a message from that number — the ingest hint links it.
+  const eid = Number(insertEntityStmt.run('person', 'Marta Reyes', null).lastInsertRowid);
+  insertAliasStmt.run(eid, normalizePhone('+13105550188'), 'phone');
+  insertAliasStmt.run(eid, 'marta reyes', 'name'); // so aboutEntity('Marta Reyes') resolves by name
+  await executeIngest({
+    source: 'tl', source_id: 'msg-149', type: 'message',
+    text_repr: 'Message from +13105550188: "dinner at 7?"', occurred_at: '2026-03-15',
+    entity_hints: [{ alias: '+13105550188', alias_type: 'phone', role: 'sender' }],
+  });
+
+  const row = timeline('2026-03-01', '2026-03-31').find((r) => r.source_id === 'msg-149');
+  assert.ok(row, 'the message is in the timeline range');
+  assert.equal(row.text_repr, 'Message from +13105550188: "dinner at 7?"', 'text_repr stays raw');
+  assert.equal(row.display_text, 'Message from Marta Reyes (+13105550188): "dinner at 7?"');
+
+  const about = aboutEntity('Marta Reyes');
+  const linked = about.entities[0].artifacts.find((a) => a.source_id === 'msg-149');
+  assert.equal(linked.display_text, 'Message from Marta Reyes (+13105550188): "dinner at 7?"');
 });
