@@ -1,11 +1,12 @@
 // Seeds a synthetic chat.db (real iMessage schema) and runs index.js against it with mock
 // ingest servers, since there's no macOS box in CI/dev to test against a real one. Covers:
 // plain text, attributedBody-only text, a photo attachment, a group-chat outgoing message,
-// cursor advancement, and idempotent re-run.
+// cursor advancement, idempotent re-run, and (#142) a --watch pass reopening an
+// atomically-replaced snapshot so its new rows sync without a restart.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -216,4 +217,81 @@ test('ingest failure aborts the page without advancing the cursor', async () => 
   assert.throws(() => readFileSync(statePath, 'utf8'), 'cursor file never written');
 
   rmSync(tmp, { recursive: true, force: true });
+});
+
+// #142: the export helper snapshots via os.replace() (atomic rename -> new inode). A watcher that
+// held its DB handle open would keep reading the old inode and never see a newer snapshot. This
+// asserts a --watch pass reopens the replaced file and syncs its new rows without a restart.
+test('watch: an atomically-replaced snapshot (new inode) is reopened and its new rows sync', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'imessage-test-'));
+  const dbPath = path.join(tmp, 'chat.db');
+  const statePath = path.join(tmp, 'cursor.json');
+  seedChatDb(dbPath); // v1: ROWIDs 1-5
+
+  const { server, port, received } = await startMockServer((body, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      summary: { created: body.artifacts.length, updated: 0, failed: 0 },
+      results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })),
+    }));
+  });
+
+  const sawSourceId = (id) => received.some((b) => b.artifacts?.some((a) => a.source_id === id));
+  const waitFor = async (predicate, timeoutMs = 5000) => {
+    const start = Date.now();
+    while (!predicate()) {
+      if (Date.now() - start > timeoutMs) return false;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return true;
+  };
+
+  const child = spawn(process.execPath, [path.join(import.meta.dirname, 'index.js'), '--watch'], {
+    env: { ...process.env,
+      LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
+      LIFECONTEXT_API_KEY: 'test-key',
+      IMESSAGE_DB_PATH: dbPath,
+      IMESSAGE_STATE_PATH: statePath,
+      IMESSAGE_POLL_INTERVAL_MS: '150',
+    },
+  });
+  let stderr = '';
+  child.stderr.on('data', (d) => { stderr += d; });
+
+  try {
+    // initial backfill picked up the v1 rows (generous timeout for cold child + native module load)
+    assert.ok(await waitFor(() => sawSourceId('chat.db:msg:1'), 10000), `initial backfill never ran: ${stderr}`);
+
+    // atomically replace the snapshot with v2 (adds ROWID 6) — new inode, exactly like os.replace()
+    const v2 = path.join(tmp, 'chat.db.next');
+    seedChatDb(v2);
+    const db2 = new Database(v2);
+    db2.prepare(`INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, date, cache_has_attachments)
+                 VALUES (6, 'msg-6', 'Fresh snapshot message', 1, 0, ?, 0)`)
+      .run(toAppleNs('2026-07-02T08:00:00Z'));
+    db2.close();
+    renameSync(v2, dbPath); // atomic inode swap
+
+    // the next poll must reopen the new inode and ingest ROWID 6
+    assert.ok(await waitFor(() => sawSourceId('chat.db:msg:6')),
+      `new snapshot row never ingested — stale-handle regression (#142): ${stderr}`);
+    // The child writes the cursor AFTER the POST is received (cross-process), so poll for it rather
+    // than reading once — otherwise this races the child's writeCursor.
+    const cursorReached6 = await waitFor(() => {
+      try { return JSON.parse(readFileSync(statePath, 'utf8')).lastRowId === 6; } catch { return false; }
+    });
+    assert.ok(cursorReached6, 'cursor advanced to the new row');
+  } finally {
+    child.kill('SIGTERM');
+    // Register the close listener only if the child is still alive; if it already exited, the
+    // 'close' event has fired and would never fire again — awaiting it would hang forever
+    // (node:test has no default per-test timeout). The check + on() are synchronous (no yield
+    // between), so no close event can slip through the gap.
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise((r) => child.once('close', r));
+    }
+    server.closeAllConnections();
+    server.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

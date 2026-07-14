@@ -220,41 +220,54 @@ async function backfill(statements, chatCache) {
   }
 }
 
+// One backfill pass against a FRESH connection. The export helper (README) snapshots via
+// os.replace() — an atomic rename to a NEW inode — so a connection opened before the swap keeps
+// reading the old, now-unlinked inode and never sees rows added by a later snapshot. Opening (and
+// closing) per pass makes every pass read the CURRENT file, which is what lets --watch work against
+// the helper's snapshot at all. The chat-participant cache is per-pass too: a later snapshot may
+// change a group's roster, so caching it for the process lifetime would serve stale entity_hints
+// for outgoing group messages while their rows are read fresh. See #142.
+async function runPass() {
+  const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+  try {
+    await backfill(prepareStatements(db), new Map());
+  } finally {
+    db.close();
+  }
+}
+
 async function main() {
   if (!LIFECONTEXT_API_KEY || LIFECONTEXT_API_KEY === 'change-this-to-a-long-secure-token') {
     console.error('imessage: LIFECONTEXT_API_KEY not configured (see .env.example)');
     process.exit(1);
   }
 
-  const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
-  const statements = prepareStatements(db);
-  const chatCache = new Map();
-
-  await backfill(statements, chatCache);
+  await runPass();
 
   if (!WATCH) {
-    db.close();
     process.exit(process.exitCode ?? 0); // fetch's keep-alive sockets would otherwise hold the process open
     return;
   }
 
   console.error(`imessage: watching for new messages every ${POLL_INTERVAL_MS}ms`);
-  // Self-rescheduling setTimeout, not setInterval: a poll that takes longer than
-  // POLL_INTERVAL_MS (slow network, large batch) must not overlap with the next one — two
-  // concurrent backfill() calls would race reading/writing the same cursor file. The next
-  // poll is scheduled only after the current one settles.
+  // Self-rescheduling setTimeout, not setInterval: a pass that takes longer than POLL_INTERVAL_MS
+  // (slow network, large page) must not overlap with the next one — two concurrent passes would
+  // race reading/writing the same cursor file. The next poll is scheduled only after the current
+  // one settles. Each poll is a fresh runPass() so an atomically-replaced snapshot (new inode) is
+  // reopened and its new rows are picked up — without this, a long-running watcher never sees a
+  // newer snapshot. See #142.
   let stopped = false;
   let timer = null;
   const scheduleNextPoll = () => {
     if (stopped) return;
     timer = setTimeout(() => {
-      backfill(statements, chatCache)
+      runPass()
         .catch((err) => console.error('imessage: poll failed', err))
         .finally(scheduleNextPoll);
     }, POLL_INTERVAL_MS);
   };
   scheduleNextPoll();
-  const shutdown = () => { stopped = true; clearTimeout(timer); db.close(); process.exit(0); };
+  const shutdown = () => { stopped = true; clearTimeout(timer); process.exit(0); };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

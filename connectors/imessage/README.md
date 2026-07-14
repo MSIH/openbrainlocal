@@ -16,7 +16,7 @@ Reads `~/Library/Messages/chat.db` (read-only, WAL-safe) and syncs messages and 
 1. `cp .env.example .env` and fill in `LIFECONTEXT_URL` / `LIFECONTEXT_API_KEY`.
 2. `npm install` (this connector has real dependencies: `better-sqlite3` to read `chat.db`, `bplist-parser` to decode `attributedBody`).
 3. **Give the connector read access to `chat.db` without granting Full Disk Access to your whole shell** — see [Full Disk Access — scope it to one helper, not your terminal](#full-disk-access--scope-it-to-one-helper-not-your-terminal) below. The connector reads a plain snapshot the helper produces, via `IMESSAGE_DB_PATH`; it never needs FDA itself.
-4. Backfill: `node index.js`. Watch mode (leave running, e.g. under `launchd`/`pm2`): `node index.js --watch`. With the scoped-helper setup, both read the snapshot at `IMESSAGE_DB_PATH`, not the live `~/Library/Messages/chat.db`.
+4. Backfill: `node index.js`. For continuous sync, run it one-shot on a `launchd` timer or long-running with `--watch` (each poll reopens the snapshot, #142) — see [Keep the connector running](#7--keep-the-connector-running-ongoing-sync). With the scoped-helper setup, both read the snapshot at `IMESSAGE_DB_PATH`, not the live `~/Library/Messages/chat.db`.
 5. **Hub-and-spoke topology is just configuration**: to run this on a Mac Mini that syncs to a LifeContext server on another machine, set `LIFECONTEXT_URL` to that machine's LAN IP. No code change — that's the point of the ingest contract being plain HTTP.
 
 ## Full Disk Access — scope it to one helper, not your terminal
@@ -155,6 +155,17 @@ IMESSAGE_DB_PATH=/Users/YOU/LifeContext/ingest/imessage/chat.db
 ```
 
 Then `node index.js` (or `--watch`) reads the unprotected snapshot — no FDA on Node, your shell, or the connector.
+
+### 7 — Keep the connector running (ongoing sync)
+
+The helper writes each snapshot with `os.replace()` — an **atomic rename to a new inode** (§ helper, above). That detail drives how the connector must be run for *continuous* sync, and there are two conformant models:
+
+- **One-shot on a timer (recommended for the snapshot setup).** Run `node index.js` (no `--watch`) from a `launchd` `StartInterval` — each run opens the *current* snapshot fresh, ingests everything past the cursor, and exits. It's the simplest robust option and lines up naturally with the helper's snapshot cadence (fire it a little after the helper). This is the "good for cron" default mode.
+- **`--watch` (long-running).** `node index.js --watch` backfills once, then polls every `IMESSAGE_POLL_INTERVAL_MS`. **Each poll reopens the snapshot** (#142), so an atomically-replaced snapshot (new inode) is picked up without a restart. (A single long-lived handle would keep reading the old, unlinked inode and never see a newer snapshot — that was the #142 bug; the reopen-per-poll fix is what makes `--watch` safe against the helper's `os.replace()` output.)
+
+A one-shot connector `launchd` agent (`~/Library/LaunchAgents/com.local.lc-imessage-connector.plist`) resembles the helper's — invoke `node` directly with the script's absolute path, `RunAtLoad`, and a `StartInterval` at (or just after) the helper's cadence. No `WorkingDirectory` is needed: `.env` loads relative to the script and the cursor/DB paths resolve absolutely. Bootstrap it the same way: `launchctl bootstrap gui/$(id -u) <plist>`.
+
+**Reliability against a slow or remote embedder.** Core embeds every message as it ingests, so a slow/remote LifeContext (e.g. behind a Cloudflare Tunnel with a request timeout) makes large batches risky. Set **`IMESSAGE_DB_PAGE_SIZE` small (e.g. `10`)**: each POST then carries ≤10 messages (timeout-proof) and the cursor checkpoints every 10 rows, so an interruption re-does almost nothing. It's only marginally slower — the embedding work is fixed regardless of batching; smaller pages just add a few more HTTP round-trips. See `.env.example`.
 
 ### Verify the scoping worked
 
