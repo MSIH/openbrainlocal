@@ -19,6 +19,10 @@ The roadmap flags this as an open question ("worker lives with core or alongside
 4. Computes a sha256 `content_hash` of the file bytes (streamed, not loaded fully into memory).
 5. Sends `type='photo'` artifacts via `POST /api/v1/ingest/batch`.
 6. Skips files unchanged since the last scan (mtime+size cache in `PHOTO_EXIF_MANIFEST_PATH`) — repeat scans over a large library only process what's new.
+7. **Google Takeout sidecar enrichment (#152).** If a per-photo `*.supplemental-metadata.json` sits next to the image, `scan.js` reads it (best-effort) and adds:
+   - **`people[]` → `entity_hints`** (`alias_type:'name'`, `role:'pictured'`, `confidence:0.9`). These are Google's user-verified face tags; core resolves each against the entity graph, linking the photo to the person (or staging an unresolved alias). This *complements* the `face-worker` — it doesn't replace it.
+   - **`photoTakenTime` / `geoData` as EXIF fallback** — used only when the image's own EXIF lacks a date/GPS (Takeout frequently strips EXIF on export). EXIF always wins when present. `geoData {0,0}` is Google's "no location" sentinel and is **not** submitted as a coordinate.
+   - Sidecar names are **not** written into `text_repr` (the caption/face workers rebuild `text_repr`, so people live in the durable `entity_hints`, not the prose). Resolver handles `<file>.supplemental-metadata.json`, the duplicate-media `<stem><ext>.supplemental-metadata(N).json`, and older `<file>.json` (cheap existence probes only — no per-image directory scan). Google's rare length-truncated sidecar names are not matched (best-effort; such a photo simply falls back to EXIF-only).
 
 ### `caption-worker.js` (deliverables 3–4)
 1. Walks the same `PHOTO_ROOT`, skipping anything already captioned (local state file).
