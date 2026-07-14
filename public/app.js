@@ -51,7 +51,14 @@ let currentId = null, currentProfile = null, currentKind = '', searchTerm = '', 
 let currentSave = null; // set by renderDetail to the open contact's save closure; used by the top-bar Save (#127)
 
 // --- API key bar ---
-function showKeyBar(msg = '') { $('keyBar').hidden = false; $('keyMsg').textContent = msg; $('keyInput').value = apiKey(); $('keyInput').focus(); }
+// A review drawer (.duppanel: position:fixed, inset:0) would cover the key bar, trapping the user
+// with no way to enter a key — so close any open drawer before revealing/focusing it. Covers every
+// path that surfaces the key bar (no-key open, 401 mid-action) for both the duplicates and proposed drawers.
+function showKeyBar(msg = '') {
+  if (!$('dupPanel').hidden) closeDuplicates();
+  if (!$('propPanel').hidden) closeProposed();
+  $('keyBar').hidden = false; $('keyMsg').textContent = msg; $('keyInput').value = apiKey(); $('keyInput').focus();
+}
 function hideKeyBar() { $('keyBar').hidden = true; }
 $('keySave').addEventListener('click', () => {
   const v = $('keyInput').value.trim();
@@ -425,7 +432,7 @@ $('dupPanel').addEventListener('keydown', (e) => { if (e.key === 'Escape') close
 // --- proposed entities review (#143) ---
 // Human-approval gate for auto-proposed person/org entities (#119 proposed_entities table): email
 // senders, OCR'd doc vendors, etc. land as status='pending' instead of silently minting a contact.
-// Consumes GET /api/v1/entities/proposed + POST /entities/proposed/:id/{approve,reject}. Approve
+// Consumes GET /api/v1/entities/proposed + POST /api/v1/entities/proposed/:id/{approve,reject}. Approve
 // mints (or links to an existing) entity and returns {entity_id}; Reject marks it rejected
 // (append-only — a re-ingest never re-raises it). Same drawer/focus discipline as #dupPanel.
 let propReturnFocus = null;
