@@ -161,7 +161,7 @@ The single most important boundary in the contract.
 | Case | Action | Resulting confidence |
 |---|---|---|
 | Alias matches `entity_aliases` exactly (normalized) | Create `entity_links` row | 1.0 for deterministic alias types (email, phone); connector-supplied confidence (capped 0.9) for `name`/`handle` |
-| No match | Insert into `unresolved_aliases` staging table with artifact reference | — (staged; when a later contact import creates a matching alias, `resolveStagedArtifactHints` links every queued artifact automatically — see below) |
+| No match | Insert into `unresolved_aliases` staging table with artifact reference | — (staged; when a later contact import creates a matching alias, `resolveStagedArtifactHints` links every queued artifact automatically — see below). Core may additionally consult its **side contact directory** (#154) and, if that names the handle, stage a `proposed_entities` row for review — still connector-transparent (the connector submits the same bare hint either way). |
 | Connector supplies `confidence` > its type's cap | Clamp | Deterministic trust is earned by alias type, not asserted by the connector |
 
 Normalization (lowercase, digits-only phones) happens core-side; connectors submit what they see.

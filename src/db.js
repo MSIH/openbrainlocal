@@ -119,6 +119,22 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_proposed_status ON proposed_entities(status);
 
+  -- Side contact directory (#154): a handle -> name LOOKUP loaded from the user's full contacts
+  -- export. Deliberately NOT entities/entity_aliases — the curated entity graph only grows by
+  -- explicit approval. A directory hit on an unresolved handle (a) auto-labels it for display and
+  -- (b) stages a proposed_entities row (name pre-filled) for review. Nothing here is an entity, has
+  -- an embedding, or references entities. Handle is normalized (normalizePhone / lowercased email);
+  -- UNIQUE(handle, handle_type) makes the loader idempotent (first-writer-wins on a shared number,
+  -- mirroring entity_aliases discipline). name may repeat (a contact has several handles).
+  CREATE TABLE IF NOT EXISTS contact_directory (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    handle      TEXT NOT NULL,
+    handle_type TEXT NOT NULL CHECK(handle_type IN ('phone','email')),
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(handle, handle_type)
+  );
+
   -- Entity<->entity edges (issue #37; person->org added #88). entity_links joins
   -- artifacts->entities; this joins entities to each other (spouse/child/parent/…, and a
   -- person's worksAt->org). Append-only + idempotent via the UNIQUE key + OR IGNORE, mirroring
@@ -407,6 +423,56 @@ const getProposalStmt = db.prepare('SELECT * FROM proposed_entities WHERE id = ?
 const setProposalStatusStmt = db.prepare('UPDATE proposed_entities SET status = ? WHERE id = ?');
 const setProposalResolvedStmt = db.prepare(`UPDATE proposed_entities SET status = 'approved', resolved_entity_id = ? WHERE id = ?`);
 
+// Side contact directory (#154). Handles normalize the same way resolution does, so a directory
+// number stored 10-digit matches a `+1…` message handle and vice versa (#129). insertDirectoryEntry
+// is first-writer-wins per (handle, type) and logs a name collision; lookupDirectoryName returns the
+// stored name or null. Defined here (used by resolveEntityHints, annotateHandles, the loader, and
+// the backfill) — all callers run after module load, so referencing normalizePhone/normalizeName
+// (declared below) is safe.
+const directorySelectStmt = db.prepare('SELECT name FROM contact_directory WHERE handle = ? AND handle_type = ?');
+const directoryInsertStmt = db.prepare('INSERT OR IGNORE INTO contact_directory (name, handle, handle_type) VALUES (?, ?, ?)');
+const dirKey = (handle, handleType) => (handleType === 'phone' ? normalizePhone(handle) : normalizeName(handle));
+export function insertDirectoryEntry(name, handle, handleType) {
+  const cleanName = typeof name === 'string' ? name.trim() : '';
+  const key = handle ? dirKey(handle, handleType) : '';
+  if (!cleanName || !key) return { inserted: false, collision: false };
+  const existing = directorySelectStmt.get(key, handleType);
+  if (existing) {
+    const collision = existing.name !== cleanName;
+    if (collision) console.error(`contact_directory: ${handleType} ${key} already maps to "${existing.name}", ignoring "${cleanName}"`);
+    return { inserted: false, collision };
+  }
+  directoryInsertStmt.run(cleanName, key, handleType);
+  return { inserted: true, collision: false };
+}
+export const lookupDirectoryName = (handle, handleType) => {
+  const key = handle ? dirKey(handle, handleType) : '';
+  return key ? directorySelectStmt.get(key, handleType)?.name ?? null : null;
+};
+// Backfill: stage a directory-sourced person proposal for every historical unresolved phone/email
+// hint the directory knows (#154). Frequency-ordered so the highest-traffic numbers surface first;
+// skips a handle that has since become curated; idempotent (proposed_entities' UNIQUE absorbs re-runs).
+const selectUnmatchedHandlesStmt = db.prepare(`
+  SELECT alias, alias_type, MIN(artifact_id) AS artifact_id, COUNT(*) AS freq
+  FROM unresolved_aliases WHERE alias_type IN ('phone','email')
+  GROUP BY alias, alias_type ORDER BY COUNT(*) DESC
+`);
+export function backfillDirectoryProposals() {
+  let scanned = 0, proposed = 0;
+  const run = db.transaction(() => {
+    for (const row of selectUnmatchedHandlesStmt.all()) {
+      scanned++;
+      const name = lookupDirectoryName(row.alias, row.alias_type);
+      if (!name) continue;
+      if (resolveAliasByTypeStmt.all(row.alias, row.alias_type).length) continue; // became curated since
+      if (proposeEntity({ suggested_kind: 'person', name, alias: row.alias, alias_type: row.alias_type, artifact_id: row.artifact_id, source: 'directory-backfill' })) proposed++;
+    }
+  });
+  run();
+  logEvent('directory_backfill', 'backfill-directory-proposals.js', { scanned, proposed });
+  return { scanned, proposed };
+}
+
 // The 11 artifact columns storeArtifactTxn writes; callers pass a partial and we fill nulls.
 const ARTIFACT_FIELDS = ['type', 'source', 'source_id', 'content_hash', 'occurred_at',
   'latitude', 'longitude', 'place_label', 'raw_path', 'text_repr', 'extra_json'];
@@ -679,6 +745,13 @@ export function resolveEntityHints(artifactId, hints) {
           source: sourceOf(),
           confidence: hint.confidence ?? null,
         });
+      } else if (aliasType === 'phone' || aliasType === 'email') {
+        // #154: the connector sent no suggested_kind, but the side directory may know this handle —
+        // stage a person proposal with the directory's name (pre-filled) for review. Promotion into
+        // the curated graph still requires approval; the unresolved_aliases row above stands, so an
+        // approval retroactively links this artifact. Idempotent via proposed_entities' UNIQUE.
+        const dirName = lookupDirectoryName(alias, aliasType);
+        if (dirName) proposeEntity({ suggested_kind: 'person', name: dirName, alias, alias_type: aliasType, artifact_id: artifactId, source: sourceOf(), confidence: hint.confidence ?? null });
       }
     }
   }
@@ -1227,8 +1300,11 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
 // Stage a proposal (no entity is minted). Plain function (no transaction of its own): it runs
 // INSIDE resolveEntityHints, which runs inside the caller's ingest transaction. Hoisted so
 // resolveEntityHints (defined earlier) can call it. Idempotent via the table's UNIQUE key.
+// Returns true when a NEW proposal row was written (false when the UNIQUE key already existed —
+// INSERT OR IGNORE). Callers that count staged proposals (the #154 backfill) rely on this to stay
+// idempotent; resolveEntityHints ignores the return.
 function proposeEntity({ suggested_kind, name, alias, alias_type, artifact_id = null, source = null, confidence = null }) {
-  insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence);
+  return insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence).changes > 0;
 }
 
 // List proposals by status (default the review queue: pending), newest first.
@@ -1368,6 +1444,9 @@ export function getContactPhotoRawPath(id) {
 // phone path on any 7+-digit string. An email like "h1471234567@example.com" would otherwise
 // digit-strip to "1471234567" and match a linked entity's *phone* alias, mis-annotating the email
 // with the wrong contact (Copilot, PR #148).
+//
+// #154 auto-label: a curated entity link always wins; a token with no (or ambiguous) curated link
+// falls back to the side contact_directory (display-only — creates no entity, needs no approval).
 const HANDLE_TOKEN_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\+?\d[\d().-]{5,}\d/g;
 const resolveHandleToken = (tok) => {
   if (tok.includes('@')) return resolveAliasByTypeStmt.all(normalizeName(tok), 'email').map((r) => r.entity_id);
@@ -1375,12 +1454,14 @@ const resolveHandleToken = (tok) => {
   return digits.length >= 7 ? resolveAliasByTypeStmt.all(digits, 'phone').map((r) => r.entity_id) : [];
 };
 export function annotateHandles(text, links) {
-  if (!text || !links?.length) return text;
-  const nameById = new Map(links.map((l) => [l.entity_id, l.canonical_name]));
+  if (!text) return text;
+  const nameById = new Map((links ?? []).map((l) => [l.entity_id, l.canonical_name]));
   return text.replace(HANDLE_TOKEN_RE, (tok) => {
     const matched = resolveHandleToken(tok).filter((id) => nameById.has(id));
-    const name = matched.length === 1 ? nameById.get(matched[0]) : null;
-    return name ? `${name} (${tok})` : tok;
+    if (matched.length === 1) return `${nameById.get(matched[0])} (${tok})`; // curated link wins
+    if (matched.length > 1) return tok;                                      // ambiguous curated → leave raw
+    const dirName = lookupDirectoryName(tok, tok.includes('@') ? 'email' : 'phone'); // #154 directory fallback
+    return dirName ? `${dirName} (${tok})` : tok;
   });
 }
 

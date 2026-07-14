@@ -15,8 +15,10 @@ const {
   resolveEntityIds, getEntity, upsertEntityRelation, listEntities,
   addAlias, removeAlias, insertAliasUnlessTombstoned, normalizePhone,
   listProposedEntities, approveProposedEntity, rejectProposedEntity,
+  insertDirectoryEntry, lookupDirectoryName, backfillDirectoryProposals,
 } = await import('../src/db.js');
 const { backfillPhoneAliases } = await import('../scripts/backfill-phone-aliases.js');
+const { loadDirectory } = await import('../scripts/load-directory.js');
 
 after(() => { db.close(); cleanup(); });
 
@@ -222,6 +224,86 @@ test('annotateArtifactRows (#149): batch-attaches display_text; linked row annot
   assert.equal(rows[0].display_text, 'Message from Bianca Lopez (+12025550143): "hi"');
   assert.equal(rows[1].display_text, 'Message from +19998887777: "yo"', 'unlinked handle left verbatim');
   assert.equal(annotateArtifactRows([]).length, 0, 'empty input is safe');
+});
+
+// --- Side contact directory (#154) ---
+test('contact_directory (#154): insert is idempotent + normalized + collision-detected; lookup normalizes', () => {
+  const a = insertDirectoryEntry('Jane Directory', '+1 (555) 123-0001', 'phone');
+  assert.equal(a.inserted, true);
+  assert.equal(insertDirectoryEntry('Jane Directory', '15551230001', 'phone').inserted, false, 'same handle+name is a no-op (normalized key match)');
+  // A different name for the same normalized handle is a logged collision, first-writer-wins.
+  const c = insertDirectoryEntry('Someone Else', '5551230001', 'phone');
+  assert.equal(c.inserted, false); assert.equal(c.collision, true);
+  // Lookup matches regardless of +1 / formatting (#129); email lowercased.
+  assert.equal(lookupDirectoryName('5551230001', 'phone'), 'Jane Directory');
+  assert.equal(lookupDirectoryName('+15551230001', 'phone'), 'Jane Directory');
+  insertDirectoryEntry('Mail Person', 'Mail@Example.com', 'email');
+  assert.equal(lookupDirectoryName('mail@example.com', 'email'), 'Mail Person');
+  assert.equal(lookupDirectoryName('9999999999', 'phone'), null, 'unknown handle → null');
+});
+
+test('resolveEntityHints (#154): a directory-known miss stages a person proposal (name pre-filled); an unknown miss does not', () => {
+  insertDirectoryEntry('Dir Sender', '5551239100', 'phone');
+  const { id } = storeArtifactTxn({ type: 'message', source: uniqueSource(), source_id: 'dir-hint', text_repr: 'Message from +15551239100: "hi"' }, f32(0.4));
+  const before = listProposedEntities('pending', 100).length;
+  resolveEntityHints(id, [
+    { alias: '+15551239100', alias_type: 'phone', role: 'sender' }, // in directory → proposal
+    { alias: '5559999999', alias_type: 'phone', role: 'sender' },   // not in directory → no proposal
+  ]);
+  const pending = listProposedEntities('pending', 100);
+  const mine = pending.filter((p) => p.alias === '5551239100');
+  assert.equal(mine.length, 1, 'exactly one directory-sourced proposal');
+  assert.equal(mine[0].suggested_kind, 'person');
+  assert.equal(mine[0].suggested_name, 'Dir Sender', 'name pre-filled from the directory');
+  assert.ok(!pending.some((p) => p.alias === '5559999999'), 'an unknown handle stages no proposal');
+  assert.equal(pending.length, before + 1, 'only the directory-known handle proposed');
+});
+
+test('annotateHandles (#154): auto-labels an unlinked handle from the directory; a curated link still wins', () => {
+  // Unlinked handle, present only in the directory → display borrows the directory name.
+  insertDirectoryEntry('Auto Label', '5551237777', 'phone');
+  const { id: unlinked } = storeArtifactTxn({ type: 'message', source: uniqueSource(), source_id: 'al-1', text_repr: 'Message from +15551237777: "yo"' }, f32(0.4));
+  assert.equal(getArtifactById(unlinked).display_text, 'Message from Auto Label (+15551237777): "yo"');
+
+  // Curated entity wins over a (conflicting) directory entry for the same number.
+  const eid = Number(insertEntityStmt.run('person', 'Curated Winner', null).lastInsertRowid);
+  insertAliasStmt.run(eid, normalizePhone('+15551238888'), 'phone');
+  insertDirectoryEntry('Directory Loser', '5551238888', 'phone');
+  const { id: linked } = storeArtifactTxn(
+    { type: 'message', source: uniqueSource(), source_id: 'al-2', text_repr: 'Message from +15551238888: "hey"' },
+    f32(0.4), [{ entity_id: eid, role: 'sender', confidence: 1.0 }],
+  );
+  assert.equal(getArtifactById(linked).display_text, 'Message from Curated Winner (+15551238888): "hey"');
+});
+
+test('backfillDirectoryProposals (#154): stages proposals for historical unresolved matches; idempotent', () => {
+  // Simulate history: a handle staged as unresolved BEFORE it was in the directory (no proposal then).
+  const { id } = storeArtifactTxn({ type: 'message', source: uniqueSource(), source_id: 'bf-1', text_repr: 'Message from +15551235555: "old"' }, f32(0.4));
+  resolveEntityHints(id, [{ alias: '+15551235555', alias_type: 'phone', role: 'sender' }]);
+  assert.ok(!listProposedEntities('pending', 200).some((p) => p.alias === '5551235555'), 'no proposal before the directory knows it');
+  insertDirectoryEntry('Backfilled Person', '5551235555', 'phone');
+  const first = backfillDirectoryProposals();
+  assert.ok(first.proposed >= 1, 'backfill stages the now-known handle');
+  const staged = listProposedEntities('pending', 200).find((p) => p.alias === '5551235555');
+  assert.equal(staged.suggested_name, 'Backfilled Person');
+  const second = backfillDirectoryProposals();
+  assert.equal(second.proposed, 0, 'idempotent — a second run stages nothing new');
+});
+
+test('loadDirectory (#154): vCard load populates the directory and creates NO entities', () => {
+  const beforePersons = db.prepare("SELECT COUNT(*) n FROM entities WHERE kind='person'").get().n;
+  const beforeAliases = db.prepare('SELECT COUNT(*) n FROM entity_aliases').get().n;
+  const vcf = [
+    'BEGIN:VCARD', 'VERSION:3.0', 'FN:Directory Only Contact',
+    'TEL;TYPE=CELL:+1 (555) 424-2000', 'EMAIL:dir.only@example.com', 'END:VCARD',
+  ].join('\n');
+  const s = loadDirectory(vcf);
+  assert.equal(s.contacts, 1);
+  assert.equal(s.loaded, 2, 'one phone + one email loaded');
+  assert.equal(lookupDirectoryName('5554242000', 'phone'), 'Directory Only Contact');
+  assert.equal(lookupDirectoryName('dir.only@example.com', 'email'), 'Directory Only Contact');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM entities WHERE kind='person'").get().n, beforePersons, 'no entity created');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM entity_aliases').get().n, beforeAliases, 'no alias created');
 });
 
 // --- Entity merge & duplicate detection (#75) ---
