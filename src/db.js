@@ -1362,12 +1362,23 @@ export function getContactPhotoRawPath(id) {
 // entity this artifact is linked to. An unlinked or ambiguous token (a number quoted inside a
 // message body, or "group chat") is left verbatim, never mis-attributed. The displayed number is
 // the raw handle as stored (lossless); only the match key is normalized.
+//
+// Resolution is scoped to the token's OWN alias_type (email tokens against email aliases, phone
+// tokens against phone aliases) rather than routed through resolveEntityIds — which also tries the
+// phone path on any 7+-digit string. An email like "h1471234567@example.com" would otherwise
+// digit-strip to "1471234567" and match a linked entity's *phone* alias, mis-annotating the email
+// with the wrong contact (Copilot, PR #148).
 const HANDLE_TOKEN_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\+?\d[\d().-]{5,}\d/g;
+const resolveHandleToken = (tok) => {
+  if (tok.includes('@')) return resolveAliasByTypeStmt.all(normalizeName(tok), 'email').map((r) => r.entity_id);
+  const digits = normalizePhone(tok);
+  return digits.length >= 7 ? resolveAliasByTypeStmt.all(digits, 'phone').map((r) => r.entity_id) : [];
+};
 export function annotateHandles(text, links) {
   if (!text || !links?.length) return text;
   const nameById = new Map(links.map((l) => [l.entity_id, l.canonical_name]));
   return text.replace(HANDLE_TOKEN_RE, (tok) => {
-    const matched = resolveEntityIds(tok).filter((id) => nameById.has(id));
+    const matched = resolveHandleToken(tok).filter((id) => nameById.has(id));
     const name = matched.length === 1 ? nameById.get(matched[0]) : null;
     return name ? `${name} (${tok})` : tok;
   });

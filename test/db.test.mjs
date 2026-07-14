@@ -179,6 +179,27 @@ test('display_text (#147): a linked handle in text_repr renders the contact name
   assert.equal(getArtifactById(bare).display_text, 'Message from +12406725399: "hi"');
 });
 
+test('display_text (#147): email tokens resolve by email alias only — a digit-heavy email never matches a phone alias', () => {
+  const entityId = Number(insertEntityStmt.run('person', 'Dana Ortega', null).lastInsertRowid);
+  insertAliasStmt.run(entityId, normalizePhone('+12565550111'), 'phone'); // canonical -> 2565550111
+  insertAliasStmt.run(entityId, 'dana@example.com', 'email');
+  // First email's digits (2565550111) equal Dana's phone; routing an email through the phone path
+  // would mis-annotate it (Copilot, PR #148). Second email is Dana's real address and must annotate.
+  const raw = 'Email from h2565550111@example.com; reply to dana@example.com';
+  const { id } = storeArtifactTxn(
+    { type: 'email', source: uniqueSource(), source_id: 'em-147', text_repr: raw },
+    f32(0.5),
+    [{ entity_id: entityId, role: 'sender', confidence: 1.0 }],
+  );
+  const d = getArtifactById(id).display_text;
+  assert.ok(!d.includes('(h2565550111@example.com)'), 'a digit-heavy email must not match a phone alias');
+  assert.equal(
+    d,
+    'Email from h2565550111@example.com; reply to Dana Ortega (dana@example.com)',
+    'only the real email resolves, via its email alias',
+  );
+});
+
 // --- Entity merge & duplicate detection (#75) ---
 const getRawEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const lastMergeLogStmt = db.prepare("SELECT * FROM ingest_log WHERE event_type = 'entity_merged' ORDER BY id DESC LIMIT 1");
