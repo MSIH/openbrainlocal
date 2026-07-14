@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, renameSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
@@ -78,16 +78,18 @@ function seedChatDb(dbPath) {
 
 function startMockServer(handler) {
   const received = [];
+  const headers = [];
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       const parsed = body ? JSON.parse(body) : {};
       received.push(parsed);
+      headers.push(req.headers);
       handler(parsed, res);
     });
   });
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, received })));
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, received, headers })));
 }
 
 // Async spawn, not spawnSync: spawnSync blocks this process's entire event loop until the
@@ -293,5 +295,116 @@ test('watch: an atomically-replaced snapshot (new inode) is reopened and its new
     server.closeAllConnections();
     server.close();
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// The loader reads `.env` beside index.js (hardcoded via import.meta.url), so a parser test must
+// place a real one there. stashEnvFile() moves any existing `.env` aside by RENAME first —
+// preserving its mode/owner/mtime and, on a hard mid-test abort, leaving the original recoverable
+// at `.env.testbak` (a plain read+rewrite would instead leave the dev's real `.env` clobbered).
+// The restore rename atomically replaces our throwaway test file. A fresh checkout has no `.env`
+// (gitignored), so the common case just deletes the temp one.
+const CONNECTOR_ENV_PATH = path.join(import.meta.dirname, '.env');
+function stashEnvFile() {
+  const bak = `${CONNECTOR_ENV_PATH}.testbak`;
+  const had = existsSync(CONNECTOR_ENV_PATH);
+  if (had) renameSync(CONNECTOR_ENV_PATH, bak);
+  return () => { if (had) renameSync(bak, CONNECTOR_ENV_PATH); else rmSync(CONNECTOR_ENV_PATH, { force: true }); };
+}
+
+// #141: the .env parser must strip an inline `# comment` from an unquoted value (a trailing
+// comment on IMESSAGE_DB_PATH pollutes the path → SQLITE_CANTOPEN) while keeping a `#` inside
+// a quoted value verbatim (secrets/URLs may contain it).
+test('#141 .env parser: inline comment stripped from path, quoted # preserved', async () => {
+  const restoreEnv = stashEnvFile();
+  const tmp = mkdtempSync(path.join(tmpdir(), 'imessage-test-'));
+  const dbPath = path.join(tmp, 'chat.db');
+  const statePath = path.join(tmp, 'cursor.json');
+  seedChatDb(dbPath);
+  writeFileSync(statePath, JSON.stringify({ lastRowId: 5 })); // skip all rows — this test is about parsing
+
+  const { server, port, received } = await startMockServer((body, res) => {
+    res.end(JSON.stringify({ summary: {}, results: [] }));
+  });
+
+  // IMESSAGE_DB_PATH carries a trailing inline comment (the original repro); the API key is
+  // quoted and contains a `#` that must survive unchanged.
+  writeFileSync(CONNECTOR_ENV_PATH, [
+    `LIFECONTEXT_URL=http://127.0.0.1:${port}`,
+    `IMESSAGE_DB_PATH=${dbPath}   # snapshot (recommended)`,
+    'LIFECONTEXT_API_KEY="ab#cd"',
+    '',
+  ].join('\n'));
+
+  try {
+    // Pass only STATE_PATH via env; DB_PATH/URL/KEY must come from the .env under test. Blank
+    // out any inherited copies so the loader (which skips already-defined keys) actually applies.
+    const result = await runConnector({
+      IMESSAGE_STATE_PATH: statePath,
+      LIFECONTEXT_URL: undefined,
+      IMESSAGE_DB_PATH: undefined,
+      LIFECONTEXT_API_KEY: undefined,
+    });
+
+    server.closeAllConnections();
+    server.close();
+
+    // DB opened with no SQLITE_CANTOPEN → the ` # snapshot...` comment was stripped from the path.
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /SQLITE_CANTOPEN/);
+    // Cursor already at the last row, so nothing is sent — but the connector must have gotten
+    // past DB open and configuration to reach that point.
+    assert.equal(received.length, 0, 'cursor at last row, nothing to sync');
+  } finally {
+    restoreEnv();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// A `#`-in-value assertion needs an actual request, so these run with the cursor unset (all rows
+// sync) and inspect the x-api-key header the connector sent. Two keys under one test:
+//  - quoted `"ab#cd"`  → surrounding quotes stripped, inner `#` kept.
+//  - unquoted `#abc`   → NO leading whitespace before `#`, so it is NOT a comment and stays intact
+//    (the KEY=#abc edge the parser explicitly preserves — guards it against silent regression).
+test('#141 .env parser: quoted # and leading-# unquoted values reach the wire verbatim', async () => {
+  for (const [rawKeyLine, expected] of [['LIFECONTEXT_API_KEY="ab#cd"', 'ab#cd'], ['LIFECONTEXT_API_KEY=#abc', '#abc']]) {
+    const restoreEnv = stashEnvFile();
+    const tmp = mkdtempSync(path.join(tmpdir(), 'imessage-test-'));
+    const dbPath = path.join(tmp, 'chat.db');
+    const statePath = path.join(tmp, 'cursor.json');
+    seedChatDb(dbPath);
+
+    const { server, port, headers } = await startMockServer((body, res) => {
+      res.end(JSON.stringify({
+        summary: { created: body.artifacts.length, updated: 0, failed: 0 },
+        results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })),
+      }));
+    });
+
+    writeFileSync(CONNECTOR_ENV_PATH, [
+      `LIFECONTEXT_URL=http://127.0.0.1:${port}`,
+      `IMESSAGE_DB_PATH=${dbPath} # inline comment`,
+      rawKeyLine,
+      '',
+    ].join('\n'));
+
+    try {
+      const result = await runConnector({
+        IMESSAGE_STATE_PATH: statePath,
+        LIFECONTEXT_URL: undefined,
+        IMESSAGE_DB_PATH: undefined,
+        LIFECONTEXT_API_KEY: undefined,
+      });
+
+      server.closeAllConnections();
+      server.close();
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(headers.length > 0, `connector made at least one ingest call (${rawKeyLine})`);
+      assert.equal(headers[0]['x-api-key'], expected, `value preserved verbatim: ${rawKeyLine}`);
+    } finally {
+      restoreEnv();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   }
 });
