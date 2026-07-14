@@ -31,7 +31,13 @@ function loadDotEnvIfPresent() {
     const match = /^\s*([\w.-]+)\s*=\s*(.*)?\s*$/.exec(line);
     if (!match || line.trim().startsWith('#')) continue;
     const [, key, rawValue = ''] = match;
-    if (process.env[key] === undefined) process.env[key] = rawValue.replace(/^['"]|['"]$/g, '');
+    if (process.env[key] !== undefined) continue;
+    const v = rawValue.trim();
+    // Quoted values are kept verbatim (any inner `#` preserved — secrets/URLs may contain it);
+    // unquoted values have a whitespace-preceded inline `#` comment stripped. `KEY=#abc` (no
+    // leading space) stays intact — only ` #` opens a comment.
+    const quoted = /^(['"])(.*)\1$/.exec(v);
+    process.env[key] = quoted ? quoted[2] : v.replace(/\s+#.*$/, '').trim();
   }
 }
 
