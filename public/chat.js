@@ -190,6 +190,7 @@ if (!apiKey()) showKeyBar('Enter your API key to begin.');
 function seedKeyFromPathToken() {
   const seg = location.pathname.match(/^\/ui\/([^/]+)\/[^/]+$/)?.[1];
   if (!seg) return;
+  if (localStorage.getItem(KEY_STORAGE)) return; // don't clobber an already-stored key / needlessly persist the token (Copilot, PR #163)
   try { localStorage.setItem(KEY_STORAGE, decodeURIComponent(seg)); }
   catch { localStorage.setItem(KEY_STORAGE, seg); } // malformed %-escape: fall back to the raw segment
 }

@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
+  <!-- The capability token lives in the URL path; no-referrer keeps it out of the Referer header
+       on any outbound request/navigation (#163). -->
+  <meta name="referrer" content="no-referrer" />
   <title>LifeContext · Contacts</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
