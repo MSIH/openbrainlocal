@@ -119,7 +119,15 @@ legend { padding: 0 6px; color: var(--muted); font-size: 13px; text-transform: u
 .turn .q-mode { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; flex: none; }
 .turn .q-text { font-weight: 600; font-size: 17px; }
 .results { display: flex; flex-direction: column; gap: 10px; }
-.thinking { color: var(--muted); }
+.thinking { color: var(--muted); display: flex; align-items: center; gap: 8px; }
+/* In-flight spinner (#180): a theme-aware ring (track = --border, head = --accent). Under
+   prefers-reduced-motion the rotation stops entirely — the adjacent "Searching…"/"Recalling…"
+   label carries the in-flight state without motion, and the accent arc reads as a static ring. */
+.spinner { flex: none; width: 15px; height: 15px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+/* Query-duration chip above the cards: `N results · X.XXs` (self-sized, not full-width). */
+.results-meta { align-self: flex-start; margin: 0; font-size: 12px; color: var(--muted); background: var(--chip); border-radius: 6px; padding: 2px 9px; }
 
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; box-shadow: var(--shadow); }
 .card-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
