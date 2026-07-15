@@ -28,7 +28,7 @@ import { access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
+import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
 import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
@@ -151,10 +151,13 @@ function requireAuth(req, res, next) {
   const token = req.headers['x-api-key']
     || bearer
     || req.query?.[AUTH_QUERY_PARAM];
-  if (!secureCompare(token, LIFECONTEXT_API_KEY)) {
-    return res.status(401).json({ error: "Unauthorized: Invalid or missing secret key token." });
+  // The browser UI's capability-URL token (#161) is a full-access alternative credential when set,
+  // so a bookmarked /ui/<token>/ page (which seeds the path token as x-api-key) authorizes /api
+  // calls with no manual key entry. It never weakens the primary key path — that check comes first.
+  if (secureCompare(token, LIFECONTEXT_API_KEY) || (UI_URL_TOKEN && secureCompare(token, UI_URL_TOKEN))) {
+    return next();
   }
-  next();
+  return res.status(401).json({ error: "Unauthorized: Invalid or missing secret key token." });
 }
 
 // Capability-URL auth for the claude.ai web MCP connector (issue #63): the token lives in the
@@ -163,6 +166,14 @@ function requireAuth(req, res, next) {
 // any unknown route, but here it also has to hide behind MCP_URL_TOKEN being unset entirely.
 function requirePathToken(req, res, next) {
   if (MCP_URL_TOKEN && secureCompare(req.params.token, MCP_URL_TOKEN)) return next();
+  res.status(404).end();
+}
+
+// The same capability-URL guard, bound to UI_URL_TOKEN, for the browser web UI (#161): the static
+// UI is served only at /ui/<token>/… when the segment matches. 404 (never 401) on a wrong/absent
+// token so the tokened mount's existence isn't confirmed by probing — same reasoning as the MCP one.
+function requireUiPathToken(req, res, next) {
+  if (UI_URL_TOKEN && secureCompare(req.params.token, UI_URL_TOKEN)) return next();
   res.status(404).end();
 }
 
@@ -685,12 +696,22 @@ app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
   res.sendFile(file, { dotfiles: 'allow' });
 }));
 
-// --- STATIC CONTACTS UI (#96) ---
-// Plain static assets served at /ui; the API key lives in the browser and rides x-api-key on every
-// /api/v1 call above (the static files carry no secret). Mounted after the rate limiter so page +
-// asset loads are still rate-limited.
+// --- STATIC WEB UI (#96, gated #161) ---
+// Static assets (the API key lives in the browser and rides x-api-key on every /api call — the
+// static files carry no secret). Mounted after the rate limiter so page + asset loads are still
+// rate-limited. Asset/nav refs in the HTML are RELATIVE (./style.css) so they resolve under either
+// mount point below (#161).
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
-app.use('/ui', express.static(publicDir));
+if (UI_URL_TOKEN) {
+  // Capability-URL gate (#161): the UI is served ONLY at /ui/<token>/… (bookmarkable). The guard
+  // 404s a wrong/absent token, and the bare /ui (no token segment) never matches this mount, so it
+  // falls through to a plain 404 — the UI page becomes world-unloadable without the URL. Registered
+  // only when the token is set (mirrors the MCP_URL_TOKEN guard) so an exposed instance forces it.
+  app.use('/ui/:token', requireUiPathToken, express.static(publicDir));
+} else {
+  // No token → today's plain, open mount (localhost dev convenience; no regression).
+  app.use('/ui', express.static(publicDir));
+}
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---
 const activeMcpTransports = new Map();
