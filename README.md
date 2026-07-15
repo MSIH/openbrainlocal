@@ -42,6 +42,8 @@ npm run setup
 npm start                         # REST + MCP on http://localhost:3000
 ```
 
+**Developing against your data?** Use `npm run dev` — it boots a second server on `:3001` against a **copy** of `life-context.db` (`.dev.db`, a consistent online snapshot), so tests never write your live memory. Add `-- --fresh` to re-copy. **Never** run a second `npm start` / `node src/server.js` against the live DB — concurrent SQLite writers cause `SQLITE_BUSY`/locks. Every instance logs its resolved DB file at boot, so a mis-pointed one is obvious.
+
 `npm run setup` prints the generated `LIFECONTEXT_API_KEY` once — **save it**; it's the `x-api-key` header for every call. Prefer to do it by hand? The manual equivalent (pull `qwen3-embedding:0.6b` + `qwen2.5:3b`, `cp .env.example .env`, set a key) is in [`docs/local-llm-setup-guide.md`](docs/local-llm-setup-guide.md).
 
 Upgrading from an earlier version? Migrate your existing memories into the artifact store once (back up your DB file first — `life-context.db` by default, or whatever `DB_PATH` points to — it's idempotent and safe to re-run). It reuses the stored vectors as-is, so it's only valid while the embedding model and `VECTOR_DIMENSION` are unchanged:
