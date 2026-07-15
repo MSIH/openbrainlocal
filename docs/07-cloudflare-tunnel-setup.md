@@ -183,6 +183,43 @@ relies on. **Rotate it** the same way you'd rotate any secret: generate a new va
 `MCP_URL_TOKEN`, restart, and update the URL in claude.ai's connector settings — the header
 key is untouched throughout.
 
+### Opening the browser UI remotely (capability URL)
+
+The web UI (Ask + Contacts, `/ui/*`) is static HTML/JS a browser loads and then calls `/api`
+from. A browser **can't** attach an `x-api-key` header to a plain address-bar visit, and the
+`/ui` static mount is *not* itself key-gated — so on a tunnel, `https://lc.yourdomain.com/ui/chat.html`
+would return **200 to anyone** (the data behind `/api` is still key-gated, but the page itself
+is world-loadable and fingerprints the host as a LifeContext instance). The fix mirrors the MCP
+token above: gate the UI behind a **capability URL** so it's both protected and bookmarkable (#161).
+
+1. Generate a token (again a **separate** secret from `LIFECONTEXT_API_KEY` and `MCP_URL_TOKEN`):
+
+   ```powershell
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+   ```
+
+2. Add it to `.env` as `UI_URL_TOKEN=<the value>` and restart. When set, the UI is served **only**
+   at `https://lc.yourdomain.com/ui/<token>/chat.html` (and `/ui/<token>/contacts.html`); the bare
+   `/ui/chat.html` — or a wrong token — 404s, exactly like the MCP path token. Leaving it unset keeps
+   today's plain `/ui` mount (fine for `http://localhost:3000`, where only you can reach it).
+3. **Bookmark that full URL.** The page reads the token from its own path and sends it as the API
+   key, so the bookmark works end-to-end with **no manual key entry** — `UI_URL_TOKEN` is, by design,
+   a full-access browser credential (the server accepts it on `/api` as an alternative to
+   `LIFECONTEXT_API_KEY`).
+
+**Same URL-leak caveat as the MCP token, and then some:** a secret in a URL leaks via browser
+history, proxy/CDN logs, and the `Referer` header — and a *browser* leaks URLs far more readily than
+a CLI does. Treat `UI_URL_TOKEN` as a convenience credential for your own bookmark, rotate it the
+same way (new value → `UI_URL_TOKEN` → restart → update the bookmark), and for anything beyond
+personal use put **Cloudflare Access** in front of `/ui` (next section) as the real gate.
+
+> **Access gates the browser UI, not MCP.** Cloudflare Access authenticates an interactive
+> browser session (SSO), which is exactly what a person loading `/ui` has — but a programmatic MCP
+> client (claude.ai web, Claude Desktop) can't complete an interactive login, so Access would just
+> break it. That asymmetry is *why* MCP relies on the `MCP_URL_TOKEN` path capability instead. Scope
+> any Access application you add to the `/ui` path (or a `/ui`-only hostname), leaving `/mcp` and
+> `/api` reachable for token/header clients.
+
 ---
 
 ## Part D — Optional extra locks (recommended, still free)
@@ -209,7 +246,10 @@ key is untouched throughout.
   Token**. Clients then send two extra headers (`CF-Access-Client-Id` and
   `CF-Access-Client-Secret`) that Cloudflare checks *before* the request ever reaches your
   server — and you can revoke a token from the dashboard without touching the server. Skip
-  this if your tool can only send one custom header.
+  this if your tool can only send one custom header. **For the browser UI specifically**, add an
+  Access *application with an interactive SSO policy* scoped to the `/ui` path instead (a person
+  loading `/ui` can complete the login; a service token suits header-sending API clients). Access
+  can't gate `/mcp` — see "Opening the browser UI remotely" above for why.
 
 - **Turn on Cloudflare's free firewall.** On your domain's dashboard under **Security**,
   enable the free managed WAF rules so obvious attack traffic is dropped at Cloudflare's

@@ -17,6 +17,8 @@ const fake = await startFakeOllama();
 process.env.LIFECONTEXT_API_KEY = API_KEY;
 process.env.OLLAMA_BASE_URL = fake.baseUrl;
 process.env.PORT = '0'; // ephemeral port — avoids collisions with a real running server
+delete process.env.UI_URL_TOKEN; // #161: this file exercises the UNSET (open /ui) path; the gated
+                                 // path is covered in ui-token.test.mjs (a child server with it set)
 // Real on-disk photo store: the /entities/photos + /:id/photo routes existence-check files (#112),
 // so contact photos in these tests must be real files under CONTACTS_RAW_DIR. Set before the app
 // import — server.js resolves CONTACT_PHOTO_DIR from CONTACTS_RAW_DIR at load.
@@ -82,6 +84,18 @@ test('store -> recall round-trip returns the memory with a distance', async () =
   // The row is within the KNN k (few rows, k>=50), so the vector arm populates a real distance —
   // assert its type, not mere key presence (which is always true from executeRecall's mapping).
   assert.equal(typeof match.distance, 'number', 'recall result carries a numeric distance');
+});
+
+test('UI (#161): with UI_URL_TOKEN unset, the plain /ui mount still serves the page (no regression)', async () => {
+  // The safe default: no token set → today's open /ui mount, so localhost dev is unchanged. The
+  // tokened path (bare /ui 404, /ui/<token>/ 200) is verified in ui-token.test.mjs against a server
+  // booted with UI_URL_TOKEN set (config is read once at import, so it needs its own process).
+  const res = await get('/ui/chat.html');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') || '', /text\/html/);
+  assert.match(await res.text(), /LifeContext/, 'the actual page HTML is served, not a 404 body');
+  // The HTML's relative refs (./style.css, ./chat.js) must resolve under the open /ui/ mount too.
+  assert.equal((await get('/ui/style.css')).status, 200, 'a relative asset resolves under the open mount');
 });
 
 test('/api/search: filter-then-rank path (planner + prefiltered KNN/FTS) returns typed results', async () => {
