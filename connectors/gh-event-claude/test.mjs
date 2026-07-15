@@ -1,6 +1,8 @@
 // Runs index.js end-to-end against a mock LifeContext ingest server (no real network, no LLM).
 // Covers: Bash `gh issue create` stdout parse, MCP create_pull_request JSON parse, html_url
-// preference, issue_write update -> no ingest, no-URL -> no ingest, and missing API key -> skip.
+// preference, issue_write update -> no ingest, no-URL -> no ingest, PR merge capture (Bash `gh pr
+// merge` shorthand + MCP merge_pull_request, keyed #merged; underivable-ref -> no ingest), and
+// missing API key -> skip.
 // Mirrors devsession-claude/test.mjs's harness.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -182,6 +184,77 @@ test('no issue/PR URL in the tool result -> no ingest, exits 0', async () => {
   server.close();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(requests.length, 0, 'a create with no resulting URL must not ingest anything');
+});
+
+test('Bash `gh pr merge`: reconstructs the URL from the "owner/repo#N" shorthand, records a Merged event keyed #merged', async () => {
+  const { server, port, requests } = await startMockServer();
+
+  const result = await runHook(
+    {
+      tool_name: 'Bash',
+      tool_input: { command: 'gh pr merge 164 --squash' },
+      // gh pr merge prints no full URL — only the "owner/repo#N" shorthand.
+      tool_response: { stdout: '✓ Squashed and merged pull request MSIH/life-context#164\n', stderr: '' },
+      cwd: '/tmp/some-project', // non-git → branch resolves null, text_repr deterministic
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 1);
+  const payload = requests[0].body;
+  assert.equal(payload.source_id, 'https://github.com/MSIH/life-context/pull/164#merged', 'merge keys on a distinct #merged source_id, not the bare URL');
+  assert.equal(payload.extra.action, 'merged');
+  assert.equal(payload.extra.kind, 'pr');
+  assert.equal(payload.extra.number, 164);
+  assert.equal(payload.extra.url, 'https://github.com/MSIH/life-context/pull/164', 'extra.url stays the bare PR URL');
+  assert.match(payload.text_repr, /^Merged GitHub pull request #164 in MSIH\/life-context\. /);
+});
+
+test('MCP merge_pull_request: builds the URL from {owner, repo, pullNumber}, Merged event keyed #merged', async () => {
+  const { server, port, requests } = await startMockServer();
+
+  const result = await runHook(
+    {
+      tool_name: 'mcp__github__merge_pull_request',
+      tool_input: { owner: 'MSIH', repo: 'life-context', pullNumber: 170, merge_method: 'squash' },
+      tool_response: { sha: 'deadbeef', merged: true },
+      cwd: '/tmp/some-project',
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 1);
+  const payload = requests[0].body;
+  assert.equal(payload.source_id, 'https://github.com/MSIH/life-context/pull/170#merged');
+  assert.equal(payload.extra.action, 'merged');
+  assert.equal(payload.extra.number, 170);
+  assert.match(payload.text_repr, /^Merged GitHub pull request #170 in MSIH\/life-context\. /);
+});
+
+test('merge with no derivable PR ref (no number/repo anywhere) -> no ingest, exits 0', async () => {
+  const { server, port, requests } = await startMockServer();
+
+  const result = await runHook(
+    {
+      tool_name: 'Bash',
+      tool_input: { command: 'gh pr merge --squash' }, // current-branch merge, no number; nothing to key on
+      tool_response: { stdout: '', stderr: '' },
+      cwd: '/tmp/some-project',
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 0, 'an undecipherable merge must not ingest anything');
+  assert.match(result.stderr, /could not resolve merged PR ref/);
 });
 
 test('missing LIFECONTEXT_API_KEY -> no-op skip, exits 0, no ingest', async () => {

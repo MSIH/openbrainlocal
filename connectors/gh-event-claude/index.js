@@ -30,6 +30,9 @@ const EVENT_TYPE = 'x-dev-event'; // issue/PR creation isn't a registered type; 
 // Owner/repo/kind/number from any github.com issue or PR URL, wherever it appears in the tool
 // result (Bash `gh` stdout or a stringified MCP response). Kept loose on the host path segments.
 const GH_URL_RE = /https:\/\/github\.com\/([^/\s"']+)\/([^/\s"']+)\/(issues|pull)\/(\d+)/;
+// `gh pr merge` prints no full URL — just the "owner/repo#number" shorthand (e.g.
+// "✓ Squashed and merged pull request MSIH/life-context#164"). Match that to reconstruct the URL.
+const GH_SHORTHAND_RE = /([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)/;
 
 // Tiny manual .env loader (no dependency): KEY=VALUE lines next to this script, never overriding a
 // variable already set in the real environment. Mirrors devsession-claude.
@@ -107,6 +110,37 @@ function isNonCreateIssueWrite(toolName, toolInput) {
   return toolName === 'mcp__github__issue_write' && method !== '' && method !== 'create';
 }
 
+// A merge is a DISTINCT event from the open (kept as a separate artifact, see below): the Bash
+// `gh pr merge …` command or the MCP merge tool. Everything else the hook fires on is an "opened".
+function isMergeEvent(toolName, toolInput) {
+  if (toolName === 'mcp__github__merge_pull_request') return true;
+  const command = typeof toolInput?.command === 'string' ? toolInput.command : '';
+  return /\bgh\s+pr\s+merge\b/.test(command);
+}
+
+// Resolve { url, repoSlug, number } for a merged PR. Unlike a create, `gh pr merge` emits no full
+// URL, so: prefer a real pull URL (MCP html_url / a URL in the command), then the MCP tool's
+// structured {owner, repo, pullNumber}, then the "owner/repo#N" shorthand `gh pr merge` prints —
+// reconstructing https://github.com/<repo>/pull/<n>. Best-effort: null when nothing is derivable.
+function resolveMergeRef(toolResponse, toolInput) {
+  const full = extractGithubUrlMatch(toolResponse, toolInput);
+  if (full && full[3] === 'pull') return { url: full[0], repoSlug: `${full[1]}/${full[2]}`, number: full[4] };
+
+  const { owner, repo, pullNumber } = toolInput ?? {};
+  if (owner && repo && pullNumber != null) {
+    const repoSlug = `${owner}/${repo}`;
+    return { url: `https://github.com/${repoSlug}/pull/${pullNumber}`, repoSlug, number: String(pullNumber) };
+  }
+
+  const haystack = `${stringifyResponse(toolResponse)}\n${toolInput?.command ?? ''}`;
+  const short = GH_SHORTHAND_RE.exec(haystack);
+  if (short) {
+    const repoSlug = `${short[1]}/${short[2]}`;
+    return { url: `https://github.com/${repoSlug}/pull/${short[3]}`, repoSlug, number: short[3] };
+  }
+  return null;
+}
+
 // Current branch, best-effort — useful context on a PR. Never throws (detached HEAD, no git, …).
 async function currentBranch(cwd) {
   try {
@@ -169,33 +203,52 @@ async function main() {
     return;
   }
 
-  // The URL is the anchor: no URL means the create didn't produce one (failed, or an update with
-  // nothing to record) — nothing to remember.
-  const urlMatch = extractGithubUrlMatch(toolResponse, toolInput);
-  if (!urlMatch) {
-    console.error(`gh-event-claude: no issue/PR URL in ${toolName} result; nothing to capture`);
-    return;
+  // Two actions: a merge (its own artifact) or an open. Both anchor on the PR/issue URL; no URL
+  // means nothing to remember (a failed create, an update, or an undecipherable merge).
+  const merge = isMergeEvent(toolName, toolInput);
+  let url, repoSlug, number, kind;
+  if (merge) {
+    const ref = resolveMergeRef(toolResponse, toolInput);
+    if (!ref) {
+      console.error(`gh-event-claude: could not resolve merged PR ref from ${toolName}; nothing to capture`);
+      return;
+    }
+    ({ url, repoSlug, number } = ref);
+    kind = 'pr';
+  } else {
+    const urlMatch = extractGithubUrlMatch(toolResponse, toolInput);
+    if (!urlMatch) {
+      console.error(`gh-event-claude: no issue/PR URL in ${toolName} result; nothing to capture`);
+      return;
+    }
+    const [matchedUrl, owner, repo, kindPath, matchedNumber] = urlMatch;
+    url = matchedUrl;
+    repoSlug = `${owner}/${repo}`;
+    number = matchedNumber;
+    kind = kindPath === 'pull' ? 'pr' : 'issue';
   }
-  const [url, owner, repo, kindPath, number] = urlMatch;
-  const kind = kindPath === 'pull' ? 'pr' : 'issue';
-  const repoSlug = `${owner}/${repo}`;
   const title = extractTitle(toolInput, toolResponse);
   const branch = kind === 'pr' ? await currentBranch(cwd) : null;
 
   await flushSpool().catch((err) => console.error('gh-event-claude: spool flush failed', err));
 
+  const action = merge ? 'merged' : 'opened';
+  const verb = merge ? 'Merged' : 'Opened';
   const label = kind === 'pr' ? 'pull request' : 'issue';
   const titlePart = title ? ` "${title}"` : '';
   const branchPart = branch ? ` (branch ${branch})` : '';
-  const textRepr = `Opened GitHub ${label} #${number}${titlePart} in ${repoSlug}${branchPart}. ${url}`;
+  const textRepr = `${verb} GitHub ${label} #${number}${titlePart} in ${repoSlug}${branchPart}. ${url}`;
+  // A merge keys on a DISTINCT source_id ("<url>#merged") so it never upserts over the "Opened"
+  // artifact for the same PR — both events coexist. An open keys on the bare URL as before.
+  const sourceId = merge ? `${url}#merged` : url;
 
   const payload = {
     source: SOURCE,
-    source_id: url, // reproducible + globally unique → re-fire upserts, never duplicates
+    source_id: sourceId, // reproducible + globally unique → re-fire upserts, never duplicates
     type: EVENT_TYPE,
     text_repr: textRepr,
     occurred_at: new Date().toISOString(),
-    extra: { kind, number: Number(number), url, repo: repoSlug, branch, tool_name: toolName, title },
+    extra: { kind, action, number: Number(number), url, repo: repoSlug, branch, tool_name: toolName, title },
   };
 
   try {
