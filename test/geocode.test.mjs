@@ -13,9 +13,10 @@ test('geocodePlace: resolves a bare city name to a center point', () => {
 
 test('geocodePlace: prefers the US match for an ambiguous unqualified name (#67 region rule)', () => {
   // Only US entries carry a region; the US SF must win over any same-named foreign city
-  // regardless of array order, so the label ends with the region, not a country.
+  // regardless of array order, so the label ends with the region, not a country. Regions are
+  // stored as the full state name now (#186), so the label ends with "California", not "CA".
   const sf = geocodePlace('San Francisco');
-  assert.match(sf.label, /San Francisco, [A-Z]{2}$/, 'US, region-qualified label preferred');
+  assert.match(sf.label, /San Francisco, California$/, 'US, region-qualified label preferred');
 });
 
 test('geocodePlace: is case-insensitive and trims whitespace', () => {
@@ -26,8 +27,18 @@ test('geocodePlace: is case-insensitive and trims whitespace', () => {
 
 test('geocodePlace: a "City, Region" suffix narrows the match', () => {
   const hit = geocodePlace('San Francisco, CA');
-  assert.ok(hit && /CA$/.test(hit.label), 'region-qualified query matches the CA entry');
+  assert.ok(hit && /California$/.test(hit.label), 'region-qualified query matches the California entry');
   assert.equal(geocodePlace('San Francisco, ZZ'), null, 'a non-matching region yields no hit');
+});
+
+test('geocodePlace: a US-state region matches whether written as code or full name (#186)', () => {
+  // The dataset stores full state names; normalizeUsState canonicalizes both sides so "CA" and
+  // "California" resolve to the same center (and same label).
+  const byCode = geocodePlace('San Francisco, CA');
+  const byName = geocodePlace('San Francisco, California');
+  assert.ok(byCode && byName, 'both region forms resolve');
+  assert.deepEqual([byCode.lat, byCode.lon], [byName.lat, byName.lon], 'same center point');
+  assert.equal(byCode.label, byName.label, 'same full-name label');
 });
 
 test('geocodePlace: unresolvable or empty input returns null', () => {
