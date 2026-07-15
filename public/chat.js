@@ -75,6 +75,8 @@ function fmtDate(ts) {
 }
 // Distance is a cosine-ish distance (smaller = closer); FTS-only hits carry null.
 const fmtDist = (d) => (d == null ? '—' : d.toFixed(3));
+// Elapsed wall time (ms) → a `X.XXs` label for the results-meta chip (#180).
+const fmtSecs = (ms) => `${(ms / 1000).toFixed(2)}s`;
 
 function metaChips(chips) {
   const row = el('div', { class: 'card-meta' });
@@ -122,7 +124,10 @@ function recallCard(r) {
 }
 
 function addTurn(query, turnMode) {
-  const results = el('div', { class: 'results' }, el('p', { class: 'thinking' }, 'Searching…'));
+  // Animated in-flight state: a CSS spinner + a mode-aware label, so it's obviously working (#180).
+  const label = turnMode === 'recall' ? 'Recalling…' : 'Searching…';
+  const results = el('div', { class: 'results' },
+    el('p', { class: 'thinking' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), label));
   const turn = el('section', { class: 'turn' },
     el('div', { class: 'q' }, el('span', { class: 'q-mode' }, turnMode), el('span', { class: 'q-text' }, query)),
     results);
@@ -132,8 +137,13 @@ function addTurn(query, turnMode) {
   return results;
 }
 
-function renderResults(container, rows, turnMode) {
+// Client-measured wall time (#180): honest end-to-end latency the user felt. A `N result(s) · X.XXs`
+// chip heads the cards; 0 results still shows the time, so "no matches in 1.2s" is distinguishable
+// from "still running".
+function renderResults(container, rows, turnMode, elapsed) {
   container.replaceChildren();
+  container.append(el('p', { class: 'results-meta' },
+    `${rows.length} result${rows.length === 1 ? '' : 's'} · ${fmtSecs(elapsed)}`));
   if (!rows.length) { container.append(el('p', { class: 'empty' }, 'No matching memories.')); return; }
   const build = turnMode === 'recall' ? recallCard : searchCard;
   for (const r of rows) container.append(build(r));
@@ -145,12 +155,16 @@ async function ask(query) {
   // returned shape (search artifact vs recall {content}) must be rendered with the matching card.
   const turnMode = mode;
   const slot = addTurn(query, turnMode);
+  const t0 = performance.now(); // wall clock around the fetch — the latency the user actually feels
   try {
     const path = turnMode === 'recall' ? '/api/recall' : '/api/search';
     const { results } = await api('POST', path, { body: { query, limit: RESULT_LIMIT } });
-    renderResults(slot, results || [], turnMode);
+    renderResults(slot, results || [], turnMode, performance.now() - t0);
   } catch (err) {
-    slot.replaceChildren(el('p', { class: 'empty err' }, err instanceof ApiError && err.status === 401 ? 'Unauthorized — reopen this page from its full /<token>/ui/ URL.' : `Error: ${err.message || 'request failed'}`));
+    const elapsed = performance.now() - t0; // show elapsed on the error path too (#180)
+    slot.replaceChildren(
+      el('p', { class: 'results-meta' }, `Error · ${fmtSecs(elapsed)}`),
+      el('p', { class: 'empty err' }, err instanceof ApiError && err.status === 401 ? 'Unauthorized — reopen this page from its full /<token>/ui/ URL.' : `Error: ${err.message || 'request failed'}`));
     reportError(err);
   }
 }
