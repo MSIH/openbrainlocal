@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { db, resolveEntityIds, resolveNameByPrefix, getEntity, getArtifactById, getRelations, getRelationsTo, mergeEntities, listProbableDuplicates, listContactPhotos, annotateArtifactRows } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { geocodePlace, haversineKm } from './geocode.js';
+import { normalizeUsState } from './us-states.js';
 import { QUERY_MODEL, QUERY_PLAN_TIMEOUT_MS, QUERY_PLANNER_ENABLED, QUERY_PLAN_MAX_TOKENS, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
 import { ARTIFACT_TYPES, TYPE_REGISTRY } from './ingest-types.js';
 
@@ -50,6 +51,8 @@ function planSystemPrompt(today) {
     '  entities: array of person/place/org names exactly as written, or []',
     '  place: a place string for "in"/"at" location wording (matched against the stored label), or null',
     '  near: a place name for proximity wording ("near", "around", "close to", "nearby") — a geographic-radius search — or null',
+    '  A US state, city, or country name (e.g. "Texas", "Austin", "France") is a LOCATION: put it in place (or near for proximity wording), NEVER in entities. entities is only for people and organizations.',
+    '  Only set types when the query explicitly names an artifact kind (photo, email, message, note, document, video). A "when/where was X" question is NOT a type constraint — leave types [].',
     '  time_start, time_end: ISO dates (YYYY-MM-DD) resolving any relative time, or null',
     '  geo_required: true when the query asks WHERE something happened — "where", "located", "last seen", "been" — WITHOUT naming a place; else false. (When a place IS named, use place/near instead.)',
     '  sort: "recent" when the query wants the latest/most-recent — "last", "latest", "most recent", "last seen"; else "relevance"',
@@ -100,7 +103,7 @@ const candidateStmt = db.prepare(`
     AND (@ents_json  IS NULL OR el.entity_id IN (SELECT value FROM json_each(@ents_json)))
     AND (@t0 IS NULL OR date(a.occurred_at) >= date(@t0))
     AND (@t1 IS NULL OR date(a.occurred_at) <= date(@t1))
-    AND (@place IS NULL OR a.place_label LIKE @place)
+    AND (@place IS NULL OR a.place_label LIKE @place OR (@place2 IS NOT NULL AND a.place_label LIKE @place2))
     AND (@geo_required = 0 OR a.place_label IS NOT NULL)
 `);
 // Recency ordering (#190): order a fixed candidate id set by occurred_at DESC (ties broken by id
@@ -129,8 +132,10 @@ const ftsInStmt = db.prepare(`
   WHERE artifacts_fts MATCH ? AND rowid IN (SELECT value FROM json_each(?))
   ORDER BY score LIMIT ?
 `);
-// Cheap existence probe: is this place string a usable filter at all?
-const placeExistsStmt = db.prepare('SELECT 1 FROM artifacts WHERE place_label LIKE ? LIMIT 1');
+// Cheap existence probe: is this place string a usable filter at all? Same two-pattern shape as
+// candidateStmt's place clause (#186) — a US-state term supplies both a full-name and a code
+// pattern, so the probe succeeds if either form is present in any stored label.
+const placeExistsStmt = db.prepare('SELECT 1 FROM artifacts WHERE place_label LIKE @place OR (@place2 IS NOT NULL AND place_label LIKE @place2) LIMIT 1');
 // Geo-radius candidates (#68): a cheap lat/lon bounding-box prefilter over artifacts that carry
 // coordinates; the caller refines the box corners with an exact haversine pass (geoCandidateIds).
 const geoBboxStmt = db.prepare(`
@@ -261,10 +266,28 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   }
 
   // Place is only a filter if it can match at least one place_label; otherwise it's a keyword.
+  // A US-state term (#186) expands to TWO patterns so the filter is label-format-independent:
+  // the full-name form ("%Texas%", migrated / current labels) and the code form ("%, TX",
+  // coordinate-less or not-yet-migrated legacy labels). The canonical name/code are used
+  // regardless of how the user wrote the state ("tx"/"texas"/"TEXAS"). A non-state place keeps
+  // its single substring pattern (unchanged behavior). `placePattern`/`placeAltPattern` are the
+  // LIKE strings threaded to both the existence probe and the prefilter.
   let place = emptyish(plan.place);
-  if (place && !placeExistsStmt.get(`%${place}%`)) {
-    unresolvedTerms.push(place);
-    place = null;
+  let placePattern = null;
+  let placeAltPattern = null;
+  if (place) {
+    const st = normalizeUsState(place);
+    if (st) {
+      placePattern = `%${st.name}%`;
+      placeAltPattern = `%, ${st.code}`;
+    } else {
+      placePattern = `%${place}%`;
+    }
+    if (!placeExistsStmt.get({ place: placePattern, place2: placeAltPattern })) {
+      unresolvedTerms.push(place);
+      placePattern = null;
+      placeAltPattern = null;
+    }
   }
 
   // Geo-radius (#68). Explicit {lat,lon} wins; a name (caller `near` or plan.near) resolves via
@@ -309,7 +332,8 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
           ents_json: f.entityIds.length ? JSON.stringify(f.entityIds) : null,
           t0: f.t0 || null,
           t1: f.t1 || null,
-          place: f.place ? `%${f.place}%` : null,
+          place: f.placePattern ?? null,
+          place2: f.placeAltPattern ?? null,
           geo_required: f.geoRequired ? 1 : 0,
         })
         .map((r) => r.id)
@@ -330,7 +354,7 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
 
   // The prefilter always runs — a type constraint is always present (explicit/planner effTypes,
   // else the default_searchable default; #121) — so `candidates` is always a Set, never null.
-  let candidates = applyGeo(prefilter({ types: effTypes, entityIds, t0, t1, place, geoRequired: effGeoRequired }), geoIds);
+  let candidates = applyGeo(prefilter({ types: effTypes, entityIds, t0, t1, placePattern, placeAltPattern, geoRequired: effGeoRequired }), geoIds);
   if (candidates.size === 0) {
     // A plan-derived recency intent is demoted with the plan filters here — only a caller-supplied
     // `sort` survives (#190), so a "where was X last seen" with no geotagged match degrades to a
@@ -347,7 +371,8 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
       entityIds: entities?.length ? entityIds : [],
       t0: emptyish(timeRange?.start),
       t1: emptyish(timeRange?.end),
-      place: null,
+      placePattern: null,
+      placeAltPattern: null,
       // geo_required survives the retry only when the CALLER set it (like explicit types/entities):
       // an explicit geoRequired:true stays in force and yields an honest empty; a plan-derived one is
       // dropped (demote-never-drop — a "where was X" with no geotagged match degrades to a normal search).
@@ -362,7 +387,7 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
       // Every filter was plan-invented — fall back to the default search: default_searchable
       // types only (not all types), so a bad planner filter degrades to normal recall, never
       // to a widened one that re-admits sessions/visits.
-      candidates = prefilter({ types: [], entityIds: [], t0: null, t1: null, place: null, geoRequired: false });
+      candidates = prefilter({ types: [], entityIds: [], t0: null, t1: null, placePattern: null, placeAltPattern: null, geoRequired: false });
     }
   }
   if (candidates.size === 0) return []; // no default_searchable artifacts to rank

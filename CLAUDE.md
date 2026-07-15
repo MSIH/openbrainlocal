@@ -24,7 +24,8 @@ Independent, local-first implementation of the "Open Brain" concept by Nate B. J
 src/config.js            — single config source (dotenv loads here, before any env read)
 src/db.js                — the store: schema (artifacts + entity graph + vec/FTS), prepared stmts, storeArtifactTxn, ingest_log
 src/embeddings.js        — shared Ollama client + getEmbedding (used by server + scripts)
-src/geocode.js           — offline reverse-geocoding (place_label from lat/lon); src/geodata/places.json is the bundled GeoNames-derived dataset (CC BY 4.0), regenerate via `npm run geocode:build -- <path-to-cities1000.txt>`
+src/geocode.js           — offline reverse-geocoding (place_label from lat/lon); src/geodata/places.json is the bundled GeoNames-derived dataset (CC BY 4.0, US regions stored as full state NAMES — #186), regenerate via `npm run geocode:build -- <path-to-cities1000.txt>`
+src/us-states.js         — US state name<->USPS-code map + normalizeUsState (#186); one source of truth for geocode.js, build-places.js, search.js (pure data, no I/O)
 src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS, RRF fusion, timeline/about_entity
 src/server.js            — the server: REST + MCP tools, auth, transport (imports the modules above)
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
