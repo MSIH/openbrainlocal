@@ -16,9 +16,11 @@ const {
   addAlias, removeAlias, insertAliasUnlessTombstoned, normalizePhone,
   listProposedEntities, approveProposedEntity, rejectProposedEntity,
   insertDirectoryEntry, lookupDirectoryName, backfillDirectoryProposals,
+  reduceEntityDisplayName,
 } = await import('../src/db.js');
 const { backfillPhoneAliases } = await import('../scripts/backfill-phone-aliases.js');
 const { loadDirectory } = await import('../scripts/load-directory.js');
+const { preferredDisplayName } = await import('../src/contacts.js');
 
 after(() => { db.close(); cleanup(); });
 
@@ -305,6 +307,43 @@ test('loadDirectory (#154): vCard load populates the directory and creates NO en
   assert.equal(lookupDirectoryName('dir.only@example.com', 'email'), 'Directory Only Contact');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM entities WHERE kind='person'").get().n, beforePersons, 'no entity created');
   assert.equal(db.prepare('SELECT COUNT(*) n FROM entity_aliases').get().n, beforeAliases, 'no alias created');
+});
+
+// --- Display name = first + last (#156) ---
+test('preferredDisplayName (#156): reduces a middle name to first+last; leaves 2/4-token names and orgs', () => {
+  assert.equal(preferredDisplayName({ fn: 'Amy Margaret Schneider', name: { given: 'Amy', family: 'Schneider', additional: 'Margaret' } }), 'Amy Schneider');
+  assert.equal(preferredDisplayName({ fn: 'Amy Margaret Schneider' }), 'Amy Schneider', '3-token FN reduces even without structured N');
+  assert.equal(preferredDisplayName({ fn: 'Amy Schneider' }), 'Amy Schneider', '2-token unchanged');
+  assert.equal(preferredDisplayName({ fn: 'Maria de la Cruz' }), 'Maria de la Cruz', '4-token left full (ambiguous)');
+  assert.equal(preferredDisplayName({ fn: 'Acme Corporation', isCompany: true }), 'Acme Corporation', 'orgs keep full name');
+  assert.equal(preferredDisplayName({ fn: 'Cher' }), 'Cher', 'mononym unchanged');
+});
+
+test('reduceEntityDisplayName (#156): 3-token canonical → first+last, both forms resolve, idempotent; 2/4-token untouched', () => {
+  const id = Number(insertEntityStmt.run('person', 'Amy Margaret Schneider', null).lastInsertRowid);
+  insertAliasStmt.run(id, 'amy margaret schneider', 'name'); // the full-name alias import would have made
+  const r = reduceEntityDisplayName(id);
+  assert.deepEqual([r.changed, r.to], [true, 'Amy Schneider']);
+  assert.equal(getEntity(id).canonical_name, 'Amy Schneider', 'canonical reduced to first+last');
+  assert.ok(resolveEntityIds('Amy Margaret Schneider').includes(id), 'full name still resolves');
+  assert.ok(resolveEntityIds('Amy Schneider').includes(id), 'reduced name resolves');
+  assert.equal(reduceEntityDisplayName(id).changed, false, 'idempotent — a 2-token canonical is skipped');
+
+  const two = Number(insertEntityStmt.run('person', 'Bob Jones', null).lastInsertRowid);
+  assert.equal(reduceEntityDisplayName(two).changed, false, '2-token unchanged');
+  const four = Number(insertEntityStmt.run('person', 'Maria de la Cruz', null).lastInsertRowid);
+  assert.equal(reduceEntityDisplayName(four).changed, false, '4-token unchanged');
+  assert.equal(getEntity(four).canonical_name, 'Maria de la Cruz');
+});
+
+test('reduceEntityDisplayName (#157): does NOT rename when the reduced form is unresolvable (UI-tombstoned)', () => {
+  const id = Number(insertEntityStmt.run('person', 'Nadia Rae Okafor', null).lastInsertRowid);
+  addAlias(id, 'Nadia Rae Okafor', 'name'); // seed a name alias so the entity resolves
+  addAlias(id, 'Nadia Okafor', 'name');     // the reduced form...
+  removeAlias(id, 'Nadia Okafor', 'name');  // ...then remove it via the UI (tombstone, #111)
+  const r = reduceEntityDisplayName(id);
+  assert.equal(r.changed, false, 'reduction skipped — the reduced name would not resolve back to this entity');
+  assert.equal(getEntity(id).canonical_name, 'Nadia Rae Okafor', 'canonical left unchanged, not set to a dead display name');
 });
 
 // --- Entity merge & duplicate detection (#75) ---
