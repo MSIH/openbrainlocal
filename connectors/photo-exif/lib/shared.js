@@ -2,7 +2,7 @@
 // (source, source_id) key identically (keyForMedia below) — a mismatch would silently create
 // duplicate artifacts instead of upserting the same one.
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, readFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -85,15 +85,38 @@ export async function* walkMediaFiles(root, dir = root) {
 
 // The (source, source_id) key for a media file, derived from its content hash — the id is
 // reproducible from the bytes (doc 04 §3), so it dedups Takeout's same-photo-in-many-folders
-// duplication and survives folder renames. A file that has a Google Takeout sidecar next to it
-// is "Google-origin" and keys under source='google-photos' with a `gphotos:`-prefixed id (this
-// MUST match the rows the retired gphotos-takeout connector wrote, so a re-scan upserts them
-// rather than duplicating); everything else keys under source='photo-exif' with the bare hash.
-// All three scripts use this so a photo keys identically no matter which one touches it.
-export function keyForMedia(contentHash, hasSidecar) {
-  return hasSidecar
+// duplication and survives folder renames. A file from a Google Takeout export keys under
+// source='google-photos' with a `gphotos:`-prefixed id (this MUST match the rows the retired
+// gphotos-takeout connector wrote, so a re-scan upserts them rather than duplicating); everything
+// else keys under source='photo-exif' with the bare hash. `isTakeout` is a scan-level fact
+// (isTakeoutRoot below), NOT per-file sidecar presence — Takeout omits a sidecar for some items
+// (motion-photo .MP4s, etc.), and keying those generic would duplicate the google-photos row
+// (#176). All three scripts use this so a photo keys identically no matter which one touches it.
+export function keyForMedia(contentHash, isTakeout) {
+  return isTakeout
     ? { source: 'google-photos', source_id: `gphotos:${contentHash}` }
     : { source: 'photo-exif', source_id: contentHash };
+}
+
+// Whether a scan root is a Google Takeout "Google Photos" export — decided ONCE per scan, not per
+// file (a Takeout item may have no sidecar; per-file detection mis-keys those, #176). Signals: the
+// root IS a "Google Photos" dir, contains one, or holds a Takeout marker (a "Photos from <YYYY>"
+// year bucket or an album metadata.json). `override` (the PHOTO_TAKEOUT env value) forces the
+// answer when 'true'/'false'. Only the root's own children are inspected — a cheap single readdir.
+export function isTakeoutRoot(root, override) {
+  if (override === 'true') return true;
+  if (override === 'false') return false;
+  if (!root) return false;
+  if (path.basename(root) === 'Google Photos') return true;
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  return entries.some((e) =>
+    (e.isDirectory() && (e.name === 'Google Photos' || /^Photos from \d{4}$/.test(e.name)))
+    || (e.isFile() && e.name.toLowerCase() === 'metadata.json'));
 }
 
 export function contentHashOfFile(absPath) {
