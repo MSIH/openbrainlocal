@@ -74,3 +74,12 @@ export const LIFECONTEXT_API_KEY_PLACEHOLDER = 'change-this-to-a-long-secure-tok
 // every /:token/mcp request 404s exactly like today. Generate with:
 //   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 export const MCP_URL_TOKEN = process.env.MCP_URL_TOKEN;
+
+// Optional capability-URL token for the browser web UI (#161) — a distinct secret from
+// LIFECONTEXT_API_KEY and MCP_URL_TOKEN so each surface (REST key, MCP capability URL, browser UI)
+// rotates independently. When SET, the UI is served ONLY at /ui/<token>/… (a bookmarkable capability
+// URL, 404 otherwise) and requireAuth also accepts it, so the bookmarked page's /api calls authorize
+// with no manual key entry. Unset/empty (trimmed) = feature off: the UI stays at the plain /ui mount
+// (localhost dev). Like MCP_URL_TOKEN it rides in the URL (edge/proxy logs, browser history) — a
+// browser-bookmark convenience credential; front /ui with Cloudflare Access for exposure (docs/07).
+export const UI_URL_TOKEN = (process.env.UI_URL_TOKEN || '').trim() || undefined;

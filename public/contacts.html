@@ -4,8 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
+  <!-- The capability token lives in the URL path; no-referrer keeps it out of the Referer header
+       on any outbound request/navigation (#163). -->
+  <meta name="referrer" content="no-referrer" />
   <title>LifeContext · Contacts</title>
-  <link rel="stylesheet" href="/ui/style.css" />
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <!-- API key bar: shown until a key is stored, or after a 401. The whole /api/v1 surface is
@@ -21,8 +24,8 @@
   <header class="topbar">
     <h1>Contacts</h1>
     <nav class="navlinks" aria-label="Primary">
-      <a href="/ui/chat.html">Ask</a>
-      <a href="/ui/contacts.html" class="active" aria-current="page">Contacts</a>
+      <a href="./chat.html">Ask</a>
+      <a href="./contacts.html" class="active" aria-current="page">Contacts</a>
     </nav>
     <input id="search" type="search" placeholder="Search name, email, phone…" autocomplete="off" />
     <div class="filters" id="kindFilter" role="tablist">
@@ -69,6 +72,6 @@
 
   <div id="toast" class="toast" hidden></div>
 
-  <script type="module" src="/ui/app.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>
