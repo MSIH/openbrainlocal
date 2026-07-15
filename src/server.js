@@ -28,7 +28,7 @@ import { access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
+import { PORT, TRUST_PROXY, DB_PATH, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
 import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
@@ -802,7 +802,9 @@ app.use((err, req, res, next) => {
 });
 
 const serverInstance = app.listen(PORT, () => {
-  console.log(`🔒 Local Ollama-Powered Streamable HTTP Brain operating on port ${PORT}`);
+  // Log the resolved DB file (#170) so a stray/mis-pointed instance — e.g. a dev server that
+  // should be on a copy but isn't — is obvious in the log and `ps`, not silently sharing the live DB.
+  console.log(`🔒 Local Ollama-Powered Streamable HTTP Brain operating on port ${PORT} · db ${path.resolve(DB_PATH)}`);
   // UI state at a glance (#169): token-only, no open mount. The token value itself is never logged.
   console.log(UI_URL_TOKEN ? 'web UI: /<token>/ui/… (UI_URL_TOKEN set)' : 'web UI: disabled (set UI_URL_TOKEN)');
 });

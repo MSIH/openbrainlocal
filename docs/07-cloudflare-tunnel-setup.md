@@ -244,6 +244,12 @@ personal use put **Cloudflare Access** in front of `/ui` (next section) as the r
   there too. The surest test is to try reaching `http://<your-server-ip>:3000` from another
   device and confirm it *fails*.)
 
+- **Don't run a second server against the live DB.** Only one instance should open
+  `life-context.db` (the `:3000` service). For testing/dev, use `npm run dev` — it serves on
+  `:3001` against a **copy** (`.dev.db`), never the live file; a second `npm start` against the
+  live DB causes `SQLITE_BUSY`/lock contention on your real memory. Each instance logs its resolved
+  DB file at boot (`… · db <path>`), so a mis-pointed one is easy to spot.
+
 - **A second key that you can revoke.** In the Zero Trust dashboard, **Access →
   Applications → Add an application** for `lc.yourdomain.com`, then create a **Service
   Token**. Clients then send two extra headers (`CF-Access-Client-Id` and
