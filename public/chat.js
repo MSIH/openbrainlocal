@@ -181,14 +181,15 @@ for (const b of $('modeToggle').querySelectorAll('button')) b.addEventListener('
 });
 
 // --- boot ---
-// Capability-URL bootstrap (#161): when served under /ui/<token>/<file> (UI_URL_TOKEN set), seed the
-// API key from the path token so a bookmark authorizes /api calls with no manual entry. The plain
-// /ui/<file> dev mount has no token segment, so this no-ops and the manual key flow below runs.
+// Capability-URL bootstrap (#161, token-first #165): when served under /<token>/ui/<file>
+// (UI_URL_TOKEN set), seed the API key from the path token so a bookmark authorizes /api calls with
+// no manual entry. The plain /ui/<file> dev mount has no token segment, so this no-ops and the
+// manual key flow below runs.
 seedKeyFromPathToken();
 if (!apiKey()) showKeyBar('Enter your API key to begin.');
 
 function seedKeyFromPathToken() {
-  const seg = location.pathname.match(/^\/ui\/([^/]+)\/[^/]+$/)?.[1];
+  const seg = location.pathname.match(/^\/([^/]+)\/ui\/[^/]+$/)?.[1]; // token-first /<token>/ui/<file> (#165)
   if (!seg) return;
   if (localStorage.getItem(KEY_STORAGE)) return; // don't clobber an already-stored key / needlessly persist the token (Copilot, PR #163)
   try { localStorage.setItem(KEY_STORAGE, decodeURIComponent(seg)); }

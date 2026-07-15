@@ -60,21 +60,21 @@ after(async () => {
 
 const get = (p, headers = {}) => fetch(`${base}${p}`, { headers });
 
-test('UI gated: /ui/<token>/chat.html → 200, and serves the asset under the tokened path', async () => {
-  const page = await get(`/ui/${UI_TOKEN}/chat.html`);
+test('UI gated: /<token>/ui/chat.html → 200, and serves the asset under the tokened path', async () => {
+  const page = await get(`/${UI_TOKEN}/ui/chat.html`);
   assert.equal(page.status, 200);
   assert.match(page.headers.get('content-type') || '', /text\/html/);
   assert.match(await page.text(), /LifeContext/, 'the page HTML is served under the tokened mount');
-  // A relative asset (./chat.js from the HTML) must resolve under /ui/<token>/ too — proves the
+  // A relative asset (./chat.js from the HTML) must resolve under /<token>/ui/ too — proves the
   // mount strips the token prefix so express.static finds the file.
-  const asset = await get(`/ui/${UI_TOKEN}/chat.js`);
+  const asset = await get(`/${UI_TOKEN}/ui/chat.js`);
   assert.equal(asset.status, 200);
   assert.match(await asset.text(), /seedKeyFromPathToken/, 'the JS asset loads under the token path');
 });
 
 test('UI gated: bare /ui and a wrong token both 404 (existence hidden)', async () => {
   assert.equal((await get('/ui/chat.html')).status, 404, 'bare /ui 404s when a token is set');
-  assert.equal((await get(`/ui/wrong-token/chat.html`)).status, 404, 'a wrong token 404s');
+  assert.equal((await get(`/wrong-token/ui/chat.html`)).status, 404, 'a wrong token 404s');
 });
 
 test('/api accepts UI_URL_TOKEN as an alternative credential; wrong token still 401', async () => {
