@@ -125,6 +125,11 @@ $env:OLLAMA_MAX_LOADED_MODELS = "2"
 The 780M is an iGPU (gfx1103) that AMD's ROCm does **not officially support**, so out of the box **Ollama on Windows runs on CPU**. For your use case that's mostly fine:
 
 - **Embeddings**: CPU is completely fine — milliseconds per memory at 0.6B size. Don't bother with GPU here.
+- **Query planner (`QUERY_MODEL`, `/api/search`)**: on CPU a 3B planner can take >10s, exceeding the
+  planner timeout so every search falls back to pure-semantic after a stall (#179). Fixes, cheapest first:
+  set `QUERY_PLANNER_ENABLED=false` (skip the planner — search stays sub-second, keyword+semantic only),
+  or use a smaller `QUERY_MODEL` (`qwen2.5:1.5b`/`0.5b`) that beats `QUERY_PLAN_TIMEOUT_MS` (default 2500ms).
+  A GPU removes the issue outright. `recall`/`store` are unaffected (no planner).
 - **Chat (8B)**: CPU gives usable-but-slow speeds. If you want faster:
 
 **Easiest GPU path — LM Studio (Vulkan):** LM Studio's Vulkan backend works with the 780M on Windows with zero hacks. Install from <https://lmstudio.ai>, load a Qwen3 8B GGUF, enable GPU offload, and turn on its local server (also OpenAI-compatible, port 1234). You can run LM Studio for chat and Ollama for embeddings side by side.

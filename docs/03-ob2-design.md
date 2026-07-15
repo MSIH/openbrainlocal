@@ -276,6 +276,14 @@ Then vector-rank only within those candidates (sqlite-vec supports `partition ke
 > vanish. The query parse is one small-LLM call (`QUERY_MODEL`) validated with zod; if the model or
 > the embedder is unreachable, search degrades gracefully (pure-semantic plan / FTS-only).
 >
+> **Planner cost on CPU-only hosts (#179).** The parse is a tiny JSON, but generation time dominates
+> and a 3B model on CPU can take >10s. So the single planner attempt is bounded by `QUERY_PLAN_TIMEOUT_MS`
+> (default 2500) — on timeout, search fails over to the pure-semantic plan immediately (never throws)
+> rather than stalling every query. A fast/GPU host that answers within the window still gets planned
+> filters. The chat call also caps output tokens (the biggest CPU win). `QUERY_PLANNER_ENABLED=false`
+> skips the LLM entirely (search == pure semantic + keyword, sub-second) for a box where the planner
+> never beats even a low timeout; a smaller `QUERY_MODEL` (`qwen2.5:1.5b`/`0.5b`) is the middle ground.
+>
 > **Geo-radius (`near`, issue #68).** `place` is a `place_label LIKE` text match; `near` is a true
 > distance filter for proximity wording ("near/around/close to X"). A `near` value — a caller-supplied
 > place name or `{lat, lon}`, or one the planner extracts — resolves to a center point (names via the

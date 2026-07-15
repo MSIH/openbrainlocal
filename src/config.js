@@ -17,6 +17,16 @@ const int = (v, dflt) => {
   return Number.isNaN(n) ? dflt : n; // malformed env → default, never NaN into SQL/search math
 };
 
+// Boolean env: only an explicit falsey token turns a default-true flag off; anything else
+// (unset, empty, "true", "1", junk) keeps the default. Case-insensitive.
+const bool = (v, dflt) => {
+  if (v === undefined) return dflt;
+  const s = v.trim().toLowerCase();
+  if (['false', '0', 'no', 'off'].includes(s)) return false;
+  if (['true', '1', 'yes', 'on'].includes(s)) return true;
+  return dflt;
+};
+
 export const PORT = process.env.PORT || 3000;
 
 // Express 'trust proxy' hop count. 1 = one reverse proxy in front (Cloudflare Tunnel —
@@ -46,6 +56,18 @@ export const VECTOR_DIMENSION = int(process.env.VECTOR_DIMENSION, 1024);
 export const QUERY_MODEL = process.env.QUERY_MODEL || 'qwen2.5:3b';
 // Request timeout (ms) for the embedding/LLM gateway — a hung Ollama shouldn't block for the SDK's 10-min default.
 export const EMBED_TIMEOUT_MS = int(process.env.EMBED_TIMEOUT_MS, 60000);
+// Query-planner controls (#179). The planner is a small JSON call, but on a CPU-only host a
+// 3B model can take >10s — so fail over to pure-semantic FAST rather than stall every search.
+// QUERY_PLAN_TIMEOUT_MS bounds the single planner attempt (was a hardcoded 8000); a fast/GPU
+// host that answers within it still gets planned filters. QUERY_PLANNER_ENABLED=false skips the
+// LLM call entirely (search behaves like usePlanner:false — pure semantic + keyword, sub-second)
+// for a box where the planner never beats even a low timeout.
+export const QUERY_PLAN_TIMEOUT_MS = int(process.env.QUERY_PLAN_TIMEOUT_MS, 2500);
+export const QUERY_PLANNER_ENABLED = bool(process.env.QUERY_PLANNER_ENABLED, true);
+// Cap on planner output tokens — the plan is a tiny JSON and generation time dominates on CPU,
+// so bounding it is the single biggest per-search win. Env-overridable but left out of
+// .env.example (an internal safety cap most installs never touch).
+export const QUERY_PLAN_MAX_TOKENS = int(process.env.QUERY_PLAN_MAX_TOKENS, 128);
 
 // --- Hybrid search tuning ---
 export const RRF_K = int(process.env.RRF_K, 60);          // reciprocal-rank-fusion constant
