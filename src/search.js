@@ -33,10 +33,14 @@ const PlanSchema = z.object({
   near: z.string().nullable().catch(null).default(null),
   time_start: z.string().nullable().catch(null).default(null),
   time_end: z.string().nullable().catch(null).default(null),
+  // "where / located / last seen / been" with no place named -> restrict to geotagged rows (#190).
+  geo_required: z.boolean().catch(false).default(false),
+  // "last / latest / most recent" -> order the candidate set by occurred_at DESC instead of RRF (#190).
+  sort: z.enum(['relevance', 'recent']).catch('relevance').default('relevance'),
   semantic: z.string().catch('').default(''),
 });
 
-const fallbackPlan = (query) => ({ types: [], entities: [], place: null, near: null, time_start: null, time_end: null, semantic: query });
+const fallbackPlan = (query) => ({ types: [], entities: [], place: null, near: null, time_start: null, time_end: null, geo_required: false, sort: 'relevance', semantic: query });
 
 function planSystemPrompt(today) {
   return [
@@ -47,6 +51,8 @@ function planSystemPrompt(today) {
     '  place: a place string for "in"/"at" location wording (matched against the stored label), or null',
     '  near: a place name for proximity wording ("near", "around", "close to", "nearby") — a geographic-radius search — or null',
     '  time_start, time_end: ISO dates (YYYY-MM-DD) resolving any relative time, or null',
+    '  geo_required: true when the query asks WHERE something happened — "where", "located", "last seen", "been" — WITHOUT naming a place; else false. (When a place IS named, use place/near instead.)',
+    '  sort: "recent" when the query wants the latest/most-recent — "last", "latest", "most recent", "last seen"; else "relevance"',
     '  semantic: the meaning-bearing core of the query (always a non-empty string)',
     'For week- or month-scale summary questions ("what was I doing in October"), set types to ["digest"] — daily digests answer those in one hit.',
     'Do not invent filters the query does not imply. Emit valid JSON only.',
@@ -95,6 +101,16 @@ const candidateStmt = db.prepare(`
     AND (@t0 IS NULL OR date(a.occurred_at) >= date(@t0))
     AND (@t1 IS NULL OR date(a.occurred_at) <= date(@t1))
     AND (@place IS NULL OR a.place_label LIKE @place)
+    AND (@geo_required = 0 OR a.place_label IS NOT NULL)
+`);
+// Recency ordering (#190): order a fixed candidate id set by occurred_at DESC (ties broken by id
+// DESC for determinism). Used when the plan/caller sort is 'recent' — the candidate set already
+// carries the topical (type/entity/geo) constraint, so recency over it is the "last seen" answer.
+const recentOrderStmt = db.prepare(`
+  SELECT id FROM artifacts
+  WHERE id IN (SELECT value FROM json_each(?))
+  ORDER BY occurred_at DESC, id DESC
+  LIMIT ?
 `);
 // Filter-then-rank: KNN constrained to the prefiltered candidate set. sqlite-vec (>= 0.1.6)
 // supports IN constraints on the vec0 primary key in KNN queries — this ranks *within* the
@@ -211,13 +227,20 @@ function rrf(lists, k = RRF_K) {
  * `near` (a place name or {lat, lon}) plus `radiusKm` add a geo-radius filter (#68): artifacts
  * within the radius by coordinate, not just by place-label text.
  */
-export async function hybridSearch(query, { limit = 3, types, timeRange, entities, near, radiusKm, usePlanner = true } = {}) {
+export async function hybridSearch(query, { limit = 3, types, timeRange, entities, near, radiusKm, geoRequired, sort, usePlanner = true } = {}) {
   const plan = usePlanner && QUERY_PLANNER_ENABLED ? await parseQuery(query) : fallbackPlan(query);
 
   const effTypes = types?.length ? types : plan.types;
   const t0 = emptyish(timeRange?.start) || emptyish(plan.time_start);
   const t1 = emptyish(timeRange?.end) || emptyish(plan.time_end);
   const entTerms = entities?.length ? entities : plan.entities;
+  // geo_required + sort (#190): a caller opt wins over the plan (mirrors types/timeRange/entities).
+  // Track whether each came from the caller so the zero-candidate retry can keep a caller-supplied
+  // filter (honest empty) while demoting a plan-derived one (demote-never-drop).
+  const geoReqFromCaller = geoRequired === true;
+  const sortFromCaller = sort != null;
+  const effGeoRequired = geoRequired ?? plan.geo_required;
+  let effSort = sort ?? plan.sort;
 
   // Resolve entity terms. Terms that don't resolve can't filter — but they must not
   // vanish either, so they're folded back into the ranked-search text below.
@@ -287,6 +310,7 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
           t0: f.t0 || null,
           t1: f.t1 || null,
           place: f.place ? `%${f.place}%` : null,
+          geo_required: f.geoRequired ? 1 : 0,
         })
         .map((r) => r.id)
     );
@@ -306,8 +330,12 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
 
   // The prefilter always runs — a type constraint is always present (explicit/planner effTypes,
   // else the default_searchable default; #121) — so `candidates` is always a Set, never null.
-  let candidates = applyGeo(prefilter({ types: effTypes, entityIds, t0, t1, place }), geoIds);
+  let candidates = applyGeo(prefilter({ types: effTypes, entityIds, t0, t1, place, geoRequired: effGeoRequired }), geoIds);
   if (candidates.size === 0) {
+    // A plan-derived recency intent is demoted with the plan filters here — only a caller-supplied
+    // `sort` survives (#190), so a "where was X last seen" with no geotagged match degrades to a
+    // normal relevance search rather than returning the most-recent artifacts overall.
+    if (!sortFromCaller) effSort = 'relevance';
     // Planner-overfilter fix (M2 rule: demote, never drop): zero candidates conflates
     // "caller's explicit filters matched nothing" (honest) with "the LLM invented a
     // filter" (silent planner failure — e.g. the prompt steers summary queries to
@@ -320,9 +348,13 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
       t0: emptyish(timeRange?.start),
       t1: emptyish(timeRange?.end),
       place: null,
+      // geo_required survives the retry only when the CALLER set it (like explicit types/entities):
+      // an explicit geoRequired:true stays in force and yields an honest empty; a plan-derived one is
+      // dropped (demote-never-drop — a "where was X" with no geotagged match degrades to a normal search).
+      geoRequired: geoReqFromCaller,
     };
     const callerGeo = geoFromCaller ? geoIds : null;
-    const callerHasSql = caller.types.length || caller.entityIds.length || caller.t0 || caller.t1;
+    const callerHasSql = caller.types.length || caller.entityIds.length || caller.t0 || caller.t1 || caller.geoRequired;
     if (callerHasSql || callerGeo != null) {
       candidates = applyGeo(prefilter(caller), callerGeo);
       if (candidates.size === 0) return []; // the caller's own filters matched nothing — honest empty
@@ -330,11 +362,23 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
       // Every filter was plan-invented — fall back to the default search: default_searchable
       // types only (not all types), so a bad planner filter degrades to normal recall, never
       // to a widened one that re-admits sessions/visits.
-      candidates = prefilter({ types: [], entityIds: [], t0: null, t1: null, place: null });
+      candidates = prefilter({ types: [], entityIds: [], t0: null, t1: null, place: null, geoRequired: false });
     }
   }
   if (candidates.size === 0) return []; // no default_searchable artifacts to rank
   const candidatesJson = JSON.stringify([...candidates]);
+
+  // Recency ordering (#190): once the candidate set carries the topical constraint (type/entity/geo),
+  // "last seen" is a pure recency question — order by occurred_at DESC and skip the vec/FTS/RRF arms
+  // (no embedding call, so this path is unaffected by the embedder being offline). `distance` is null,
+  // like an FTS-only hit. getArtifactById attaches display_text just as the RRF path does.
+  if (effSort === 'recent') {
+    return recentOrderStmt
+      .all(candidatesJson, limit)
+      .map((r) => getArtifactById(r.id))
+      .filter(Boolean)
+      .map((a) => ({ ...a, distance: null }));
+  }
 
   const k = clamp(limit * KNN_OVERFETCH, KNN_MIN, KNN_MAX);
 

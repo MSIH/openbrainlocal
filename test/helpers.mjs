@@ -33,7 +33,7 @@ export function useTempDb() {
 // to the returned baseUrl BEFORE importing embeddings.js (or anything that imports it).
 // The empty pure-semantic plan the fake planner returns by default (mirrors search.js's fallback);
 // one definition so a new PlanSchema key can't fall out of sync between the default and an override.
-const EMPTY_PLAN = { types: [], entities: [], place: null, near: null, time_start: null, time_end: null, semantic: '' };
+const EMPTY_PLAN = { types: [], entities: [], place: null, near: null, time_start: null, time_end: null, geo_required: false, sort: 'relevance', semantic: '' };
 
 export async function startFakeOllama() {
   const counts = { embed: 0, chat: 0 };

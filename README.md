@@ -119,7 +119,7 @@ Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Author
   ```
 - **MCP** (Streamable HTTP) — `/mcp`, tools:
   - `store_memory` / `search_memories` — the original note store + recall (unchanged on the wire)
-  - `search` — hybrid semantic + keyword search with optional `types` / `time_range` / `entities` filters, plus `near` (a place name or `{lat, lon}`) + `radius_km` for geo-radius search — surfaces artifacts within the radius by coordinate, catching nearby places the label text doesn't literally name (e.g. `near: "San Francisco"` finds a Sausalito photo)
+  - `search` — hybrid semantic + keyword search with optional `types` / `time_range` / `entities` filters, plus `near` (a place name or `{lat, lon}`) + `radius_km` for geo-radius search — surfaces artifacts within the radius by coordinate, catching nearby places the label text doesn't literally name (e.g. `near: "San Francisco"` finds a Sausalito photo). "Where / last seen" wording is also handled by the query planner: a *where … was X last seen* query with no place named restricts to geotagged artifacts and orders them most-recent-first, so the top hit is the location the person was last seen (#190) — degrading to a normal relevance search when nothing is geotagged
   - `timeline` — chronological recall over a date range
   - `about_entity` — resolve a person/place/org and return their profile, recent linked artifacts, and person↔person relations (spouse, child, parent, …)
   - `get_artifact` — one artifact's full text, metadata, and entity links by id
