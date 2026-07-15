@@ -282,6 +282,42 @@ test('MCP merge with snake_case pull_number: accepted (not silently skipped)', a
   assert.equal(requests[0].body.extra.number, 171);
 });
 
+test('MCP merge_pull_request returning { merged: false } -> no ingest (failed merge not recorded), exits 0', async () => {
+  const { server, port, requests } = await startMockServer();
+  const result = await runHook(
+    {
+      tool_name: 'mcp__github__merge_pull_request',
+      tool_input: { owner: 'MSIH', repo: 'life-context', pullNumber: 172, merge_method: 'squash' },
+      tool_response: { merged: false, message: 'Pull Request is not mergeable' }, // blocked/conflicting
+      cwd: '/tmp/some-project',
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 0, 'a { merged: false } response records nothing (Copilot #168)');
+});
+
+test('Bash `gh pr merge` with a non-zero exit_code -> no ingest (failed merge not recorded), exits 0', async () => {
+  const { server, port, requests } = await startMockServer();
+  const result = await runHook(
+    {
+      tool_name: 'Bash',
+      // The command names the PR, and resolveMergeRef reads toolInput.command — so without the
+      // success guard this failed merge would still be recorded.
+      tool_input: { command: 'gh pr merge 173 --squash --repo MSIH/life-context' },
+      tool_response: { stdout: '', stderr: 'X Pull request MSIH/life-context#173 is not mergeable', exit_code: 1 },
+      cwd: '/tmp/some-project',
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 0, 'a non-zero exit_code records nothing (Copilot #168)');
+});
+
 test('merge with no derivable PR ref (no number/repo anywhere) -> no ingest, exits 0', async () => {
   const { server, port, requests } = await startMockServer();
 

@@ -120,6 +120,20 @@ function isMergeEvent(toolName, toolInput) {
   return /(?:^|[;&|]\s*)gh\s+pr\s+merge\b/.test(command);
 }
 
+// A merge is recorded only when it actually SUCCEEDED (Copilot #168). The MCP merge tool must report
+// `merged: true` — a `{ merged: false }` (blocked/conflicting PR) is a no-op; a Bash `gh pr merge` is
+// trusted only on exit_code 0 (absent → the runner reported no failure). Without this, a failed merge
+// whose command/response still names the PR (resolveMergeRef reads toolInput.command) would be logged
+// as "Merged …".
+function mergeSucceeded(toolName, toolResponse) {
+  if (toolName === 'mcp__github__merge_pull_request') {
+    if (toolResponse && typeof toolResponse === 'object' && 'merged' in toolResponse) return toolResponse.merged === true;
+    return /"merged"\s*:\s*true/i.test(stringifyResponse(toolResponse));
+  }
+  const code = toolResponse?.exit_code ?? toolResponse?.exitCode;
+  return code == null || code === 0;
+}
+
 // Resolve { url, repoSlug, number } for a merged PR. Unlike a create, `gh pr merge` emits no full
 // URL, so: prefer a real pull URL (MCP html_url / a URL in the command), then the MCP tool's
 // structured {owner, repo, pullNumber}, then the "owner/repo#N" shorthand `gh pr merge` prints —
@@ -211,6 +225,10 @@ async function main() {
   // Two actions: a merge (its own artifact) or an open. Both anchor on the PR/issue URL; no URL
   // means nothing to remember (a failed create, an update, or an undecipherable merge).
   const merge = isMergeEvent(toolName, toolInput);
+  if (merge && !mergeSucceeded(toolName, toolResponse)) {
+    console.error(`gh-event-claude: ${toolName} did not report a successful merge; nothing to capture`);
+    return;
+  }
   let url, repoSlug, number, kind;
   if (merge) {
     const ref = resolveMergeRef(toolResponse, toolInput);
