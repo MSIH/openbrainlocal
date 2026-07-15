@@ -280,7 +280,7 @@ per-request **access log** for every surface — `/api`, `/mcp`, and `/ui` — o
   ```
   2026-07-15T13:40:12Z api POST /api/search 200 842ms ip=203.0.113.7 auth=ok
   2026-07-15T13:41:05Z api POST /api/recall 401 3ms ip=198.51.100.4 auth=fail
-  2026-07-15T13:41:06Z mcp GET  /<token>/mcp 404 1ms ip=198.51.100.4 auth=fail
+  2026-07-15T13:41:06Z mcp GET /<token>/mcp 404 1ms ip=198.51.100.4 auth=fail
   ```
 
 - **Secrets are redacted, bodies are never logged.** The `?api_key=` query value is replaced with

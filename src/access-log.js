@@ -31,7 +31,6 @@ import { ACCESS_LOG_DIR } from './config.js';
 // the literal <token> so no secret ever reaches a log line. A single-segment /mcp (header-auth) has
 // no token to scrub and does not match.
 const TOKEN_PATH_RE = /^\/[^/]+\/(mcp|ui)(?=$|\/)/;
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DATED_FILE_RE = /^access-(\d{4}-\d{2}-\d{2})\.log$/;
 
 const logDir = path.resolve(ACCESS_LOG_DIR);
@@ -124,7 +123,11 @@ export function accessLogMiddleware(req, res, next) {
 // of mtime). A non-positive `days` or a missing dir is a no-op. Returns { pruned, kept }.
 export async function pruneOldLogs(dir, days) {
   if (!days || days <= 0) return { pruned: 0, kept: 0 };
-  const cutoff = Date.now() - days * MS_PER_DAY;
+  // Cutoff at the UTC-midnight boundary of the oldest day to keep, so exactly `days` dated files
+  // (today included) survive. Comparing a file's midnight stamp against Date.now() would prune the
+  // oldest in-window day ~half the time (retaining days-1); the date boundary keeps it deterministic.
+  const now = new Date();
+  const cutoff = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1));
   let entries;
   try {
     entries = await readdir(dir);
@@ -176,5 +179,10 @@ export async function closeAccessLog() {
   const s = stream;
   stream = null;
   streamDate = null;
-  await new Promise((resolve) => s.end(resolve));
+  await new Promise((resolve) => {
+    // Resolve on error too, so a flush/close failure (disk full, permissions) can't hang shutdown
+    // until the 10s forced exit — the callback may never fire if the stream errors.
+    s.on('error', resolve);
+    s.end(resolve);
+  });
 }
