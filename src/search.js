@@ -8,7 +8,7 @@
  * Search never throws just because Ollama is offline.
  */
 import { z } from 'zod';
-import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, getRelationsTo, mergeEntities, listProbableDuplicates, listContactPhotos, annotateArtifactRows } from './db.js';
+import { db, resolveEntityIds, resolveNameByPrefix, getEntity, getArtifactById, getRelations, getRelationsTo, mergeEntities, listProbableDuplicates, listContactPhotos, annotateArtifactRows } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { geocodePlace, haversineKm } from './geocode.js';
 import { QUERY_MODEL, QUERY_PLAN_TIMEOUT_MS, QUERY_PLANNER_ENABLED, QUERY_PLAN_MAX_TOKENS, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
@@ -225,8 +225,16 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   const unresolvedTerms = [];
   for (const term of entTerms) {
     const ids = resolveEntityIds(term);
-    if (ids.length) entityIds.push(...ids);
-    else unresolvedTerms.push(term);
+    if (ids.length) { entityIds.push(...ids); continue; }
+    // Exact match missed — try the query-time given-name prefix fallback (#184). Resolves a bare
+    // first name to a person stored under a full name, but only when it's unambiguous (one entity).
+    const prefixIds = resolveNameByPrefix(term);
+    if (prefixIds.length) {
+      entityIds.push(...prefixIds);
+      console.error(`entity-resolve: given-name "${term}" -> entity ${prefixIds[0]} (prefix, unambiguous)`);
+    } else {
+      unresolvedTerms.push(term);
+    }
   }
 
   // Place is only a filter if it can match at least one place_label; otherwise it's a keyword.
