@@ -364,6 +364,30 @@ test('scan.js: Takeout detected at tree level — a sidecar-less .mp4 keys googl
   assert.equal(art.source_id, `gphotos:${art.content_hash}`);
 });
 
+test('scan.js: album-layout Takeout (child dirs with metadata.json, no year bucket) keys google-photos (#177)', async () => {
+  // Copilot #177: the common layout where PHOTO_ROOT holds one folder per album, each with its own
+  // metadata.json, and the root is NOT named "Google Photos" and has no "Photos from <YYYY>" bucket.
+  // A sidecar-less .mp4 in such a tree must still key google-photos (auto-detected, no override).
+  const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-albumlayout-'));
+  mkdirSync(path.join(tmp, 'Adam Schneider'));
+  writeFileSync(path.join(tmp, 'Adam Schneider', 'metadata.json'), JSON.stringify({ title: 'Adam Schneider' }));
+  writeFileSync(path.join(tmp, 'Adam Schneider', 'IMG_9001.MP4'), Buffer.from('album-layout-sidecar-less-video')); // no sidecar
+
+  const { server, port, requests } = await startMockServer((req, body, res) => {
+    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
+  });
+  const result = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  const mp4 = requests[0].body.artifacts.find((a) => a.raw_path.endsWith('IMG_9001.MP4'));
+  assert.equal(mp4.source, 'google-photos', 'album-layout Takeout detected via child metadata.json');
+  assert.equal(mp4.source_id, `gphotos:${mp4.content_hash}`);
+});
+
 test('scan.js: PHOTO_TAKEOUT overrides detection both ways (#176)', async () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-override-'));
   writeFileSync(path.join(tmp, 'x.jpg'), Buffer.from('override-bytes')); // no sidecar, no marker

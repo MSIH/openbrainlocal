@@ -100,9 +100,10 @@ export function keyForMedia(contentHash, isTakeout) {
 
 // Whether a scan root is a Google Takeout "Google Photos" export — decided ONCE per scan, not per
 // file (a Takeout item may have no sidecar; per-file detection mis-keys those, #176). Signals: the
-// root IS a "Google Photos" dir, contains one, or holds a Takeout marker (a "Photos from <YYYY>"
-// year bucket or an album metadata.json). `override` (the PHOTO_TAKEOUT env value) forces the
-// answer when 'true'/'false'. Only the root's own children are inspected — a cheap single readdir.
+// root IS a "Google Photos" dir; a direct child is "Google Photos", a "Photos from <YYYY>" year
+// bucket, or a `metadata.json`; OR an immediate child dir carries its own `metadata.json` — the
+// common album layout where PHOTO_ROOT holds one folder per album (#177). `override` (the
+// PHOTO_TAKEOUT env value) forces the answer when 'true'/'false'.
 export function isTakeoutRoot(root, override) {
   if (override === 'true') return true;
   if (override === 'false') return false;
@@ -114,9 +115,16 @@ export function isTakeoutRoot(root, override) {
   } catch {
     return false;
   }
-  return entries.some((e) =>
-    (e.isDirectory() && (e.name === 'Google Photos' || /^Photos from \d{4}$/.test(e.name)))
-    || (e.isFile() && e.name.toLowerCase() === 'metadata.json'));
+  for (const e of entries) {
+    if (e.isFile() && e.name.toLowerCase() === 'metadata.json') return true;
+    if (e.isDirectory()) {
+      if (e.name === 'Google Photos' || /^Photos from \d{4}$/.test(e.name)) return true;
+      // Album layout: each album is a child dir with its own metadata.json (a cheap existsSync
+      // per child — a non-Takeout library's folders just miss it).
+      if (existsSync(path.join(root, e.name, 'metadata.json'))) return true;
+    }
+  }
+  return false;
 }
 
 export function contentHashOfFile(absPath) {
