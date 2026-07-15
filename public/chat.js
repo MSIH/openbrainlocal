@@ -1,11 +1,11 @@
 // LifeContext webchat sidecar (#124) — a host-agnostic page to query memory in natural language
 // beside any app, reaching tools that will never integrate via MCP. Read-only: query + render, no
 // mutation. Vanilla ES module, no build step. Talks to POST /api/search (rich artifact results) or
-// POST /api/recall (simple {content, created_at, distance}); the API key lives in localStorage and
-// rides x-api-key on every call. DOM is built via el() (text nodes, never innerHTML with result
-// data) so a memory's own text can't inject markup. Mirrors the idioms in app.js (#96).
+// POST /api/recall (simple {content, created_at, distance}); the page is served token-only (#169)
+// so its API credential is the path token itself, sent as x-api-key on every call. DOM is built via
+// el() (text nodes, never innerHTML with result data) so a memory's own text can't inject markup.
+// Mirrors the idioms in app.js (#96).
 
-const KEY_STORAGE = 'lifecontext_api_key';
 const RESULT_LIMIT = 10;
 const SNIPPET_MAX = 400; // text_repr can be long prose; cap the card body, keep the whole thing on hover.
 
@@ -24,7 +24,14 @@ function el(tag, props = {}, ...children) {
 }
 
 // --- API layer (mirrors app.js) ---
-const apiKey = () => localStorage.getItem(KEY_STORAGE) || '';
+// Token-only (#169): the credential is the capability token parsed from this page's own path
+// (/<token>/ui/<file>, URL-decoded), sent as x-api-key — requireAuth accepts UI_URL_TOKEN (#163).
+// The page is only reachable at that path, so the token is always present; no manual entry.
+const apiKey = () => {
+  const seg = location.pathname.match(/^\/([^/]+)\/ui\/[^/]+$/)?.[1];
+  if (!seg) return '';
+  try { return decodeURIComponent(seg); } catch { return seg; } // malformed %-escape: use the raw segment
+};
 class ApiError extends Error { constructor(status, message, data) { super(message); this.status = status; this.data = data; } }
 
 async function api(method, path, { body } = {}) {
@@ -32,7 +39,7 @@ async function api(method, path, { body } = {}) {
   let payload;
   if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
   const res = await fetch(path, { method, headers, body: payload });
-  if (res.status === 401) { showKeyBar('Invalid or missing API key.'); throw new ApiError(401, 'unauthorized'); }
+  if (res.status === 401) { toast('Unauthorized — reopen the page from its full /<token>/ui/ URL.', true); throw new ApiError(401, 'unauthorized'); }
   const ct = res.headers.get('content-type') || '';
   const data = ct.includes('application/json') ? await res.json().catch(() => null) : null;
   if (!res.ok) throw new ApiError(res.status, (data && data.error) || res.statusText, data);
@@ -43,18 +50,6 @@ async function api(method, path, { body } = {}) {
 const $ = (id) => document.getElementById(id);
 let mode = 'search'; // 'search' (rich) | 'recall' (simple)
 
-// --- API key bar (mirrors app.js) ---
-function showKeyBar(msg = '') { $('keyBar').hidden = false; $('keyMsg').textContent = msg; $('keyInput').value = apiKey(); $('keyInput').focus(); }
-function hideKeyBar() { $('keyBar').hidden = true; }
-$('keySave').addEventListener('click', () => {
-  const v = $('keyInput').value.trim();
-  if (!v) return;
-  localStorage.setItem(KEY_STORAGE, v);
-  hideKeyBar();
-  $('ask').focus();
-});
-$('keyEdit').addEventListener('click', () => showKeyBar());
-
 // --- toast (mirrors app.js) ---
 let toastTimer;
 function toast(msg, isErr = false) {
@@ -63,7 +58,7 @@ function toast(msg, isErr = false) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 3200);
 }
 function reportError(err) {
-  // 401 already surfaces the key bar; don't double-report it as a toast.
+  // 401 already surfaces its own toast in api(); don't double-report it.
   if (!(err instanceof ApiError && err.status === 401)) toast(err.message || 'Request failed', true);
 }
 
@@ -146,7 +141,6 @@ function renderResults(container, rows, turnMode) {
 
 // --- ask flow ---
 async function ask(query) {
-  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
   // Snapshot the mode at submit time: the toggle can flip while this request is in flight, and the
   // returned shape (search artifact vs recall {content}) must be rendered with the matching card.
   const turnMode = mode;
@@ -156,7 +150,7 @@ async function ask(query) {
     const { results } = await api('POST', path, { body: { query, limit: RESULT_LIMIT } });
     renderResults(slot, results || [], turnMode);
   } catch (err) {
-    slot.replaceChildren(el('p', { class: 'empty err' }, err instanceof ApiError && err.status === 401 ? 'Enter your API key above, then ask again.' : `Error: ${err.message || 'request failed'}`));
+    slot.replaceChildren(el('p', { class: 'empty err' }, err instanceof ApiError && err.status === 401 ? 'Unauthorized — reopen this page from its full /<token>/ui/ URL.' : `Error: ${err.message || 'request failed'}`));
     reportError(err);
   }
 }
@@ -181,17 +175,6 @@ for (const b of $('modeToggle').querySelectorAll('button')) b.addEventListener('
 });
 
 // --- boot ---
-// Capability-URL bootstrap (#161, token-first #165): when served under /<token>/ui/<file>
-// (UI_URL_TOKEN set), seed the API key from the path token so a bookmark authorizes /api calls with
-// no manual entry. The plain /ui/<file> dev mount has no token segment, so this no-ops and the
-// manual key flow below runs.
-seedKeyFromPathToken();
-if (!apiKey()) showKeyBar('Enter your API key to begin.');
-
-function seedKeyFromPathToken() {
-  const seg = location.pathname.match(/^\/([^/]+)\/ui\/[^/]+$/)?.[1]; // token-first /<token>/ui/<file> (#165)
-  if (!seg) return;
-  if (localStorage.getItem(KEY_STORAGE)) return; // don't clobber an already-stored key / needlessly persist the token (Copilot, PR #163)
-  try { localStorage.setItem(KEY_STORAGE, decodeURIComponent(seg)); }
-  catch { localStorage.setItem(KEY_STORAGE, seg); } // malformed %-escape: fall back to the raw segment
-}
+// Token-only (#169): the page is only served at /<token>/ui/<file>, so apiKey() always resolves the
+// credential from the path — nothing to bootstrap or prompt for. Focus the ask box and go.
+$('ask').focus();

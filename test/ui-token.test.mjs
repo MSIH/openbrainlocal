@@ -60,16 +60,22 @@ after(async () => {
 
 const get = (p, headers = {}) => fetch(`${base}${p}`, { headers });
 
-test('UI gated: /<token>/ui/chat.html → 200, and serves the asset under the tokened path', async () => {
+test('UI gated: /<token>/ui/chat.html → 200 with NO api-key bar, and serves the asset under the tokened path', async () => {
   const page = await get(`/${UI_TOKEN}/ui/chat.html`);
   assert.equal(page.status, 200);
   assert.match(page.headers.get('content-type') || '', /text\/html/);
-  assert.match(await page.text(), /LifeContext/, 'the page HTML is served under the tokened mount');
+  const html = await page.text();
+  assert.match(html, /LifeContext/, 'the page HTML is served under the tokened mount');
+  // Token-only (#169): the API-key bar markup is gone — no manual-key input/Save/🔑 remain.
+  for (const id of ['keyBar', 'keyInput', 'keySave', 'keyEdit']) {
+    assert.ok(!html.includes(`id="${id}"`), `no #${id} in the token-only page`);
+  }
+  assert.ok(!html.includes('🔑'), 'no 🔑 change-key button in the token-only page');
   // A relative asset (./chat.js from the HTML) must resolve under /<token>/ui/ too — proves the
   // mount strips the token prefix so express.static finds the file.
   const asset = await get(`/${UI_TOKEN}/ui/chat.js`);
   assert.equal(asset.status, 200);
-  assert.match(await asset.text(), /seedKeyFromPathToken/, 'the JS asset loads under the token path');
+  assert.match(await asset.text(), /apiKey/, 'the JS asset loads under the token path');
 });
 
 test('UI gated: bare /ui and a wrong token both 404 (existence hidden)', async () => {

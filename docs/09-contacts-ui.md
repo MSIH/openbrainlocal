@@ -5,7 +5,7 @@ vCards are messy (wrong emails, missing phones, unlinked relationships), and unt
 to fix the graph was `merge_entities`. This adds a browser UI + core REST endpoints to correct a
 contact's fields, edit its aliases and relationships, and set a photo.
 
-Open it at **`http://localhost:3000/ui/contacts.html`** (served as static assets from `public/`).
+Open it at **`http://localhost:3000/<token>/ui/contacts.html`** (served as static assets from `public/`). The UI is **token-only** (#169): it is served only when `UI_URL_TOKEN` is set in `.env`, and only under the `/<token>/ui/…` capability path — see the Auth note below and [`docs/07`](07-cloudflare-tunnel-setup.md#opening-the-browser-ui-remotely-capability-url).
 
 ## Model: the entity graph is mutable curation state
 
@@ -77,7 +77,11 @@ Backing helpers live in `src/db.js` (`listEntities`, `getEntityProfile`, `create
 
 ## Auth note
 
-The static UI holds the API key in the browser's `localStorage` and sends it as `x-api-key` on
-every data call. Fine for a local single-user tool; over a Cloudflare Tunnel (docs/07) the key is
-exposed to that browser — acceptable since it's the owner's own browser, but don't embed the key in
-a shared page.
+Token-only (#169): the UI is served only when `UI_URL_TOKEN` is set, and only at `/<token>/ui/…`.
+The page's credential is the **path token itself** — parsed from `location.pathname` and sent as
+`x-api-key` on every data call — which `requireAuth` accepts as an alternative to
+`LIFECONTEXT_API_KEY` (#163). There is no API-key bar and no `localStorage` key: the token is always
+in the URL you loaded. With `UI_URL_TOKEN` unset the UI is disabled (every `/ui/*` path 404s), so a
+Cloudflare Tunnel (docs/07) can't expose the page without an explicit token. A capability token in a
+URL still leaks via history/logs/`Referer` — treat it as a full-access browser credential (docs/07),
+and for anything beyond personal use put Cloudflare Access in front of `/ui`.

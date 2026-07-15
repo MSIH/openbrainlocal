@@ -1,9 +1,8 @@
 // LifeContext contacts management UI (#96). Vanilla ES module — no framework, no build step.
-// Talks to the core /api/v1/entities curation endpoints; the API key lives in localStorage and
-// rides x-api-key on every call. DOM is built via el() (text nodes, never innerHTML with user
-// data) so a contact's own fields can't inject markup.
+// Talks to the core /api/v1/entities curation endpoints; the page is served token-only (#169) so
+// its API credential is the path token itself, sent as x-api-key on every call. DOM is built via
+// el() (text nodes, never innerHTML with user data) so a contact's own fields can't inject markup.
 
-const KEY_STORAGE = 'lifecontext_api_key';
 // Canonical relation vocabulary (mirrors RELATION_TYPE_MAP in src/db.js) + custom (free label).
 const RELATION_TYPES = ['spouse', 'partner', 'domesticPartner', 'child', 'parent', 'mother', 'father',
   'sibling', 'brother', 'sister', 'friend', 'relative', 'assistant', 'manager', 'referredBy', 'worksAt', 'custom'];
@@ -23,7 +22,14 @@ function el(tag, props = {}, ...children) {
 }
 
 // --- API layer ---
-const apiKey = () => localStorage.getItem(KEY_STORAGE) || '';
+// Token-only (#169): the credential is the capability token parsed from this page's own path
+// (/<token>/ui/<file>, URL-decoded), sent as x-api-key — requireAuth accepts UI_URL_TOKEN (#163).
+// The page is only reachable at that path, so the token is always present; no manual entry.
+const apiKey = () => {
+  const seg = location.pathname.match(/^\/([^/]+)\/ui\/[^/]+$/)?.[1];
+  if (!seg) return '';
+  try { return decodeURIComponent(seg); } catch { return seg; } // malformed %-escape: use the raw segment
+};
 class ApiError extends Error { constructor(status, message, data) { super(message); this.status = status; this.data = data; } }
 
 async function api(method, path, { body, rawBody, contentType } = {}) {
@@ -32,7 +38,7 @@ async function api(method, path, { body, rawBody, contentType } = {}) {
   if (rawBody !== undefined) { payload = rawBody; if (contentType) headers['Content-Type'] = contentType; }
   else if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
   const res = await fetch(path, { method, headers, body: payload });
-  if (res.status === 401) { showKeyBar('Invalid or missing API key.'); throw new ApiError(401, 'unauthorized'); }
+  if (res.status === 401) { toast('Unauthorized — reopen the page from its full /<token>/ui/ URL.', true); throw new ApiError(401, 'unauthorized'); }
   const ct = res.headers.get('content-type') || '';
   const data = ct.includes('application/json') ? await res.json().catch(() => null) : null;
   if (!res.ok) throw new ApiError(res.status, (data && data.error) || res.statusText, data);
@@ -49,25 +55,6 @@ async function fetchPhotoObjectURL(id) {
 const $ = (id) => document.getElementById(id);
 let currentId = null, currentProfile = null, currentKind = '', searchTerm = '', lastPhotoURL = null;
 let currentSave = null; // set by renderDetail to the open contact's save closure; used by the top-bar Save (#127)
-
-// --- API key bar ---
-// A review drawer (.duppanel: position:fixed, inset:0) would cover the key bar, trapping the user
-// with no way to enter a key — so close any open drawer before revealing/focusing it. Covers every
-// path that surfaces the key bar (no-key open, 401 mid-action) for both the duplicates and proposed drawers.
-function showKeyBar(msg = '') {
-  if (!$('dupPanel').hidden) closeDuplicates();
-  if (!$('propPanel').hidden) closeProposed();
-  $('keyBar').hidden = false; $('keyMsg').textContent = msg; $('keyInput').value = apiKey(); $('keyInput').focus();
-}
-function hideKeyBar() { $('keyBar').hidden = true; }
-$('keySave').addEventListener('click', () => {
-  const v = $('keyInput').value.trim();
-  if (!v) return;
-  localStorage.setItem(KEY_STORAGE, v);
-  hideKeyBar();
-  loadList();
-});
-$('keyEdit').addEventListener('click', () => showKeyBar());
 
 // --- toast ---
 let toastTimer;
@@ -93,7 +80,6 @@ function reportError(err) {
 const initials = (name) => (name || '?').split(/\s+/).slice(0, 2).map((s) => s[0] || '').join('').toUpperCase();
 
 async function loadList() {
-  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
   try {
     const params = new URLSearchParams();
     if (searchTerm) params.set('query', searchTerm);
@@ -381,7 +367,6 @@ function closeDuplicates() {
 }
 
 async function loadDuplicates() {
-  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
   try {
     const { pairs = [] } = await api('GET', '/api/v1/entities/duplicates?limit=50');
     renderDuplicates(pairs);
@@ -449,7 +434,6 @@ function closeProposed() {
 }
 
 async function loadProposed() {
-  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
   try {
     const { proposals = [] } = await api('GET', '/api/v1/entities/proposed?status=pending&limit=50');
     renderProposed(proposals);
@@ -497,7 +481,6 @@ async function rejectProposal(id) {
 
 // #162: stage proposals from the side contact directory (#154) into the queue, then refresh it.
 async function stageFromDirectory() {
-  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
   try {
     const { scanned = 0, proposed = 0 } = await api('POST', '/api/v1/entities/proposed/stage-from-directory', {});
     toast(`Staged ${proposed} proposal(s) from directory (${scanned} handle(s) scanned).`);
@@ -535,17 +518,6 @@ for (const b of $('kindFilter').querySelectorAll('button')) b.addEventListener('
 });
 
 // --- boot ---
-// Capability-URL bootstrap (#161, token-first #165): when served under /<token>/ui/<file>
-// (UI_URL_TOKEN set), seed the API key from the path token so a bookmark authorizes /api calls with
-// no manual entry. The plain /ui/<file> dev mount has no token segment, so this no-ops and the
-// manual key flow below runs.
-seedKeyFromPathToken();
-if (apiKey()) loadList(); else showKeyBar('Enter your API key to begin.');
-
-function seedKeyFromPathToken() {
-  const seg = location.pathname.match(/^\/([^/]+)\/ui\/[^/]+$/)?.[1]; // token-first /<token>/ui/<file> (#165)
-  if (!seg) return;
-  if (localStorage.getItem(KEY_STORAGE)) return; // don't clobber an already-stored key / needlessly persist the token (Copilot, PR #163)
-  try { localStorage.setItem(KEY_STORAGE, decodeURIComponent(seg)); }
-  catch { localStorage.setItem(KEY_STORAGE, seg); } // malformed %-escape: fall back to the raw segment
-}
+// Token-only (#169): the page is only served at /<token>/ui/<file>, so apiKey() always resolves the
+// credential from the path — nothing to bootstrap or prompt for. Load the contact list directly.
+loadList();

@@ -696,23 +696,23 @@ app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
   res.sendFile(file, { dotfiles: 'allow' });
 }));
 
-// --- STATIC WEB UI (#96, gated #161) ---
-// Static assets (the API key lives in the browser and rides x-api-key on every /api call — the
-// static files carry no secret). Mounted after the rate limiter so page + asset loads are still
-// rate-limited. Asset/nav refs in the HTML are RELATIVE (./style.css) so they resolve under either
-// mount point below (#161).
+// --- STATIC WEB UI (#96, token-only #169) ---
+// Token-only by construction (#169): the UI is served ONLY when UI_URL_TOKEN is set, and ONLY at
+// /<token>/ui/… — there is NO open /ui mount. This closes a secure-by-default gap: an unset token
+// behind a tunnel used to serve the UI page to the whole internet. Unset now means no UI mount at
+// all, so /ui/* and /<anything>/ui/* all fall through to 404 (a tunnel can expose nothing). The
+// page's browser credential is the path token itself (parsed from location.pathname, sent as
+// x-api-key), which requireAuth accepts (#163) — so there is no manual-key entry path anymore.
+// Static files carry no secret. Asset/nav refs in the HTML are RELATIVE (./style.css) so they
+// resolve under the tokened mount. Mounted after the rate limiter so page/asset loads are limited.
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 if (UI_URL_TOKEN) {
-  // Capability-URL gate (#161, #165): the UI is served ONLY at /<token>/ui/… — token-FIRST, matching
-  // the MCP capability URL /<token>/mcp (#63), so both surfaces share one convention. Two-segment
-  // ('/:token/ui') NOT a bare '/:token' router: the latter would shadow /api/* (#63); this only
-  // matches paths whose 2nd segment is 'ui', so /api/recall never does. The guard 404s a wrong/absent
-  // token; the bare /ui (no token) never matches, so it falls through to 404 — world-unloadable
-  // without the URL. Registered only when the token is set (mirrors the MCP_URL_TOKEN guard).
+  // Capability-URL gate (#161, #165): token-FIRST, matching the MCP capability URL /<token>/mcp
+  // (#63), so both surfaces share one convention. Two-segment ('/:token/ui') NOT a bare '/:token'
+  // router: the latter would shadow /api/* (#63); this only matches paths whose 2nd segment is
+  // 'ui', so /api/recall never does. The guard 404s a wrong/absent token; the bare /ui (no token)
+  // never matches, so it falls through to 404 — world-unloadable without the URL.
   app.use('/:token/ui', requireUiPathToken, express.static(publicDir));
-} else {
-  // No token → today's plain, open mount (localhost dev convenience; no regression).
-  app.use('/ui', express.static(publicDir));
 }
 
 // --- STREAMABLE HTTP MCP TRANSPORT ---
@@ -802,6 +802,8 @@ app.use((err, req, res, next) => {
 
 const serverInstance = app.listen(PORT, () => {
   console.log(`🔒 Local Ollama-Powered Streamable HTTP Brain operating on port ${PORT}`);
+  // UI state at a glance (#169): token-only, no open mount. The token value itself is never logged.
+  console.log(UI_URL_TOKEN ? 'web UI: /<token>/ui/… (UI_URL_TOKEN set)' : 'web UI: disabled (set UI_URL_TOKEN)');
 });
 
 // --- GRACEFUL SHUTDOWN ---

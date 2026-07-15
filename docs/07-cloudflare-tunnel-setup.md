@@ -185,12 +185,12 @@ key is untouched throughout.
 
 ### Opening the browser UI remotely (capability URL)
 
-The web UI (Ask + Contacts, `/ui/*`) is static HTML/JS a browser loads and then calls `/api`
-from. A browser **can't** attach an `x-api-key` header to a plain address-bar visit, and the
-`/ui` static mount is *not* itself key-gated — so on a tunnel, `https://lc.yourdomain.com/ui/chat.html`
-would return **200 to anyone** (the data behind `/api` is still key-gated, but the page itself
-is world-loadable and fingerprints the host as a LifeContext instance). The fix mirrors the MCP
-token above: gate the UI behind a **capability URL** so it's both protected and bookmarkable (#161).
+The web UI (Ask + Contacts) is static HTML/JS a browser loads and then calls `/api` from. A browser
+**can't** attach an `x-api-key` header to a plain address-bar visit, so the UI is **token-only**
+(#169): it is served **only** when `UI_URL_TOKEN` is set, and **only** behind a **capability URL**,
+so it's both protected and bookmarkable. There is **no open `/ui` mount** — with `UI_URL_TOKEN`
+unset the UI is disabled entirely (`/ui/*` and `/<anything>/ui/*` all 404), so a tunnel can never
+expose the page without an explicit token. This mirrors the MCP token convention above.
 
 1. Generate a token (again a **separate** secret from `LIFECONTEXT_API_KEY` and `MCP_URL_TOKEN`):
 
@@ -201,12 +201,14 @@ token above: gate the UI behind a **capability URL** so it's both protected and 
 2. Add it to `.env` as `UI_URL_TOKEN=<the value>` and restart. When set, the UI is served **only**
    at `https://lc.yourdomain.com/<token>/ui/chat.html` (and `/<token>/ui/contacts.html`) — token
    **first**, matching the MCP capability URL `/<token>/mcp` (#63, #165); the bare `/ui/chat.html`
-   — or a wrong token — 404s, exactly like the MCP path token. Leaving it unset keeps
-   today's plain `/ui` mount (fine for `http://localhost:3000`, where only you can reach it).
+   — or a wrong token — 404s, exactly like the MCP path token. **The UI now requires this token even
+   on localhost** (`http://localhost:3000/<token>/ui/chat.html`) — an accepted tradeoff for a
+   fail-safe default; the boot log prints `web UI: /<token>/ui/…` when set, `web UI: disabled (set
+   UI_URL_TOKEN)` when not.
 3. **Bookmark that full URL.** The page reads the token from its own path and sends it as the API
-   key, so the bookmark works end-to-end with **no manual key entry** — `UI_URL_TOKEN` is, by design,
-   a full-access browser credential (the server accepts it on `/api` as an alternative to
-   `LIFECONTEXT_API_KEY`).
+   key, so the bookmark works end-to-end with **no manual key entry** (there is no API-key bar) —
+   `UI_URL_TOKEN` is, by design, a full-access browser credential (the server accepts it on `/api`
+   as an alternative to `LIFECONTEXT_API_KEY`).
 
 **Same URL-leak caveat as the MCP token, and then some:** a secret in a URL leaks via browser
 history, proxy/CDN logs, and the `Referer` header — and a *browser* leaks URLs far more readily than
