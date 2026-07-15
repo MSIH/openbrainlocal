@@ -151,9 +151,10 @@ function requireAuth(req, res, next) {
   const token = req.headers['x-api-key']
     || bearer
     || req.query?.[AUTH_QUERY_PARAM];
-  // The browser UI's capability-URL token (#161) is a full-access alternative credential when set,
-  // so a bookmarked /ui/<token>/ page (which seeds the path token as x-api-key) authorizes /api
-  // calls with no manual key entry. It never weakens the primary key path — that check comes first.
+  // The browser UI's capability-URL token (#161, token-only #169) is a full-access alternative
+  // credential when set, so a bookmarked /<token>/ui/ page (which reads the token from its own path
+  // and sends it as x-api-key) authorizes /api with no manual key entry. It never weakens the
+  // primary key path — that check comes first.
   if (secureCompare(token, LIFECONTEXT_API_KEY) || (UI_URL_TOKEN && secureCompare(token, UI_URL_TOKEN))) {
     return next();
   }
@@ -169,9 +170,9 @@ function requirePathToken(req, res, next) {
   res.status(404).end();
 }
 
-// The same capability-URL guard, bound to UI_URL_TOKEN, for the browser web UI (#161): the static
-// UI is served only at /ui/<token>/… when the segment matches. 404 (never 401) on a wrong/absent
-// token so the tokened mount's existence isn't confirmed by probing — same reasoning as the MCP one.
+// The same capability-URL guard, bound to UI_URL_TOKEN, for the browser web UI (#161, token-first
+// #165): the static UI is served only at /<token>/ui/… when the segment matches. 404 (never 401) on
+// a wrong/absent token so the tokened mount's existence isn't confirmed by probing — same as MCP.
 function requireUiPathToken(req, res, next) {
   if (UI_URL_TOKEN && secureCompare(req.params.token, UI_URL_TOKEN)) return next();
   res.status(404).end();
