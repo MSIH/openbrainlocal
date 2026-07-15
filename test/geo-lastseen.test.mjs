@@ -67,9 +67,10 @@ test('(c) "where was X last seen" returns the most-recent GEOTAGGED photo first 
   assert.ok(!rows.some((r) => r.source_id === 'c-nogeo-new'), 'the geo-less newest photo is excluded');
 });
 
-test('(d) geoRequired:true with zero geotagged candidates demotes to relevance (non-empty, no throw) (#190)', async () => {
-  // A person whose linked photos are ALL geo-less: geoRequired can match nothing, so the search
-  // must degrade to the normal relevance search rather than returning empty (demote-never-drop).
+test('(d) a PLAN-derived geo_required with zero geotagged candidates demotes to relevance (non-empty) (#190)', async () => {
+  // Devon's linked photos are ALL geo-less. When geo_required comes from the PLAN (not the caller),
+  // the zero-candidate retry drops it (demote-never-drop) and plan-derived sort:recent demotes to
+  // relevance too; the caller-supplied entity/type filters survive, so Devon's geo-less photos return.
   const eid = Number(insertEntityStmt.run('person', 'Devon Marsh', null).lastInsertRowid);
   insertAliasStmt.run(eid, 'devon marsh', 'name');
   for (const sid of ['d-p1', 'd-p2']) {
@@ -78,10 +79,11 @@ test('(d) geoRequired:true with zero geotagged candidates demotes to relevance (
       entity_hints: [{ alias: 'Devon Marsh', alias_type: 'name', role: 'sender' }],
     });
   }
+  fake.setChatPlan({ types: ['photo'], entities: ['devon marsh'], geo_required: true, sort: 'recent', semantic: 'devon marsh photo' });
   const rows = await hybridSearch('where was devon marsh last seen', {
-    limit: 10, types: ['photo'], entities: ['devon marsh'], geoRequired: true, sort: 'recent', usePlanner: false,
+    limit: 10, types: ['photo'], entities: ['devon marsh'], usePlanner: true,
   });
-  assert.ok(rows.length > 0, 'no geotagged match -> demotes to relevance rather than empty');
+  assert.ok(rows.length > 0, 'plan-derived geo_required with no geotagged match -> demotes to relevance, not empty');
   assert.ok(rows.some((r) => r.source_id.startsWith('d-p')), "Devon's geo-less photos are returned by the demoted search");
 });
 
@@ -115,4 +117,19 @@ test('(f) the planner plan carries geo_required/sort for a "where … last seen"
   assert.ok(rows.length > 0, 'the plan-driven geo filter still returns the geotagged photos');
   assert.equal(rows[0].source_id, 'f-geo-new', 'plan geo_required+sort:recent -> most-recent geotagged photo first');
   assert.ok(rows.every((r) => r.place_label != null), 'plan geo_required filtered out the geo-less photo');
+});
+
+test('(g) a CALLER-supplied geoRequired:true with no geotagged match yields an honest empty (#190)', async () => {
+  // Unlike the plan-derived case (d), an explicit caller geoRequired:true is a deliberate filter (like
+  // caller-supplied types/entities): if it matches nothing it returns empty, not a silent demotion.
+  const eid = Number(insertEntityStmt.run('person', 'Harper Quinn', null).lastInsertRowid);
+  insertAliasStmt.run(eid, 'harper quinn', 'name');
+  await executeIngest({
+    source: 'geo-g', source_id: 'g-p1', type: 'photo', text_repr: 'Photo received from Harper Quinn g-p1', occurred_at: '2026-05-02',
+    entity_hints: [{ alias: 'Harper Quinn', alias_type: 'name', role: 'sender' }],
+  });
+  const rows = await hybridSearch('where was harper quinn last seen', {
+    limit: 10, types: ['photo'], entities: ['harper quinn'], geoRequired: true, usePlanner: false,
+  });
+  assert.equal(rows.length, 0, 'explicit caller geoRequired:true + no geotagged match -> honest empty');
 });

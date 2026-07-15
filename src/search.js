@@ -235,8 +235,12 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   const t1 = emptyish(timeRange?.end) || emptyish(plan.time_end);
   const entTerms = entities?.length ? entities : plan.entities;
   // geo_required + sort (#190): a caller opt wins over the plan (mirrors types/timeRange/entities).
+  // Track whether each came from the caller so the zero-candidate retry can keep a caller-supplied
+  // filter (honest empty) while demoting a plan-derived one (demote-never-drop).
+  const geoReqFromCaller = geoRequired === true;
+  const sortFromCaller = sort != null;
   const effGeoRequired = geoRequired ?? plan.geo_required;
-  const effSort = sort ?? plan.sort;
+  let effSort = sort ?? plan.sort;
 
   // Resolve entity terms. Terms that don't resolve can't filter — but they must not
   // vanish either, so they're folded back into the ranked-search text below.
@@ -328,6 +332,10 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   // else the default_searchable default; #121) — so `candidates` is always a Set, never null.
   let candidates = applyGeo(prefilter({ types: effTypes, entityIds, t0, t1, place, geoRequired: effGeoRequired }), geoIds);
   if (candidates.size === 0) {
+    // A plan-derived recency intent is demoted with the plan filters here — only a caller-supplied
+    // `sort` survives (#190), so a "where was X last seen" with no geotagged match degrades to a
+    // normal relevance search rather than returning the most-recent artifacts overall.
+    if (!sortFromCaller) effSort = 'relevance';
     // Planner-overfilter fix (M2 rule: demote, never drop): zero candidates conflates
     // "caller's explicit filters matched nothing" (honest) with "the LLM invented a
     // filter" (silent planner failure — e.g. the prompt steers summary queries to
@@ -340,12 +348,13 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
       t0: emptyish(timeRange?.start),
       t1: emptyish(timeRange?.end),
       place: null,
-      // geo_required is plan-derived (never a caller arg here), so the retry drops it too —
-      // demote-never-drop: a "where was X" with no geotagged match degrades to a normal search.
-      geoRequired: false,
+      // geo_required survives the retry only when the CALLER set it (like explicit types/entities):
+      // an explicit geoRequired:true stays in force and yields an honest empty; a plan-derived one is
+      // dropped (demote-never-drop — a "where was X" with no geotagged match degrades to a normal search).
+      geoRequired: geoReqFromCaller,
     };
     const callerGeo = geoFromCaller ? geoIds : null;
-    const callerHasSql = caller.types.length || caller.entityIds.length || caller.t0 || caller.t1;
+    const callerHasSql = caller.types.length || caller.entityIds.length || caller.t0 || caller.t1 || caller.geoRequired;
     if (callerHasSql || callerGeo != null) {
       candidates = applyGeo(prefilter(caller), callerGeo);
       if (candidates.size === 0) return []; // the caller's own filters matched nothing — honest empty
