@@ -89,6 +89,18 @@ export const DIGEST_TIMELINE_DAYS = int(process.env.DIGEST_TIMELINE_DAYS, 14); /
 export const LIFECONTEXT_API_KEY = process.env.LIFECONTEXT_API_KEY;
 export const LIFECONTEXT_API_KEY_PLACEHOLDER = 'change-this-to-a-long-secure-token';
 
+// --- Access logging (all surfaces: /api, /mcp, /ui) — #178 ---
+// One request-logging middleware writes a per-request line (method/path/status/IP/latency/surface/
+// auth) to a daily file; secrets (the api_key query param, capability path tokens) are redacted and
+// request bodies are never logged. Default on; ACCESS_LOG_ENABLED=false (or 0/no/off) disables it.
+const accessLogFlag = (process.env.ACCESS_LOG_ENABLED ?? '').trim().toLowerCase();
+export const ACCESS_LOG_ENABLED = !(accessLogFlag === 'false' || accessLogFlag === '0' || accessLogFlag === 'no' || accessLogFlag === 'off');
+export const ACCESS_LOG_DIR = process.env.ACCESS_LOG_DIR || 'logs/access';
+// Days of dated files to keep; boot prunes older. A non-positive value (incl. an explicit 0) or a
+// malformed one falls back to the 90-day default (0/unset = keep 90; a positive N prunes older).
+const accessLogRetention = int(process.env.ACCESS_LOG_RETENTION_DAYS, 90);
+export const ACCESS_LOG_RETENTION_DAYS = accessLogRetention > 0 ? accessLogRetention : 90;
+
 // Optional capability-URL token for the claude.ai web MCP connector, which offers no header
 // field (anthropics/claude-ai-mcp #112). Distinct from LIFECONTEXT_API_KEY — it rides in the
 // URL path, so it lands in Cloudflare edge/proxy access logs and must be rotatable on its own

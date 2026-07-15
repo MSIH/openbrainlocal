@@ -9,6 +9,8 @@ node_modules/
 # Decoded contact photos (vCard import + contacts-UI uploads) — personal data, files on disk
 # pointed at by raw_path / attrs.photoFile; the DB references them, they're never committed.
 raw/
+# Runtime logs: service stdout/stderr AND the per-request access logs (logs/access/, #178) —
+# both are local operational data, never committed.
 logs/
 _*.log
 

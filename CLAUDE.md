@@ -84,6 +84,7 @@ Enforced by gate hooks in `.claude/hooks/`. This repo is worked by multiple AI a
 - `LIFECONTEXT_API_KEY` (required — server hard-exits if unset or left at the placeholder)
 - `PORT` (default 3000)
 - `GEO_RADIUS_DEFAULT_KM` (default 25) / `GEO_RADIUS_MAX_KM` (default 500) — `near` geo-radius search (#68)
+- `ACCESS_LOG_ENABLED` (default true) / `ACCESS_LOG_DIR` (default `logs/access`) / `ACCESS_LOG_RETENTION_DAYS` (default 90) — per-request access logging for all surfaces, secrets redacted, boot prune + NTFS compression (#178; `src/access-log.js`)
 - Optional/for later cloud enrichment: provider keys — keep out of git.
 
 ## Workflow tooling & local settings
