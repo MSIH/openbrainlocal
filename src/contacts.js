@@ -332,6 +332,21 @@ function structuredFields(c) {
   };
 }
 
+// The display (canonical) name for a person (#156): given+family when a middle name is present, so
+// the contacts UI and search show "Amy Schneider", not "Amy Margaret Schneider". The full FN is
+// still emitted as a name alias by nameVariants, so resolution by the middle-name form keeps
+// working. Mirrors nameVariants' derive cutoff (structured `additional`, or exactly a 3-token FN;
+// 2- and 4+-token names are left unchanged — a 4+ compound surname can't be reduced safely).
+// Orgs keep their full name. Case is preserved (this is a display string, unlike the aliases).
+export function preferredDisplayName(c) {
+  if (c.isCompany || !c.fn) return c.fn || '';
+  const toks = c.fn.trim().split(/\s+/);
+  const given = c.name?.given || toks[0];
+  const family = c.name?.family || (toks.length === 3 ? toks[toks.length - 1] : null);
+  const hasMiddle = Boolean(c.name?.additional) || toks.length === 3;
+  return hasMiddle && given && family ? `${given} ${family}` : c.fn;
+}
+
 // Reuse an existing entity if any email or the name already resolves to one.
 function resolveExistingEntity(c) {
   for (const email of c.emails) { const ids = resolveEntityIds(email); if (ids.length) return ids[0]; }
@@ -382,7 +397,7 @@ const importOneTxn = db.transaction((c, textRepr, contentHash, vec, photo) => {
       title: c.title ?? null, role: c.role ?? null, note: c.note ?? null,
       phonetic: c.phonetic ?? null, isCompany: c.isCompany ?? false,
     };
-    entityId = insertEntityStmt.run(c.isCompany ? 'org' : 'person', c.fn || c.emails[0] || 'Unnamed', JSON.stringify(attrs)).lastInsertRowid;
+    entityId = insertEntityStmt.run(c.isCompany ? 'org' : 'person', preferredDisplayName(c) || c.emails[0] || 'Unnamed', JSON.stringify(attrs)).lastInsertRowid;
     entityCreated = true;
   }
   // Name aliases: full FN + nickname(s) + the derived given+family and nickname+family variants

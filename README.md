@@ -62,6 +62,8 @@ Re-running `import:contacts` on an **edited** vCard updates that contact in plac
 
 Phone numbers are matched by a canonical key (#129): US/Canada numbers written with a `+1` country code (`+1 (256) 468-0130`) resolve to the same contact as the bare 10-digit form (`(256) 468-0130`) — punctuation, spacing, and the `+1` all normalize away. Contacts imported before this change are re-aliased under the canonical key by `npm run backfill:phones` (additive and idempotent — back up `life-context.db` first).
 
+A contact's **display name defaults to first + last** (#156): a card with a middle name (`Amy Margaret Schneider`) is stored and shown as `Amy Schneider`, while the full name is kept as a searchable alias — so search/timeline read cleanly without losing resolution by the full name. Contacts imported before this change are shortened by `npm run backfill:display-names` (idempotent; back up `life-context.db` first).
+
 **Side contact directory (#154).** To keep the entity graph *curated* while still recognizing everyone, load your full contacts export as a lookup-only directory — it creates **no** entities:
 ```bash
 npm run directory:load contacts.vcf        # handle -> name lookup; NO entities created
