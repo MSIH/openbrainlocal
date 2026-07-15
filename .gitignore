@@ -33,3 +33,4 @@ LifeContext.xml
 # src/geodata/places.json is checked in
 cities1000.txt
 cities1000.zip
+life-context.db.*
