@@ -336,6 +336,16 @@ test('reduceEntityDisplayName (#156): 3-token canonical → first+last, both for
   assert.equal(getEntity(four).canonical_name, 'Maria de la Cruz');
 });
 
+test('reduceEntityDisplayName (#157): does NOT rename when the reduced form is unresolvable (UI-tombstoned)', () => {
+  const id = Number(insertEntityStmt.run('person', 'Nadia Rae Okafor', null).lastInsertRowid);
+  addAlias(id, 'Nadia Rae Okafor', 'name'); // seed a name alias so the entity resolves
+  addAlias(id, 'Nadia Okafor', 'name');     // the reduced form...
+  removeAlias(id, 'Nadia Okafor', 'name');  // ...then remove it via the UI (tombstone, #111)
+  const r = reduceEntityDisplayName(id);
+  assert.equal(r.changed, false, 'reduction skipped — the reduced name would not resolve back to this entity');
+  assert.equal(getEntity(id).canonical_name, 'Nadia Rae Okafor', 'canonical left unchanged, not set to a dead display name');
+});
+
 // --- Entity merge & duplicate detection (#75) ---
 const getRawEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const lastMergeLogStmt = db.prepare("SELECT * FROM ingest_log WHERE event_type = 'entity_merged' ORDER BY id DESC LIMIT 1");

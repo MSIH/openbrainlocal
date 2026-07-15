@@ -1394,6 +1394,13 @@ export const reduceEntityDisplayName = db.transaction((id) => {
   if (reduced === e.canonical_name) return { changed: false };
   insertAliasUnlessTombstoned(id, normalizeName(e.canonical_name), 'name'); // keep the full name resolvable
   insertAliasUnlessTombstoned(id, normalizeName(reduced), 'name');           // and the reduced form
+  // Only rename if the reduced form actually resolves to THIS entity — a prior UI tombstone (#111)
+  // would have refused the alias above, and a cross-entity collision (first-writer-wins) leaves it
+  // owned elsewhere; renaming the display to a name that doesn't resolve back here would break the
+  // guarantee, so skip the reduction in that case (Copilot, PR #157). The full name stays aliased.
+  if (!resolveAliasByTypeStmt.all(normalizeName(reduced), 'name').some((r) => r.entity_id === id)) {
+    return { changed: false, skipped: 'reduced-name-unresolvable' };
+  }
   setCanonicalNameStmt.run(reduced, id);
   logEvent('display_name_reduced', 'backfill-display-names', { entity_id: id, from: e.canonical_name, to: reduced });
   return { changed: true, from: e.canonical_name, to: reduced };
