@@ -381,6 +381,11 @@ const resolveAliasStmt = db.prepare('SELECT DISTINCT entity_id FROM entity_alias
 // match, or a name/handle alias could collide with an unrelated entity's differently-typed
 // alias (and a phone/email hint could earn undeserved 1.0 confidence off that collision).
 const resolveAliasByTypeStmt = db.prepare('SELECT DISTINCT entity_id FROM entity_aliases WHERE alias = ? AND alias_type = ?');
+// Query-time given-name fallback (#184): a name alias whose value is exactly the term OR starts
+// with the term at a token boundary ("sam" -> "sam rivera"/"sam maria rivera", never "jetsam" or a
+// mid-token "sa"). `name` aliases ONLY — a prefix on a phone/email is meaningless. Used solely by
+// hybridSearch's entity loop, never on the exact-match ingest/annotate path (see resolveNameByPrefix).
+const resolveNameByPrefixStmt = db.prepare(`SELECT DISTINCT entity_id FROM entity_aliases WHERE alias_type = 'name' AND (alias = @t OR alias LIKE @t || ' %' ESCAPE '\\')`);
 const getEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const logStmt = db.prepare('INSERT INTO ingest_log (event_type, actor, details) VALUES (?, ?, ?)');
 // entity_relations (issue #37): append-only edges, OR IGNORE for idempotency.
@@ -687,6 +692,23 @@ export function resolveEntityIds(term) {
   const digits = normalizePhone(term);
   if (digits.length >= 7) for (const r of resolveAliasStmt.all(digits)) ids.add(r.entity_id);
   return [...ids];
+}
+
+// Query-time given-name prefix fallback (#184) — SEARCH PATH ONLY, deliberately separate from
+// resolveEntityIds (which must stay exact-match/deterministic on the hot ingest/annotate/display
+// path). Resolves a bare first name ("sam") to a person stored under a full name alias ("sam
+// rivera"), but ONLY when exactly one distinct entity matches the token-boundary prefix — two
+// people sharing a first name stay unresolved (a wrong filter is worse than none). Returns the
+// single entity's id(s) or [] (no match, or ambiguous). LIKE metacharacters in the term are
+// escaped (matching the stmt's ESCAPE '\') so a stray `%`/`_` can't widen the match.
+export function resolveNameByPrefix(term) {
+  const t = normalizeName(term).replace(/[\\%_]/g, '\\$&');
+  if (!t) return [];
+  const ids = resolveNameByPrefixStmt.all({ t }).map((r) => r.entity_id);
+  if (ids.length > 1) {
+    console.error(`entity-resolve: "${term}" ambiguous across ${ids.length} entities, left unresolved`);
+  }
+  return ids.length === 1 ? ids : [];
 }
 
 // Deterministic alias types earn confidence 1.0 outright (connector-supplied value ignored);
