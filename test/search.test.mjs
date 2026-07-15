@@ -46,6 +46,21 @@ test('hybridSearch enforces default_searchable: a no-type search hides a visit; 
   assert.ok(!explicit.includes('note'), 'the explicit type filter still excludes other types');
 });
 
+test('planner: a filter it returns within the timeout is applied (fake-Ollama) (#179)', async () => {
+  // Two notes with identical text (identical embeddings → both are semantic candidates) on
+  // different dates. The query text names no date, so only a planner-supplied time filter can
+  // select June over January — proving the plan is both fetched (chat call) and applied.
+  await executeIngest({ source: 'plan', source_id: 'p-jan', type: 'note', text_repr: 'quarterly planning offsite', occurred_at: '2026-01-10' });
+  await executeIngest({ source: 'plan', source_id: 'p-jun', type: 'note', text_repr: 'quarterly planning offsite', occurred_at: '2026-06-10' });
+  const before = fake.counts.chat;
+  fake.setChatPlan({ time_start: '2026-06-01', time_end: '2026-06-30', semantic: 'quarterly planning offsite' });
+  const rows = await hybridSearch('quarterly planning offsite', { limit: 10, usePlanner: true });
+  assert.equal(fake.counts.chat, before + 1, 'the planner LLM was called (planner enabled, responds within the timeout)');
+  const ids = rows.map((r) => r.source_id);
+  assert.ok(ids.includes('p-jun'), 'the June note (inside the planner time window) is returned');
+  assert.ok(!ids.includes('p-jan'), 'the January note is excluded by the planner time filter');
+});
+
 test('timeline + about_entity annotate handles with the resolved contact name (#149)', async () => {
   // A contact with a phone alias, then a message from that number — the ingest hint links it.
   const eid = Number(insertEntityStmt.run('person', 'Marta Reyes', null).lastInsertRowid);

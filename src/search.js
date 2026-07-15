@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { db, resolveEntityIds, getEntity, getArtifactById, getRelations, getRelationsTo, mergeEntities, listProbableDuplicates, listContactPhotos, annotateArtifactRows } from './db.js';
 import { ai, embedToFloat32 } from './embeddings.js';
 import { geocodePlace, haversineKm } from './geocode.js';
-import { QUERY_MODEL, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
+import { QUERY_MODEL, QUERY_PLAN_TIMEOUT_MS, QUERY_PLANNER_ENABLED, QUERY_PLAN_MAX_TOKENS, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
 import { ARTIFACT_TYPES, TYPE_REGISTRY } from './ingest-types.js';
 
 // Re-exported so the planner prompt below, the plan-schema filter, and every existing
@@ -19,7 +19,6 @@ import { ARTIFACT_TYPES, TYPE_REGISTRY } from './ingest-types.js';
 // §6) without a second definition — src/ingest-types.js is the one source of truth.
 export { ARTIFACT_TYPES };
 
-const PLAN_TIMEOUT_MS = 8000;
 const MS_PER_DAY = 86_400_000;
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 const emptyish = (s) => (typeof s === 'string' && s.trim() ? s : null);
@@ -62,12 +61,14 @@ async function parseQuery(query) {
         model: QUERY_MODEL,
         temperature: 0,
         response_format: { type: 'json_object' },
+        // The plan is a tiny JSON; generation time dominates on a CPU host, so cap output (#179).
+        max_tokens: QUERY_PLAN_MAX_TOKENS,
         messages: [
           { role: 'system', content: planSystemPrompt(today) },
           { role: 'user', content: query },
         ],
       },
-      { timeout: PLAN_TIMEOUT_MS, maxRetries: 0 }
+      { timeout: QUERY_PLAN_TIMEOUT_MS, maxRetries: 0 }
     );
     const parsed = PlanSchema.safeParse(JSON.parse(resp.choices[0].message.content));
     if (parsed.success) {
@@ -205,11 +206,13 @@ function rrf(lists, k = RRF_K) {
  * `distance` from the vector arm when available (null for FTS-only hits). Ranking is
  * constrained to the prefiltered candidate set. Pass `usePlanner: false` to skip the LLM
  * parse entirely (the legacy recall path — a plain semantic+keyword lookup, no NL filters).
+ * `QUERY_PLANNER_ENABLED=false` (#179) forces that same no-LLM path globally — for a CPU-only
+ * host where the planner never beats even a low timeout, so search stays sub-second.
  * `near` (a place name or {lat, lon}) plus `radiusKm` add a geo-radius filter (#68): artifacts
  * within the radius by coordinate, not just by place-label text.
  */
 export async function hybridSearch(query, { limit = 3, types, timeRange, entities, near, radiusKm, usePlanner = true } = {}) {
-  const plan = usePlanner ? await parseQuery(query) : fallbackPlan(query);
+  const plan = usePlanner && QUERY_PLANNER_ENABLED ? await parseQuery(query) : fallbackPlan(query);
 
   const effTypes = types?.length ? types : plan.types;
   const t0 = emptyish(timeRange?.start) || emptyish(plan.time_start);
