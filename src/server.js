@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 
 import { PORT, TRUST_PROXY, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
-import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, listProposedEntities, approveProposedEntity, rejectProposedEntity } from './db.js';
+import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
@@ -606,6 +606,12 @@ app.post('/api/v1/entities/proposed/:id/reject', requireAuth, wrap(async (req, r
     if (err.code === 'ALREADY_RESOLVED') return res.status(409).json({ error: err.message });
     mapEntityError(err, res); // NOT_FOUND → 404, else rethrow to the generic middleware
   }
+}));
+
+// #162: stage review proposals from the loaded side contact directory (#154) — the same idempotent,
+// zero-entity-minting pass as `npm run backfill:directory-proposals`. No body; returns { scanned, proposed }.
+app.post('/api/v1/entities/proposed/stage-from-directory', requireAuth, wrap(async (req, res) => {
+  res.json(backfillDirectoryProposals());
 }));
 
 app.get('/api/v1/entities/:id', requireAuth, wrap(async (req, res) => {

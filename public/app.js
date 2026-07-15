@@ -495,7 +495,18 @@ async function rejectProposal(id) {
   } catch (err) { reportError(err); loadProposed(); } // 409 already-approved / 404: surface + re-fetch
 }
 
+// #162: stage proposals from the side contact directory (#154) into the queue, then refresh it.
+async function stageFromDirectory() {
+  if (!apiKey()) return showKeyBar('Enter your API key to begin.');
+  try {
+    const { scanned = 0, proposed = 0 } = await api('POST', '/api/v1/entities/proposed/stage-from-directory', {});
+    toast(`Staged ${proposed} proposal(s) from directory (${scanned} handle(s) scanned).`);
+    loadProposed();
+  } catch (err) { reportError(err); }
+}
+
 $('proposed').addEventListener('click', openProposed);
+$('propStage').addEventListener('click', stageFromDirectory);
 $('propClose').addEventListener('click', closeProposed);
 $('propPanel').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeProposed(); });
 
