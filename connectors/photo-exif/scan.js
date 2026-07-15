@@ -50,12 +50,13 @@ async function buildPayload(absPath, relPath) {
   // A file with a sidecar next to it is Google-origin; content-hash keying (never the file path)
   // makes the id reproducible from the bytes and dedups Takeout's per-album copies (see keyForMedia).
   const { source, source_id } = keyForMedia(contentHash, sidecarPathFor(absPath) != null);
+  const type = mediaType(path.basename(absPath));
 
   const payload = {
     source,
     source_id,
-    type: mediaType(path.basename(absPath)),
-    text_repr: buildTextRepr(dateStr, path.basename(absPath)),
+    type,
+    text_repr: buildTextRepr(dateStr, path.basename(absPath), type),
     content_hash: contentHash,
     raw_path: absPath,
     extra: { captioned: false },

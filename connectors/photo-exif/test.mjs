@@ -267,7 +267,9 @@ test('scan.js: a video ingests as type=video, a still as type=photo', async () =
   assert.equal(result.status, 0, result.stderr);
   const arts = requests[0].body.artifacts;
   assert.equal(arts.length, 2, 'both the video and the still are walked (walkMediaFiles)');
-  assert.equal(arts.find((a) => a.raw_path.endsWith('clip.mp4')).type, 'video');
+  const video = arts.find((a) => a.raw_path.endsWith('clip.mp4'));
+  assert.equal(video.type, 'video');
+  assert.match(video.text_repr, /^Video[: ]/, "a video's text_repr says Video, not Photo");
   assert.equal(arts.find((a) => a.raw_path.endsWith('still.jpg')).type, 'photo');
 });
 

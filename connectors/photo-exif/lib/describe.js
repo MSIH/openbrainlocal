@@ -112,7 +112,10 @@ export async function describePhoto(absPath) {
   };
 }
 
-export function buildTextRepr(dateStr, filename) {
-  if (dateStr) return `Photo taken ${dateStr}`;
-  return `Photo: ${filename}`;
+// `kind` is the artifact type ('photo' | 'video') so a video's embedded text isn't mislabeled
+// "Photo …". Defaults to 'photo' (the caption worker only ever handles images).
+export function buildTextRepr(dateStr, filename, kind = 'photo') {
+  const noun = kind === 'video' ? 'Video' : 'Photo';
+  if (dateStr) return `${noun} taken ${dateStr}`;
+  return `${noun}: ${filename}`;
 }
