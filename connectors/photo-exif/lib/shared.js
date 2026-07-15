@@ -40,7 +40,15 @@ export function mediaType(name) {
 // same name in different subfolders (e.g. two years' "IMG_1234.jpg") collide onto the same
 // source_id and silently overwrite each other via upsert instead of being two artifacts.
 export async function* walkImageFiles(root, dir = root) {
-  const entries = await readdir(dir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    // An unreadable subdirectory (permissions, broken symlink, transient IO) skips just that
+    // directory, not the whole scan — mirrors scan.js's per-file tolerance.
+    console.error(`photo-exif: skipping unreadable directory ${dir}`, err);
+    return;
+  }
   for (const entry of entries) {
     const absPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
@@ -55,7 +63,13 @@ export async function* walkImageFiles(root, dir = root) {
 // the note above). scan.js walks media so videos ingest too; the caption/face workers keep
 // walking images only (a video gets no caption/face pass).
 export async function* walkMediaFiles(root, dir = root) {
-  const entries = await readdir(dir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    console.error(`photo-exif: skipping unreadable directory ${dir}`, err);
+    return;
+  }
   for (const entry of entries) {
     const absPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {

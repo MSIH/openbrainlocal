@@ -97,9 +97,12 @@ async function buildPayload(absPath, relPath) {
 // copy that has it; the first copy's other fields win.
 function mergePayloads(base, dup) {
   const merged = [...(base.entity_hints ?? [])];
-  const seen = new Set(merged.map((h) => `${h.alias}|${h.role}`));
+  // Delimiter-free composite key — a JSON tuple can't collide the way `${alias}|${role}` could if
+  // an alias ever contained the delimiter.
+  const hintKey = (h) => JSON.stringify([h.alias, h.role]);
+  const seen = new Set(merged.map(hintKey));
   for (const h of dup.entity_hints ?? []) {
-    const key = `${h.alias}|${h.role}`;
+    const key = hintKey(h);
     if (!seen.has(key)) {
       seen.add(key);
       merged.push(h);
