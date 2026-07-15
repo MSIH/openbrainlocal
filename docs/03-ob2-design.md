@@ -249,9 +249,13 @@ The single biggest upgrade over OB1. `search_memories(query)` becomes a two-stag
     place: "New Orleans"           → place_label LIKE ("in"/"at" wording)
     near: null                     → a place NAME for "near"/"around" wording → geo-radius (#68)
     time: 2025-03-01 .. 2025-06-01,
+    geo_required: false            → true for "where/last seen/been" with NO place named → place_label IS NOT NULL (#190)
+    sort: "relevance"              → "recent" for "last/latest/most recent" → order candidates by occurred_at DESC, skip RRF (#190)
     semantic: "trip, vacation, together"
   }
 ```
+
+> **"Where / last seen" (#190).** `geo_required` + `sort` handle the *no-place-named* location question. A "where was X last seen" query resolves the person, restricts to geotagged artifacts (`place_label IS NOT NULL`), and orders them `occurred_at DESC` — so the top hit is where they were last seen. Both are plan-derived and ride the demote-never-drop retry (no geotagged match → normal relevance search, never empty); a caller may override via `hybridSearch(query, { geoRequired, sort })`. No REST/MCP/schema change. The complement to a named place (which already implies geotagged rows via `place`/`near`).
 
 **Stage 2 — Filter, then rank:**
 
