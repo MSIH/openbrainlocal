@@ -1448,7 +1448,11 @@ export function getContactPhotoRawPath(id) {
 // (email→email, phone→phone) rather than routed through resolveEntityIds, which also tries the phone
 // path on any 7+-digit string — an email like "h1471234567@example.com" would otherwise digit-strip
 // to a phone alias and mis-attribute (Copilot, PR #148).
-const HANDLE_TOKEN_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\+?\d[\d().-]{5,}\d/g;
+// Email domain is label-based (`label(.label)*.tld`) rather than `[A-Za-z0-9.-]+\.[A-Za-z]{2,}`:
+// the old form let `.` sit in both the greedy class and the following literal, so an adversarial
+// `x@` + `a.`×N backtracked super-linearly. Labels can't contain `.`, so there's no overlap to
+// backtrack across (#150). Phone alternative unchanged.
+const HANDLE_TOKEN_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}|\+?\d[\d().-]{5,}\d/g;
 const resolveHandleToken = (tok) => {
   if (tok.includes('@')) return resolveAliasByTypeStmt.all(normalizeName(tok), 'email').map((r) => r.entity_id);
   const digits = normalizePhone(tok);

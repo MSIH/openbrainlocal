@@ -10,7 +10,7 @@ import { useTempDb, f32 } from './helpers.mjs';
 
 const { cleanup } = useTempDb();
 const {
-  db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById, annotateArtifactRows,
+  db, storeArtifactTxn, upsertArtifactTxn, resolveEntityHints, getArtifactById, annotateArtifactRows, annotateHandles,
   insertEntityStmt, insertAliasStmt, mergeEntities, listProbableDuplicates, listContactPhotos,
   resolveEntityIds, getEntity, upsertEntityRelation, listEntities,
   addAlias, removeAlias, insertAliasUnlessTombstoned, normalizePhone,
@@ -305,6 +305,23 @@ test('loadDirectory (#154): vCard load populates the directory and creates NO en
   assert.equal(lookupDirectoryName('dir.only@example.com', 'email'), 'Directory Only Contact');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM entities WHERE kind='person'").get().n, beforePersons, 'no entity created');
   assert.equal(db.prepare('SELECT COUNT(*) n FROM entity_aliases').get().n, beforeAliases, 'no alias created');
+});
+
+test('annotateHandles email regex (#150): matches subdomain/multi-part-TLD emails; adversarial trailing-dot input is no false match', () => {
+  // The tightened label-based domain still recognizes a real subdomain + multi-part TLD email.
+  const eid = Number(insertEntityStmt.run('person', 'Sub Domain', null).lastInsertRowid);
+  insertAliasStmt.run(eid, 'a.b@mail.sub.example.co.uk', 'email');
+  const { id } = storeArtifactTxn(
+    { type: 'email', source: uniqueSource(), source_id: 'rx-1', text_repr: 'reach a.b@mail.sub.example.co.uk please' },
+    f32(0.4), [{ entity_id: eid, role: 'sender', confidence: 1.0 }],
+  );
+  assert.equal(getArtifactById(id).display_text, 'reach Sub Domain (a.b@mail.sub.example.co.uk) please');
+
+  // The old greedy domain (`[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) let `.` sit in both the class and the
+  // following literal, so `x@` + `a.`×N backtracked super-linearly; the label form is linear. A
+  // trailing-dot string has no valid TLD label → no match → returned verbatim (and promptly).
+  const evil = 'x@' + 'a.'.repeat(80);
+  assert.equal(annotateHandles(`${evil} tail`, []), `${evil} tail`, 'no false match; completes without catastrophic backtracking');
 });
 
 // --- Entity merge & duplicate detection (#75) ---
