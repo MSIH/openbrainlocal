@@ -128,10 +128,13 @@ function resolveMergeRef(toolResponse, toolInput) {
   const full = extractGithubUrlMatch(toolResponse, toolInput);
   if (full && full[3] === 'pull') return { url: full[0], repoSlug: `${full[1]}/${full[2]}`, number: full[4] };
 
-  const { owner, repo, pullNumber } = toolInput ?? {};
-  if (owner && repo && pullNumber != null) {
+  // GitHub-MCP tool inputs are inconsistent — some camelCase (pullNumber), some snake_case
+  // (issue_write uses issue_number) — so accept either spelling rather than silently skip.
+  const { owner, repo } = toolInput ?? {};
+  const pull = toolInput?.pullNumber ?? toolInput?.pull_number;
+  if (owner && repo && pull != null) {
     const repoSlug = `${owner}/${repo}`;
-    return { url: `https://github.com/${repoSlug}/pull/${pullNumber}`, repoSlug, number: String(pullNumber) };
+    return { url: `https://github.com/${repoSlug}/pull/${pull}`, repoSlug, number: String(pull) };
   }
 
   const haystack = `${stringifyResponse(toolResponse)}\n${toolInput?.command ?? ''}`;

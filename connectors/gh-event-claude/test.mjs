@@ -261,6 +261,27 @@ test('`gh pr create` whose title contains "gh pr merge" is an Opened event, not 
   assert.match(payload.text_repr, /^Opened GitHub pull request #168 /);
 });
 
+test('MCP merge with snake_case pull_number: accepted (not silently skipped)', async () => {
+  const { server, port, requests } = await startMockServer();
+
+  const result = await runHook(
+    {
+      tool_name: 'mcp__github__merge_pull_request',
+      tool_input: { owner: 'MSIH', repo: 'life-context', pull_number: 171 }, // snake_case variant
+      tool_response: { merged: true },
+      cwd: '/tmp/some-project',
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 1, 'a snake_case pull_number must still be captured');
+  assert.equal(requests[0].body.source_id, 'https://github.com/MSIH/life-context/pull/171#merged');
+  assert.equal(requests[0].body.extra.number, 171);
+});
+
 test('merge with no derivable PR ref (no number/repo anywhere) -> no ingest, exits 0', async () => {
   const { server, port, requests } = await startMockServer();
 
