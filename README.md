@@ -62,6 +62,13 @@ Re-running `import:contacts` on an **edited** vCard updates that contact in plac
 
 Phone numbers are matched by a canonical key (#129): US/Canada numbers written with a `+1` country code (`+1 (256) 468-0130`) resolve to the same contact as the bare 10-digit form (`(256) 468-0130`) — punctuation, spacing, and the `+1` all normalize away. Contacts imported before this change are re-aliased under the canonical key by `npm run backfill:phones` (additive and idempotent — back up `life-context.db` first).
 
+**Side contact directory (#154).** To keep the entity graph *curated* while still recognizing everyone, load your full contacts export as a lookup-only directory — it creates **no** entities:
+```bash
+npm run directory:load contacts.vcf        # handle -> name lookup; NO entities created
+npm run backfill:directory-proposals       # stage the historical unknown handles for review
+```
+A handle that misses the curated graph but matches the directory is then (a) **auto-labeled** in search/timeline (`Message from Jane Doe (number)` — display only, no entity), and (b) **staged in the proposed-entities review queue** with the name pre-filled. Approving a proposal promotes it into the curated graph and links its history; rejecting silences it. Promotion is always your call — the directory never auto-creates a contact. vCard (`.vcf`) only for now.
+
 **Ingest order.** There are two tiers, not a five-step chain: **Tier 1 — contacts** (they seed the entity graph); **Tier 2 — everything else** (photos, emails, documents, texts), in *any* order. Tier-2 sources link to *entities*, never to each other, so nothing among them depends on the rest. Contacts-first is a recommendation, not a hard constraint: an artifact ingested before its contact exists is still stored and fully searchable (by meaning, keyword, time, place) — only the person link is deferred, and it forms automatically when that contact is later imported (see [`docs/08-preparing-contacts.md`](docs/08-preparing-contacts.md#ingest-order--what-happens-on-a-no-match)).
 
 Real imports are messy. Curate contacts — fix emails/phones/addresses, set a photo, and wire up relationships (spouse/parent/child/`worksAt`) — in the browser at **`http://localhost:3000/ui/contacts.html`** (enter your `LIFECONTEXT_API_KEY` once). See [`docs/09-contacts-ui.md`](docs/09-contacts-ui.md).
