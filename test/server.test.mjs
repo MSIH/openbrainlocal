@@ -88,7 +88,7 @@ test('store -> recall round-trip returns the memory with a distance', async () =
 
 test('UI (#161): with UI_URL_TOKEN unset, the plain /ui mount still serves the page (no regression)', async () => {
   // The safe default: no token set → today's open /ui mount, so localhost dev is unchanged. The
-  // tokened path (bare /ui 404, /ui/<token>/ 200) is verified in ui-token.test.mjs against a server
+  // tokened path (bare /ui 404, /<token>/ui/ 200) is verified in ui-token.test.mjs against a server
   // booted with UI_URL_TOKEN set (config is read once at import, so it needs its own process).
   const res = await get('/ui/chat.html');
   assert.equal(res.status, 200);

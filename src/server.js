@@ -703,11 +703,13 @@ app.get('/api/v1/entities/:id/photo', requireAuth, wrap(async (req, res) => {
 // mount point below (#161).
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 if (UI_URL_TOKEN) {
-  // Capability-URL gate (#161): the UI is served ONLY at /ui/<token>/… (bookmarkable). The guard
-  // 404s a wrong/absent token, and the bare /ui (no token segment) never matches this mount, so it
-  // falls through to a plain 404 — the UI page becomes world-unloadable without the URL. Registered
-  // only when the token is set (mirrors the MCP_URL_TOKEN guard) so an exposed instance forces it.
-  app.use('/ui/:token', requireUiPathToken, express.static(publicDir));
+  // Capability-URL gate (#161, #165): the UI is served ONLY at /<token>/ui/… — token-FIRST, matching
+  // the MCP capability URL /<token>/mcp (#63), so both surfaces share one convention. Two-segment
+  // ('/:token/ui') NOT a bare '/:token' router: the latter would shadow /api/* (#63); this only
+  // matches paths whose 2nd segment is 'ui', so /api/recall never does. The guard 404s a wrong/absent
+  // token; the bare /ui (no token) never matches, so it falls through to 404 — world-unloadable
+  // without the URL. Registered only when the token is set (mirrors the MCP_URL_TOKEN guard).
+  app.use('/:token/ui', requireUiPathToken, express.static(publicDir));
 } else {
   // No token → today's plain, open mount (localhost dev convenience; no regression).
   app.use('/ui', express.static(publicDir));

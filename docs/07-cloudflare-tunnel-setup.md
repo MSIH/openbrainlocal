@@ -199,8 +199,9 @@ token above: gate the UI behind a **capability URL** so it's both protected and 
    ```
 
 2. Add it to `.env` as `UI_URL_TOKEN=<the value>` and restart. When set, the UI is served **only**
-   at `https://lc.yourdomain.com/ui/<token>/chat.html` (and `/ui/<token>/contacts.html`); the bare
-   `/ui/chat.html` — or a wrong token — 404s, exactly like the MCP path token. Leaving it unset keeps
+   at `https://lc.yourdomain.com/<token>/ui/chat.html` (and `/<token>/ui/contacts.html`) — token
+   **first**, matching the MCP capability URL `/<token>/mcp` (#63, #165); the bare `/ui/chat.html`
+   — or a wrong token — 404s, exactly like the MCP path token. Leaving it unset keeps
    today's plain `/ui` mount (fine for `http://localhost:3000`, where only you can reach it).
 3. **Bookmark that full URL.** The page reads the token from its own path and sends it as the API
    key, so the bookmark works end-to-end with **no manual key entry** — `UI_URL_TOKEN` is, by design,
