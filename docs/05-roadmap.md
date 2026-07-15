@@ -89,6 +89,8 @@ Makes the photo library time/place-queryable with zero inference; proves upsert-
 
 **Exit test:** "photos from Austin in 2019" works from EXIF alone before any caption exists; a captioned photo answers a content query ("photos of us cooking") without creating a duplicate artifact.
 
+**Consolidation (#171):** `photo-exif` is now the single photo/video connector. It absorbed the former standalone `gphotos-takeout` connector — Google Takeout support (video, content-hash dedup of Takeout's per-album duplication, sidecar `people[]` hints) plus automatic folder-name→person hints all live in `photo-exif` now, and `gphotos-takeout/` has been retired. Keying is content-hash based: a Google-origin file (Takeout sidecar present) keys under `source='google-photos'`/`source_id='gphotos:<sha256>'`, everything else under `source='photo-exif'`/`source_id='<sha256>'`.
+
 ---
 
 ## Milestone 5 — Contract v1 Freeze + Framework Extraction

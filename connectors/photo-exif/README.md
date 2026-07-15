@@ -1,6 +1,8 @@
 # photo-exif
 
-Two scripts that make a photo library time/place-queryable in [LifeContext](https://github.com/msih/life-context) with zero inference, then optionally enrich it with real content understanding. Implements [Milestone 4](https://github.com/msih/life-context/blob/2.0/docs/05-roadmap.md) of the roadmap — the **batch** reference connector, and the proof that upsert-as-enrichment works.
+The single photo/video connector for [LifeContext](https://github.com/msih/life-context). Three scripts make a media library time/place/person-queryable with zero inference, then optionally enrich it with real content understanding. Implements [Milestone 4](https://github.com/msih/life-context/blob/2.0/docs/05-roadmap.md) of the roadmap — the **batch** reference connector, and the proof that upsert-as-enrichment works.
+
+**Handles both a plain photo library and a Google Takeout export** (#171 folded the former `gphotos-takeout` connector in here). A Google-origin media file — one that has a Takeout `*.supplemental-metadata.json` sidecar next to it — keys under `source='google-photos'`, `source_id='gphotos:<sha256>'`; everything else keys under `source='photo-exif'`, `source_id='<sha256>'`. Person hints come from two sources: the sidecar's `people[]` (Google's face tags) and the immediate containing folder name (a person-named album/folder). Videos (`.mp4`/`.mov`/`.m4v`/`.3gp`) ingest as `type='video'`; images as `type='photo'`.
 
 ## Architecture decision: where the caption worker lives
 
@@ -8,21 +10,22 @@ The roadmap flags this as an open question ("worker lives with core or alongside
 
 - Consistency: `devsession-claude` and `imessage` are both pure isolated HTTP clients with zero direct database coupling; splitting `photo-exif`'s enrichment step into core would make it the only connector that isn't.
 - The worker never needs to query "which artifacts need captions" from the server — it re-walks the same `PHOTO_ROOT` it already knows and checks its own local state file (`PHOTO_EXIF_CAPTION_STATE_PATH`). No new server-side capability required.
-- It still upserts the *same artifact* (`source_id` = the relative file path, computed identically in both scripts via `lib/shared.js`), so the contract's upsert semantics do all the real work — the worker is just a slow, patient HTTP client like any other.
+- It still upserts the *same artifact* (the `(source, source_id)` key is the file's content hash, computed identically in all three scripts via `lib/shared.js`'s `keyForMedia`), so the contract's upsert semantics do all the real work — the worker is just a slow, patient HTTP client like any other.
 
 ## What it does
 
 ### `scan.js` (deliverables 1–2)
-1. Recursively walks `PHOTO_ROOT` for image files (`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.tif`, `.tiff`).
+1. Recursively walks `PHOTO_ROOT` for image files (`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.tif`, `.tiff`) **and** videos (`.mp4`, `.mov`, `.m4v`, `.3gp`, ingested as `type='video'`).
 2. Extracts `DateTimeOriginal` and GPS coordinates via `exifr`.
 3. Submits GPS as raw `latitude`/`longitude` — this connector does no geocoding of its own. [LifeContext core](https://github.com/msih/life-context) resolves `place_label` from those coordinates server-side, fully offline (`src/geocode.js`), so every connector with GPS gets place resolution without bundling its own city dataset.
-4. Computes a sha256 `content_hash` of the file bytes (streamed, not loaded fully into memory).
-5. Sends `type='photo'` artifacts via `POST /api/v1/ingest/batch`.
-6. Skips files unchanged since the last scan (mtime+size cache in `PHOTO_EXIF_MANIFEST_PATH`) — repeat scans over a large library only process what's new.
-7. **Google Takeout sidecar enrichment (#152).** If a per-photo `*.supplemental-metadata.json` sits next to the image, `scan.js` reads it (best-effort) and adds:
-   - **`people[]` → `entity_hints`** (`alias_type:'name'`, `role:'pictured'`, `confidence:0.9`). These are Google's user-verified face tags; core resolves each against the entity graph, linking the photo to the person (or staging an unresolved alias). This *complements* the `face-worker` — it doesn't replace it.
-   - **`photoTakenTime` / `geoData` as EXIF fallback** — used only when the image's own EXIF lacks a date/GPS (Takeout frequently strips EXIF on export). EXIF always wins when present. `geoData {0,0}` is Google's "no location" sentinel and is **not** submitted as a coordinate.
-   - Sidecar names are **not** written into `text_repr` (the caption/face workers rebuild `text_repr`, so people live in the durable `entity_hints`, not the prose). Resolver handles `<file>.supplemental-metadata.json`, the duplicate-media `<stem><ext>.supplemental-metadata(N).json`, and older `<file>.json` (cheap existence probes only — no per-image directory scan). Google's rare length-truncated sidecar names are not matched (best-effort; such a photo simply falls back to EXIF-only).
+4. Computes a sha256 `content_hash` of the file bytes (streamed, not loaded fully into memory) — this content hash **is** the `source_id` (see keying above), so a re-organized library, a re-export, or a copy in another folder all key to the same artifact.
+5. **Collapses byte-identical copies within a scan.** A Google Takeout export puts the same photo in its year bucket *and* every album it belongs to; scan.js merges copies that share a content hash into one payload before sending, unioning their `pictured` hints. (The server's upsert is additive too, so cross-batch copies still converge.)
+6. Sends `type='photo'`/`type='video'` artifacts via `POST /api/v1/ingest/batch`.
+7. Skips files unchanged since the last scan (mtime+size cache in `PHOTO_EXIF_MANIFEST_PATH`, keyed by relPath) — repeat scans over a large library only process what's new.
+8. **Person hints — two sources**, both `alias_type:'name'`, `role:'pictured'`, `confidence:0.9`; core resolves each against the entity graph (linking the photo, or staging an unresolved alias), never asserted as an entity here:
+   - **Google Takeout sidecar `people[]` (#152)** — Google's user-verified face tags. If a per-photo `*.supplemental-metadata.json` (or an older/variant name) sits next to the file, scan.js reads it best-effort. It also uses the sidecar's **`photoTakenTime` / `geoData` as an EXIF fallback** — only when the file's own EXIF lacks a date/GPS (Takeout frequently strips EXIF on export); EXIF always wins when present, and `geoData {0,0}` (Google's "no location" sentinel) is not submitted as a coordinate. The sidecar resolver handles `<file>.supplemental-metadata.json`, `.supplemental-meta.json`, older `<file>.json`, the duplicate-media `(N)` variants, and a length-truncated prefix fallback (a per-directory scan, amortized to one readdir per folder — plain non-Takeout folders pay a negligible once-per-folder cost).
+   - **Immediate containing folder name** — a JSON-less photo in `.../Aunt Mary/` maps to that person via a folder-name hint (a non-person folder simply won't resolve core-side, which is harmless). A file directly in `PHOTO_ROOT` (no subfolder) emits no folder hint, and a Takeout year bucket (`Photos from <year>`) is never treated as a person. The folder hint is deduped against sidecar names (case-insensitive).
+   - Names are **not** written into `text_repr` (the caption/face workers rebuild `text_repr`, so people live in the durable `entity_hints`, not the prose).
 
 ### `caption-worker.js` (deliverables 3–4)
 1. Walks the same `PHOTO_ROOT`, skipping anything already captioned (local state file).
@@ -91,18 +94,19 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 
 ## Exit test (roadmap M4)
 
-"Photos from Austin in 2019" works from EXIF alone before any caption exists; a captioned photo answers a content query ("photos of us cooking") without creating a duplicate artifact — guaranteed by the ingest contract's upsert-on-`(source, source_id)` semantics, since `scan.js` and `caption-worker.js` compute `source_id` identically (`lib/shared.js`'s `sourceIdFor`).
+"Photos from Austin in 2019" works from EXIF alone before any caption exists; a captioned photo answers a content query ("photos of us cooking") without creating a duplicate artifact — guaranteed by the ingest contract's upsert-on-`(source, source_id)` semantics, since all three scripts compute the `(source, source_id)` key identically (`lib/shared.js`'s `keyForMedia`, from the file's content hash).
 
 ## Known limitations
 
 - **Reverse geocoding happens in LifeContext core, not here** — this connector submits raw `latitude`/`longitude` only. `place_label` resolution (coarseness, the "near" prefix, the distance cutoff beyond which nothing is labeled) is core's behavior now (`src/geocode.js` in [`msih/life-context`](https://github.com/msih/life-context)), not this connector's.
 - **`occurred_at` is never guessed from file mtime.** A photo with no `DateTimeOriginal` gets no `occurred_at` (and the core server's own warning), never an approximation — an import-time mtime would make a 2019 photo sort as "today," which is worse than an honest gap (doc 04 §3).
-- **Source ID is the relative file path.** Reorganizing the photo library after the first scan orphans history for moved files (a fresh `source_id` looks like a new artifact) — the same tradeoff every connector's `source`/`source_id` stability rule implies (doc 04 §3).
+- **Source ID is the content hash.** The `source_id` is the file's sha256 (see keying above), so moving/renaming/re-exporting a photo, or the same photo appearing in several Takeout folders, all key to the *same* artifact. The tradeoff is the inverse of a path key: an **edited** copy (different bytes) is a distinct artifact even though it's "the same" photo — intended.
+- **Year-bucket / folder-hint detection is English-only** (`Photos from <year>`). A non-English Takeout names year folders differently; such a folder would be read as an album and its name emitted as a (usually non-resolving, harmless) person hint.
 - **The caption worker has no real vision model to test against in this repo's CI/dev environment** — `test.mjs` verifies the full flow (state tracking, upsert-only-what-changed, VLM-down handling) against a mock Ollama server, but the actual caption quality/latency of a real `llava` (or similar) model is unverified here.
 
 ## Testing without a real photo library or VLM
 
-`test.mjs` (`npm test`) synthesizes JPEGs with injected EXIF via `piexifjs` (analogous to how the `imessage` connector's tests use `bplist-creator`) and runs both scripts against mock ingest/VLM HTTP servers. Covers: EXIF+GPS, GPS-only, and no-metadata photos; unchanged-file skipping on re-scan; caption enrichment preserving EXIF-sourced fields via upsert semantics; kill-safe per-photo state; and VLM-unreachable handling.
+`test.mjs` (`npm test`) synthesizes JPEGs with injected EXIF via `piexifjs` (analogous to how the `imessage` connector's tests use `bplist-creator`) and runs the scripts against mock ingest/VLM HTTP servers. Covers: EXIF+GPS, GPS-only, and no-metadata photos; content-hash keying (generic `photo-exif`/`<hash>` vs. Google-origin `google-photos`/`gphotos:<hash>`); Takeout sidecar people/date/geo parsing; byte-identical copies collapsing to one payload with unioned hints; folder-name person hints (subfolder yes, root none, year bucket none); video (`type='video'`) typing; unchanged-file skipping on re-scan; caption enrichment preserving EXIF-sourced fields via upsert semantics; kill-safe per-photo state; and VLM-unreachable handling.
 
 ## Known limitations (face worker)
 
@@ -114,11 +118,11 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 
 ## Files
 
-- `scan.js` — the EXIF batch scanner
-- `caption-worker.js` — the VLM enrichment worker
-- `face-worker.js` — the local face-detection/clustering worker (`scan` / `label` / `export-thumbnails` / `suggest-labels`)
-- `lib/shared.js` — env loading, directory walk, shared `source_id` computation, ingest client, contact-photos fetch (`suggest-labels`)
-- `lib/describe.js` — shared EXIF description logic (used by every script, so they can never drift)
+- `scan.js` — the media batch scanner (EXIF + Takeout sidecars + folder-name hints; walks images **and** videos)
+- `caption-worker.js` — the VLM enrichment worker (images only)
+- `face-worker.js` — the local face-detection/clustering worker, images only (`scan` / `label` / `export-thumbnails` / `suggest-labels`)
+- `lib/shared.js` — env loading, media walk (`walkImageFiles`/`walkMediaFiles`), the content-hash keying resolver (`keyForMedia`), `mediaType`, ingest client, contact-photos fetch (`suggest-labels`)
+- `lib/describe.js` — shared EXIF + Takeout-sidecar description logic (`describePhoto`/`readSidecar`/`sidecarPathFor`), used by every script so they can never drift
 - `lib/caption-cache.js` — caption state (relPath→text map) + `currentTextRepr`, shared by caption + face workers
 - `lib/face-cluster.js` — pure, IO-free descriptor clustering (euclidean, nearest-centroid, (de)serialization)
 - `lib/face-detect.js` — lazy ML-model detector + the test fixture detector

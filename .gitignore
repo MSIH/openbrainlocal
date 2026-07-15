@@ -14,8 +14,6 @@ _*.log
 
 # per-connector runtime spool/state files (connectors/**)
 *-spool.jsonl
-# gphotos-takeout person-album map (may contain family members' names) — only the example is committed
-connectors/gphotos-takeout/config.json
 .worktrees/
 .claude/worktrees/
 .claude/settings.local.json

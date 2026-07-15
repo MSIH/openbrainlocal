@@ -6,27 +6,68 @@
 // core reverse-geocodes latitude/longitude into place_label server-side (issue #67), so this
 // connector doesn't need its own bundled place dataset (and neither does any other connector
 // that has GPS but no code of its own for describing where it is).
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import exifr from 'exifr';
 
-// Resolve the Google Takeout sidecar path for a media file by trying its known names (cheap
-// existsSync probes only — never a directory scan, so scanning a plain non-Takeout PHOTO_ROOT
-// stays O(1) per image). Naming observed across a real export:
-//   "<file>.supplemental-metadata.json"          (the common case)
-//   "<stem><ext>.supplemental-metadata(N).json"  (for a duplicate media "<stem>(N)<ext>")
+// Per-directory cache of sidecar-candidate JSON filenames, populated lazily the first time a file
+// in that directory needs the truncation-prefix fallback below. Keeps that fallback amortized to
+// one readdir per directory (not per image) — a plain non-Takeout library pays only a negligible,
+// once-per-folder cost. Process-lifetime cache: a connector run is short-lived.
+const dirJsonCache = new Map();
+function jsonNamesIn(dir) {
+  let names = dirJsonCache.get(dir);
+  if (names) return names;
+  try {
+    names = readdirSync(dir).filter((n) => {
+      const low = n.toLowerCase();
+      return low.endsWith('.json') && low !== 'metadata.json'; // metadata.json is the album's own, never a media sidecar
+    });
+  } catch {
+    names = []; // unreadable dir → no truncation fallback here, not fatal
+  }
+  dirJsonCache.set(dir, names);
+  return names;
+}
+
+// Resolve the Google Takeout sidecar path for a media file. Tries the known exact names first via
+// cheap existsSync probes (the O(1) common path); only when all of those miss does it fall back to
+// a per-directory scan for a length-truncated sidecar (Google caps filename length, so a long
+// media name can get a sidecar whose stem is a truncated prefix). Naming variants observed across
+// real exports:
+//   "<file>.supplemental-metadata.json"          (2023+ common case)
+//   "<file>.supplemental-meta.json"              (a truncated form of the above)
 //   "<file>.json"                                (older exports)
-// Google's length-truncated names (rare; absent from the sample export) are not matched — that's a
-// documented best-effort limitation, not worth an O(dir) scan per image. Returns abs path or null.
-function sidecarPathFor(absPath) {
+//   "<stem><ext>.supplemental-metadata(N).json" / ".supplemental-meta(N).json" / "(N).json"
+//                                                (for a duplicate media "<stem>(N)<ext>")
+//   a name Google truncated to fit its filename cap (prefix fallback below)
+// Returns abs path or null.
+export function sidecarPathFor(absPath) {
   const dir = path.dirname(absPath);
   const base = path.basename(absPath);
-  const candidates = [`${base}.supplemental-metadata.json`, `${base}.json`];
+  const candidates = [
+    `${base}.supplemental-metadata.json`,
+    `${base}.supplemental-meta.json`,
+    `${base}.json`,
+  ];
   const dup = base.match(/^(.*)\((\d+)\)(\.[^.]+)$/); // IMG_0503(1).HEIC -> IMG_0503.HEIC.supplemental-metadata(1).json
-  if (dup) candidates.push(`${dup[1]}${dup[3]}.supplemental-metadata(${dup[2]}).json`);
+  if (dup) {
+    const [, stem, n, ext] = dup;
+    candidates.push(
+      `${stem}${ext}.supplemental-metadata(${n}).json`,
+      `${stem}${ext}.supplemental-meta(${n}).json`,
+      `${stem}${ext}(${n}).json`,
+    );
+  }
   for (const c of candidates) {
     const p = path.join(dir, c);
     if (existsSync(p)) return p;
+  }
+  // Truncation fallback: a sidecar whose stripped stem is a prefix of the media filename. The
+  // length floor avoids matching an unrelated short-named sidecar in the same folder.
+  for (const j of jsonNamesIn(dir)) {
+    const stripped = j.replace(/\.supplemental-meta(data)?\.json$/i, '').replace(/\.json$/i, '');
+    if (stripped.length >= 6 && base.startsWith(stripped)) return path.join(dir, j);
   }
   return null;
 }
@@ -71,7 +112,10 @@ export async function describePhoto(absPath) {
   };
 }
 
-export function buildTextRepr(dateStr, filename) {
-  if (dateStr) return `Photo taken ${dateStr}`;
-  return `Photo: ${filename}`;
+// `kind` is the artifact type ('photo' | 'video') so a video's embedded text isn't mislabeled
+// "Photo …". Defaults to 'photo' (the caption worker only ever handles images).
+export function buildTextRepr(dateStr, filename, kind = 'photo') {
+  const noun = kind === 'video' ? 'Video' : 'Photo';
+  if (dateStr) return `${noun} taken ${dateStr}`;
+  return `${noun}: ${filename}`;
 }

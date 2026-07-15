@@ -19,8 +19,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statS
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDotEnvIfPresent, walkImageFiles, sourceIdFor, ingestClient, fetchContactPhotos } from './lib/shared.js';
-import { describePhoto } from './lib/describe.js';
+import { loadDotEnvIfPresent, walkImageFiles, keyForMedia, contentHashOfFile, ingestClient, fetchContactPhotos } from './lib/shared.js';
+import { describePhoto, sidecarPathFor } from './lib/describe.js';
 import { readCaptionCache, currentTextRepr } from './lib/caption-cache.js';
 import { assignCluster, euclideanDistance, parseClustersFile, serializeClustersFile } from './lib/face-cluster.js';
 import { resolveDetector } from './lib/face-detect.js';
@@ -101,9 +101,11 @@ function buildPayload(relPath, entry, clustersById, captionCache) {
   const pictured = picturedNames(entry.clusters, clustersById);
   const caption = captionCache[relPath] ?? null;
   const baseText = currentTextRepr(entry.dateStr, path.basename(relPath), caption);
+  // entry.{source,source_id} is the content-hash key scan() computed and persisted (keyForMedia),
+  // so a labeled photo enriches the SAME artifact scan.js/caption-worker created.
   const payload = {
-    source: 'photo-exif',
-    source_id: sourceIdFor(relPath),
+    source: entry.source,
+    source_id: entry.source_id,
     type: 'photo',
     text_repr: pictured.length ? `${baseText} Pictured: ${pictured.join(', ')}.` : baseText,
     extra: { faces_detected: entry.faces, pictured, captioned: caption != null },
@@ -193,6 +195,22 @@ async function scan() {
       saveClusters(clustersState);
       writeJson(FACE_STATE_PATH, faceState);
       detected++;
+    }
+
+    // The content-hash key (keyForMedia) — computed once and persisted on the entry so it's stable
+    // across runs and reused by label(). Also backfills an entry from before this key was stored.
+    if (!entry.source_id) {
+      let contentHash;
+      try {
+        contentHash = await contentHashOfFile(absPath);
+      } catch (err) {
+        console.error(`photo-exif: skipping unreadable file ${relPath}`, err);
+        continue;
+      }
+      const { source, source_id } = keyForMedia(contentHash, sidecarPathFor(absPath) != null);
+      entry.source = source;
+      entry.source_id = source_id;
+      writeJson(FACE_STATE_PATH, faceState);
     }
 
     try {
