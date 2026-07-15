@@ -24,8 +24,12 @@ export function loadDirectory(text) {
   let contacts = 0, loaded = 0, collisions = 0;
   const run = db.transaction(() => {
     for (const c of cards) {
-      const name = preferredDisplayName(c).trim(); // #158: first+last (drops a middle name), same rule as the curated display (#156)
-      if (!name) continue; // a nameless card can't label anything
+      // #158: first+last (drops a middle name), same rule as the curated display (#156); fall back
+      // to the email as the label when a card has no FN but is addressable (parseVCards keeps those),
+      // mirroring the import path's `preferredDisplayName(c) || c.emails[0]` — else we'd silently drop
+      // directory coverage for nameless-but-addressable contacts (Copilot, PR #160).
+      const name = (preferredDisplayName(c) || c.emails[0] || '').trim();
+      if (!name) continue; // truly unlabelable (no name, no email) — nothing to show
       contacts++;
       for (const p of c.phones ?? []) { const r = insertDirectoryEntry(name, p, 'phone'); if (r.inserted) loaded++; if (r.collision) collisions++; }
       for (const e of c.emails ?? []) { const r = insertDirectoryEntry(name, e, 'email'); if (r.inserted) loaded++; if (r.collision) collisions++; }

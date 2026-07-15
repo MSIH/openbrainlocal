@@ -313,6 +313,12 @@ test('loadDirectory (#154): vCard load populates the directory and creates NO en
   // A 4-token name is stored full (same cutoff as the display rule).
   loadDirectory(['BEGIN:VCARD', 'VERSION:3.0', 'FN:Maria de la Cruz', 'TEL:+15557778888', 'END:VCARD'].join('\n'));
   assert.equal(lookupDirectoryName('5557778888', 'phone'), 'Maria de la Cruz');
+
+  // A nameless-but-addressable card (no FN, has email) is still covered — labeled by its email
+  // (Copilot, PR #160), not silently dropped.
+  loadDirectory(['BEGIN:VCARD', 'VERSION:3.0', 'EMAIL:noname@example.com', 'TEL:+15550001111', 'END:VCARD'].join('\n'));
+  assert.equal(lookupDirectoryName('noname@example.com', 'email'), 'noname@example.com');
+  assert.equal(lookupDirectoryName('5550001111', 'phone'), 'noname@example.com');
 });
 
 // --- Display name = first + last (#156) ---
