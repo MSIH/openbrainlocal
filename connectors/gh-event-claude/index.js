@@ -115,7 +115,9 @@ function isNonCreateIssueWrite(toolName, toolInput) {
 function isMergeEvent(toolName, toolInput) {
   if (toolName === 'mcp__github__merge_pull_request') return true;
   const command = typeof toolInput?.command === 'string' ? toolInput.command : '';
-  return /\bgh\s+pr\s+merge\b/.test(command);
+  // Anchor to a command boundary (start, or after a shell separator) so the phrase inside a quoted
+  // `gh pr create --title "…gh pr merge…"` can't misclassify a create as a merge.
+  return /(?:^|[;&|]\s*)gh\s+pr\s+merge\b/.test(command);
 }
 
 // Resolve { url, repoSlug, number } for a merged PR. Unlike a create, `gh pr merge` emits no full

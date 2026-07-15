@@ -237,6 +237,30 @@ test('MCP merge_pull_request: builds the URL from {owner, repo, pullNumber}, Mer
   assert.match(payload.text_repr, /^Merged GitHub pull request #170 in MSIH\/life-context\. /);
 });
 
+test('`gh pr create` whose title contains "gh pr merge" is an Opened event, not a merge', async () => {
+  const { server, port, requests } = await startMockServer();
+
+  const result = await runHook(
+    {
+      tool_name: 'Bash',
+      // the phrase appears inside the quoted title — it must NOT be treated as a merge command.
+      tool_input: { command: 'gh pr create --repo MSIH/life-context --title "document gh pr merge capture"' },
+      tool_response: { stdout: 'https://github.com/MSIH/life-context/pull/168\n', stderr: '' },
+      cwd: '/tmp/some-project',
+    },
+    { LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key' },
+  );
+
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 1);
+  const payload = requests[0].body;
+  assert.equal(payload.extra.action, 'opened', 'a create with the phrase in its title stays an open');
+  assert.equal(payload.source_id, 'https://github.com/MSIH/life-context/pull/168', 'keyed on the bare URL, not #merged');
+  assert.match(payload.text_repr, /^Opened GitHub pull request #168 /);
+});
+
 test('merge with no derivable PR ref (no number/repo anywhere) -> no ingest, exits 0', async () => {
   const { server, port, requests } = await startMockServer();
 
