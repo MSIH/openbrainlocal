@@ -19,14 +19,14 @@
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" = \"true\" ] && node \"$CLAUDE_PROJECT_DIR/connectors/devsession-claude/index.js\" || true", "shell": "bash", "timeout": 120 }
+          { "type": "command", "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" = \"true\" ] && node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/devsession-claude/index.js\" || true", "shell": "bash", "timeout": 120 }
         ]
       }
     ],
     "PreCompact": [
       {
         "hooks": [
-          { "type": "command", "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" = \"true\" ] && node \"$CLAUDE_PROJECT_DIR/connectors/devsession-claude/index.js\" || true", "shell": "bash", "timeout": 120 }
+          { "type": "command", "command": "[ \"${CLAUDE_CODE_REMOTE:-}\" = \"true\" ] && node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/devsession-claude/index.js\" || true", "shell": "bash", "timeout": 120 }
         ]
       }
     ],
@@ -34,31 +34,43 @@
       {
         "matcher": "Bash(gh issue create*)",
         "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
         ]
       },
       {
         "matcher": "mcp__github__create_issue",
         "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
         ]
       },
       {
         "matcher": "mcp__github__issue_write",
         "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
         ]
       },
       {
         "matcher": "Bash(gh pr create*)",
         "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR event..." }
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR event..." }
         ]
       },
       {
         "matcher": "mcp__github__create_pull_request",
         "hooks": [
-          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR event..." }
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR event..." }
+        ]
+      },
+      {
+        "matcher": "Bash(gh pr merge*)",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR merge event..." }
+        ]
+      },
+      {
+        "matcher": "mcp__github__merge_pull_request",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR merge event..." }
         ]
       }
     ],
