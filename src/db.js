@@ -1379,6 +1379,26 @@ export const updateEntityAttrs = db.transaction((id, { canonical_name = null, at
   return { updated: true };
 });
 
+// Reduce a person entity's display name to first+last when it's a clean 3-token first-middle-last
+// (#156), keeping the full name (and the reduced form) as resolvable name aliases. The import path
+// now defaults new contacts to first+last; this fixes the ones imported before that. Idempotent:
+// a 2-token canonical is left alone, so a re-run reduces 0. Only touches person entities that
+// aren't merged away; a UI-shortened name is already 2-token and skipped.
+const setCanonicalNameStmt = db.prepare('UPDATE entities SET canonical_name = ? WHERE id = ?');
+export const reduceEntityDisplayName = db.transaction((id) => {
+  const e = getEntityStmt.get(id);
+  if (!e || e.kind !== 'person' || e.merged_into != null || !e.canonical_name) return { changed: false };
+  const toks = e.canonical_name.trim().split(/\s+/);
+  if (toks.length !== 3) return { changed: false }; // only first-middle-last reduces (2/4+ untouched)
+  const reduced = `${toks[0]} ${toks[2]}`;
+  if (reduced === e.canonical_name) return { changed: false };
+  insertAliasUnlessTombstoned(id, normalizeName(e.canonical_name), 'name'); // keep the full name resolvable
+  insertAliasUnlessTombstoned(id, normalizeName(reduced), 'name');           // and the reduced form
+  setCanonicalNameStmt.run(reduced, id);
+  logEvent('display_name_reduced', 'backfill-display-names', { entity_id: id, from: e.canonical_name, to: reduced });
+  return { changed: true, from: e.canonical_name, to: reduced };
+});
+
 export const addAlias = db.transaction((id, alias, alias_type) => {
   if (!getLiveEntityStmt.get(id)) notFound(id);
   const a = normalizeAlias(alias, alias_type);

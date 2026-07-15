@@ -259,7 +259,9 @@ test('importContacts: X-SPOUSE relation forms across a middle-name variant, rega
   await importContacts(vcard('FN:Zoe Beatrix Quill\nN:Quill;Zoe;Beatrix;;\nEMAIL:zoe.quill@example.com'));
 
   const from = db.prepare("SELECT entity_id FROM entity_links WHERE role='self' AND artifact_id=(SELECT id FROM artifacts WHERE text_repr LIKE 'Quinn Referrer%')").get();
-  const to = db.prepare("SELECT id FROM entities WHERE canonical_name='Zoe Beatrix Quill'").get();
+  // #156: the middle-name card's canonical is stored first+last ("Zoe Quill"); "zoe beatrix quill"
+  // remains a name alias, so look up via the alias rather than the (now-reduced) canonical_name.
+  const to = db.prepare("SELECT DISTINCT entity_id AS id FROM entity_aliases WHERE alias='zoe beatrix quill' AND alias_type='name'").get();
   const edge = db.prepare('SELECT relation_type FROM entity_relations WHERE from_entity_id=? AND to_entity_id=?').get(from.entity_id, to.id);
   assert.equal(edge?.relation_type, 'spouse', 'spouse edge formed from referrer to the middle-name entity');
 });
@@ -336,7 +338,9 @@ test('resolveStagedArtifactHints: same-role email+name hints keep deterministic 
   ]);
   await importContacts(vcard('FN:Same Role Sender\nEMAIL:same.role@example.com'));
 
-  const entity = db.prepare("SELECT id FROM entities WHERE canonical_name='Same Role Sender'").get();
+  // #156: "Same Role Sender" is a 3-token name, so its canonical is stored reduced ("Same Sender");
+  // look the entity up by its email alias, which is stable regardless of the display-name rule.
+  const entity = db.prepare("SELECT DISTINCT entity_id AS id FROM entity_aliases WHERE alias='same.role@example.com' AND alias_type='email'").get();
   const links = db.prepare('SELECT confidence FROM entity_links WHERE artifact_id=? AND entity_id=? AND role=?').all(artifactId, entity.id, 'sender');
   assert.equal(links.length, 1, 'the two same-role hints collapse to one link');
   assert.equal(links[0].confidence, 1.0, 'the deterministic email link wins the collision, not the capped name');
