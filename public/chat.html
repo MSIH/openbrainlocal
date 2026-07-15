@@ -11,16 +11,9 @@
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <!-- API key bar: shown until a key is stored, or after a 401. The whole /api surface is
-       x-api-key gated; the key lives only in this browser's localStorage. -->
-  <div id="keyBar" class="keybar" hidden>
-    <label>API key
-      <input id="keyInput" type="password" autocomplete="off" placeholder="LIFECONTEXT_API_KEY" />
-    </label>
-    <button id="keySave" type="button">Save key</button>
-    <span id="keyMsg" class="keymsg"></span>
-  </div>
-
+  <!-- Token-only UI (#169): the page is reachable only at /<token>/ui/… (UI_URL_TOKEN set); its
+       browser credential is the path token itself, sent as x-api-key. No manual key entry, so no
+       key bar. -->
   <header class="topbar">
     <h1>Ask</h1>
     <nav class="navlinks" aria-label="Primary">
@@ -31,7 +24,6 @@
       <button data-mode="search" class="active" type="button" aria-pressed="true">Search</button>
       <button data-mode="recall" type="button" aria-pressed="false">Recall</button>
     </div>
-    <button id="keyEdit" type="button" class="ghost" aria-label="Change API key" title="Change API key">🔑</button>
   </header>
 
   <!-- Read-only memory query: a transcript of queries + result cards. No memory mutation here. -->
