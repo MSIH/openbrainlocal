@@ -434,16 +434,18 @@ const directoryInsertStmt = db.prepare('INSERT OR IGNORE INTO contact_directory 
 const dirKey = (handle, handleType) => (handleType === 'phone' ? normalizePhone(handle) : normalizeName(handle));
 export function insertDirectoryEntry(name, handle, handleType) {
   const cleanName = typeof name === 'string' ? name.trim() : '';
-  const key = handle ? dirKey(handle, handleType) : '';
-  if (!cleanName || !key) return { inserted: false, collision: false };
+  // Guard the type up front (matches the table CHECK) so a bad value returns a no-op result rather
+  // than throwing a SqliteError mid-load; empty name/handle can't label anything.
+  const key = cleanName && handle && (handleType === 'phone' || handleType === 'email') ? dirKey(handle, handleType) : '';
+  if (!key) return { inserted: false, collision: false };
+  // INSERT OR IGNORE first, then trust .changes — a SELECT-then-INSERT could wrongly report an
+  // insert when a concurrent writer took the (handle,type) between the two (Copilot, PR #155).
+  if (directoryInsertStmt.run(cleanName, key, handleType).changes > 0) return { inserted: true, collision: false };
+  // Ignored: the (handle,type) already exists — SELECT only now, to detect/log a name collision.
   const existing = directorySelectStmt.get(key, handleType);
-  if (existing) {
-    const collision = existing.name !== cleanName;
-    if (collision) console.error(`contact_directory: ${handleType} ${key} already maps to "${existing.name}", ignoring "${cleanName}"`);
-    return { inserted: false, collision };
-  }
-  directoryInsertStmt.run(cleanName, key, handleType);
-  return { inserted: true, collision: false };
+  const collision = !!existing && existing.name !== cleanName;
+  if (collision) console.error(`contact_directory: ${handleType} ${key} already maps to "${existing.name}", ignoring "${cleanName}"`);
+  return { inserted: false, collision };
 }
 export const lookupDirectoryName = (handle, handleType) => {
   const key = handle ? dirKey(handle, handleType) : '';
@@ -1457,9 +1459,14 @@ export function annotateHandles(text, links) {
   if (!text) return text;
   const nameById = new Map((links ?? []).map((l) => [l.entity_id, l.canonical_name]));
   return text.replace(HANDLE_TOKEN_RE, (tok) => {
-    const matched = resolveHandleToken(tok).filter((id) => nameById.has(id));
-    if (matched.length === 1) return `${nameById.get(matched[0])} (${tok})`; // curated link wins
-    if (matched.length > 1) return tok;                                      // ambiguous curated → leave raw
+    // Only run curated resolution when this artifact HAS links — otherwise the query can't match
+    // anything and is wasted work on the hot hydration path (Copilot, PR #155); go straight to the
+    // directory. When links exist: exactly-one wins; ambiguous (>1) stays raw; zero falls through.
+    if (nameById.size) {
+      const matched = resolveHandleToken(tok).filter((id) => nameById.has(id));
+      if (matched.length === 1) return `${nameById.get(matched[0])} (${tok})`;
+      if (matched.length > 1) return tok;
+    }
     const dirName = lookupDirectoryName(tok, tok.includes('@') ? 'email' : 'phone'); // #154 directory fallback
     return dirName ? `${dirName} (${tok})` : tok;
   });
