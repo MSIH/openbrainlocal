@@ -17,6 +17,8 @@ import { pathToFileURL } from 'node:url';
 import { db, insertDirectoryEntry, logEvent } from '../src/db.js';
 import { parseVCards } from '../src/contacts.js';
 
+const directoryCountStmt = db.prepare('SELECT COUNT(*) AS n FROM contact_directory');
+
 export function loadDirectory(text) {
   const cards = parseVCards(text);
   let contacts = 0, loaded = 0, collisions = 0;
@@ -30,7 +32,9 @@ export function loadDirectory(text) {
     }
   });
   run();
-  const summary = { contacts, loaded, collisions };
+  // total = distinct handles now in the directory (each row is one (handle, handle_type)); lets a
+  // re-run confirm idempotency (loaded 0, total unchanged) and shows the directory size (#155).
+  const summary = { contacts, loaded, collisions, total: directoryCountStmt.get().n };
   logEvent('directory_load', 'load-directory.js', summary);
   return summary;
 }
@@ -40,6 +44,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const file = process.argv[2];
   if (!file) { console.error('Usage: npm run directory:load <file.vcf>'); process.exit(1); }
   const s = loadDirectory(readFileSync(file, 'utf8'));
-  console.log(`directory:load — ${s.contacts} contacts, ${s.loaded} handle(s) loaded, ${s.collisions} collision(s).`);
+  console.log(`directory:load — ${s.contacts} contacts, ${s.loaded} handle(s) loaded, ${s.collisions} collision(s); ${s.total} handle(s) in directory total.`);
   db.close();
 }

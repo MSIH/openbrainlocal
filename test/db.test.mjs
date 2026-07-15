@@ -300,6 +300,7 @@ test('loadDirectory (#154): vCard load populates the directory and creates NO en
   const s = loadDirectory(vcf);
   assert.equal(s.contacts, 1);
   assert.equal(s.loaded, 2, 'one phone + one email loaded');
+  assert.ok(s.total >= 2, 'summary reports the directory total (distinct handles)');
   assert.equal(lookupDirectoryName('5554242000', 'phone'), 'Directory Only Contact');
   assert.equal(lookupDirectoryName('dir.only@example.com', 'email'), 'Directory Only Contact');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM entities WHERE kind='person'").get().n, beforePersons, 'no entity created');

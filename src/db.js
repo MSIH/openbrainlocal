@@ -1431,24 +1431,23 @@ export function getContactPhotoRawPath(id) {
   return row?.raw_path ? path.resolve(row.raw_path) : null;
 }
 
-// Handle-annotation for display (#147). A connector bakes raw contact handles into text_repr
+// Handle-annotation for display (#147, #154). A connector bakes raw contact handles into text_repr
 // ("Message from +12406725399: …"); recall reads far better with the resolved name folded in.
-// Non-mutating: derives a display string from text_repr + the artifact's OWN entity links — the
-// stored text_repr (embedded, append-only) is never touched. A handle token is rewritten to
-// "Canonical Name (handle)" ONLY when it resolves — via the same normalizePhone/name path as
-// lookups, so a number stored without the +1 country code still matches (#129) — to exactly one
-// entity this artifact is linked to. An unlinked or ambiguous token (a number quoted inside a
-// message body, or "group chat") is left verbatim, never mis-attributed. The displayed number is
-// the raw handle as stored (lossless); only the match key is normalized.
+// Non-mutating: derives a display string; the stored text_repr (embedded, append-only) is never
+// touched, the displayed handle stays raw (only the match key is normalized, #129).
 //
-// Resolution is scoped to the token's OWN alias_type (email tokens against email aliases, phone
-// tokens against phone aliases) rather than routed through resolveEntityIds — which also tries the
-// phone path on any 7+-digit string. An email like "h1471234567@example.com" would otherwise
-// digit-strip to "1471234567" and match a linked entity's *phone* alias, mis-annotating the email
-// with the wrong contact (Copilot, PR #148).
-//
-// #154 auto-label: a curated entity link always wins; a token with no (or ambiguous) curated link
-// falls back to the side contact_directory (display-only — creates no entity, needs no approval).
+// Precedence per handle token:
+//   1. A curated entity LINKED to this artifact — exactly one match → its canonical name wins;
+//      an ambiguous match (>1 linked entity) is left raw, never mis-attributed.
+//   2. Otherwise the side contact_directory (#154) — display-only auto-label; creates no entity,
+//      needs no approval. So a handle with no curated link (a number quoted in a message body, an
+//      unlinked sender) is now labeled IF the directory knows it; still-unknown tokens stay verbatim.
+// Curated resolution is skipped entirely when the artifact has no links (the query couldn't match)
+// and a per-call cache resolves a repeated handle once — both avoid wasted queries on the hot
+// hydration path (Copilot, PR #155). Curated resolution is scoped to the token's OWN alias_type
+// (email→email, phone→phone) rather than routed through resolveEntityIds, which also tries the phone
+// path on any 7+-digit string — an email like "h1471234567@example.com" would otherwise digit-strip
+// to a phone alias and mis-attribute (Copilot, PR #148).
 const HANDLE_TOKEN_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\+?\d[\d().-]{5,}\d/g;
 const resolveHandleToken = (tok) => {
   if (tok.includes('@')) return resolveAliasByTypeStmt.all(normalizeName(tok), 'email').map((r) => r.entity_id);
@@ -1458,17 +1457,19 @@ const resolveHandleToken = (tok) => {
 export function annotateHandles(text, links) {
   if (!text) return text;
   const nameById = new Map((links ?? []).map((l) => [l.entity_id, l.canonical_name]));
+  const cache = new Map(); // per-call memo: a handle repeated in one text resolves once (Copilot, PR #155 / #150)
   return text.replace(HANDLE_TOKEN_RE, (tok) => {
-    // Only run curated resolution when this artifact HAS links — otherwise the query can't match
-    // anything and is wasted work on the hot hydration path (Copilot, PR #155); go straight to the
-    // directory. When links exist: exactly-one wins; ambiguous (>1) stays raw; zero falls through.
-    if (nameById.size) {
+    if (cache.has(tok)) return cache.get(tok);
+    let name = null, ambiguous = false;
+    if (nameById.size) { // curated resolution only when the artifact has links
       const matched = resolveHandleToken(tok).filter((id) => nameById.has(id));
-      if (matched.length === 1) return `${nameById.get(matched[0])} (${tok})`;
-      if (matched.length > 1) return tok;
+      if (matched.length === 1) name = nameById.get(matched[0]);
+      else if (matched.length > 1) ambiguous = true;
     }
-    const dirName = lookupDirectoryName(tok, tok.includes('@') ? 'email' : 'phone'); // #154 directory fallback
-    return dirName ? `${dirName} (${tok})` : tok;
+    if (!name && !ambiguous) name = lookupDirectoryName(tok, tok.includes('@') ? 'email' : 'phone'); // #154 directory fallback
+    const out = name ? `${name} (${tok})` : tok;
+    cache.set(tok, out);
+    return out;
   });
 }
 
