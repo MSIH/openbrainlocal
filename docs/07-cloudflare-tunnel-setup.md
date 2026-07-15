@@ -266,6 +266,43 @@ personal use put **Cloudflare Access** in front of `/ui` (next section) as the r
 
 ---
 
+## Access logging — what gets recorded
+
+Once you expose the server, you want to know whether anyone is probing it. LifeContext writes a
+per-request **access log** for every surface — `/api`, `/mcp`, and `/ui` — on by default (#178).
+
+- **Where.** One line per request, appended to a daily file `logs/access/access-YYYY-MM-DD.log`
+  (UTC date). The folder is gitignored and, on Windows, NTFS-compressed at boot so the highly
+  compressible text costs a fraction of the disk.
+- **What's in a line.** UTC timestamp, surface tag (`api`/`mcp`/`ui`), method, path, status, latency,
+  the **real client IP** (via `trust proxy`, not the tunnel's `127.0.0.1`), and the auth outcome:
+
+  ```
+  2026-07-15T13:40:12Z api POST /api/search 200 842ms ip=203.0.113.7 auth=ok
+  2026-07-15T13:41:05Z api POST /api/recall 401 3ms ip=198.51.100.4 auth=fail
+  2026-07-15T13:41:06Z mcp GET  /<token>/mcp 404 1ms ip=198.51.100.4 auth=fail
+  ```
+
+- **Secrets are redacted, bodies are never logged.** The `?api_key=` query value is replaced with
+  `<redacted>`, and a capability path token (`/<token>/mcp`, `/<token>/ui/…` — the very tokens that
+  otherwise leak into the URL, as warned above) is replaced with the literal `<token>`. The log holds
+  **metadata only** — never a request body, so your stored memory content never lands in a log file.
+- **Probes are visible.** A `401` (bad/missing key), a wrong-capability-token `404`, and a rate-limit
+  `429` are marked `auth=fail`/`ratelimited` and also echoed to the server's stderr — so a
+  brute-force attempt against your key or a token shows up plainly, not silently.
+- **Retention.** On boot the server deletes dated files older than `ACCESS_LOG_RETENTION_DAYS`
+  (default 90). No logrotate needed.
+- **Config (`.env`).** `ACCESS_LOG_ENABLED` (default `true`; set `false` to turn it off entirely),
+  `ACCESS_LOG_DIR` (default `logs/access`), `ACCESS_LOG_RETENTION_DAYS` (default `90`; `0`/unset keeps 90).
+- **Manual NTFS compression** (Windows, if you want to compress files already written, not just new
+  ones): `compact /c /s "logs\access"` from the repo root. The boot step only sets the folder
+  attribute so *new* daily files inherit compression.
+
+This is deliberately local-only: shipping logs off-box or alerting on them is out of scope — a flat
+daily file you can `grep` is enough to answer "did anyone try the door?"
+
+---
+
 ## If something doesn't work
 
 | What you see | What it means | Fix |

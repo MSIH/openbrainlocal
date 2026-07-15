@@ -28,7 +28,8 @@ import { access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 
-import { PORT, TRUST_PROXY, DB_PATH, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES } from './config.js';
+import { PORT, TRUST_PROXY, DB_PATH, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES, ACCESS_LOG_ENABLED, ACCESS_LOG_DIR, ACCESS_LOG_RETENTION_DAYS } from './config.js';
+import { accessLogMiddleware, pruneOldLogs, ensureCompressed, closeAccessLog } from './access-log.js';
 import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
@@ -461,6 +462,21 @@ const app = express();
 // and IP logging must use the real client IP from X-Forwarded-For, not the proxy's 127.0.0.1.
 app.set('trust proxy', TRUST_PROXY);
 
+// Access logging (#178): one funnel for every /api, /mcp, /ui request. Mounted FIRST — after
+// `trust proxy` so req.ip is the real client IP (not the tunnel's 127.0.0.1), and before the rate
+// limiter so a 429 is logged too. Secrets in the URL (api_key query, capability path tokens) are
+// redacted before writing; bodies are never logged. Boot housekeeping (best-effort, non-fatal):
+// ensure the dir is NTFS-compressed so new daily files inherit it, then prune past the retention window.
+if (ACCESS_LOG_ENABLED) {
+  app.use(accessLogMiddleware);
+  ensureCompressed(ACCESS_LOG_DIR)
+    .then((r) => console.log(`access log: ${path.resolve(ACCESS_LOG_DIR)} · compress ${JSON.stringify(r)}`))
+    .catch((err) => console.error("access-log: ensureCompressed failed", err));
+  pruneOldLogs(ACCESS_LOG_DIR, ACCESS_LOG_RETENTION_DAYS)
+    .then((r) => console.log(`access log: retention ${ACCESS_LOG_RETENTION_DAYS}d · pruned ${r.pruned}, kept ${r.kept}`))
+    .catch((err) => console.error("access-log: prune failed", err));
+}
+
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
@@ -816,7 +832,8 @@ const shutdown = () => {
   for (const transport of activeMcpTransports.values()) {
     transport.close();
   }
-  serverInstance.close(() => {
+  serverInstance.close(async () => {
+    await closeAccessLog(); // flush the access-log stream so a buffered final line isn't lost on exit
     db.close();
     process.exit(0);
   });
