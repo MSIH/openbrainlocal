@@ -13,8 +13,8 @@ import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDotEnvIfPresent, walkImageFiles, keyForMedia, contentHashOfFile, ingestClient } from './lib/shared.js';
-import { describePhoto, buildTextRepr, sidecarPathFor } from './lib/describe.js';
+import { loadDotEnvIfPresent, walkImageFiles, keyForMedia, isTakeoutRoot, contentHashOfFile, ingestClient } from './lib/shared.js';
+import { describePhoto, buildTextRepr } from './lib/describe.js';
 import { readCaptionCache, writeCaptionCache } from './lib/caption-cache.js';
 
 loadDotEnvIfPresent(path.dirname(fileURLToPath(import.meta.url)));
@@ -65,6 +65,8 @@ async function main() {
     process.exit(1);
   }
 
+  // Same scan-level Google-origin decision scan.js makes, so the key matches (keyForMedia/#176).
+  const isTakeout = isTakeoutRoot(PHOTO_ROOT, process.env.PHOTO_TAKEOUT);
   const { postIngest } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
   // relPath -> caption text, so the face worker can reconstruct base+caption before appending
   // "Pictured: ..." (lib/caption-cache.js). A present key means "already captioned" — same
@@ -107,9 +109,8 @@ async function main() {
 
     const enrichedText = `${buildTextRepr(dateStr, path.basename(absPath))} ${captionText}`;
     // Same content-hash key scan.js computed (keyForMedia) so this enriches the SAME artifact —
-    // a Google-origin photo (sidecar present) keys under source='google-photos', everything else
-    // under 'photo-exif'. Recompute the sidecar signal per image; it's a cheap existence probe.
-    const { source, source_id } = keyForMedia(contentHash, sidecarPathFor(absPath) != null);
+    // a Takeout-export photo keys under source='google-photos', everything else under 'photo-exif'.
+    const { source, source_id } = keyForMedia(contentHash, isTakeout);
     try {
       // Present fields only: text_repr + extra. Per doc 04 §3 upsert merge semantics, everything
       // scan.js already stored (occurred_at, GPS, raw_path, content_hash) — plus whatever core

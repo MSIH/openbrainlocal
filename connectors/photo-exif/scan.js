@@ -7,8 +7,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'no
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDotEnvIfPresent, walkMediaFiles, keyForMedia, mediaType, contentHashOfFile, chunk, ingestClient } from './lib/shared.js';
-import { describePhoto, buildTextRepr, readSidecar, sidecarPathFor } from './lib/describe.js';
+import { loadDotEnvIfPresent, walkMediaFiles, keyForMedia, isTakeoutRoot, mediaType, contentHashOfFile, chunk, ingestClient } from './lib/shared.js';
+import { describePhoto, buildTextRepr, readSidecar } from './lib/describe.js';
 
 loadDotEnvIfPresent(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -39,7 +39,7 @@ function writeManifest(manifest) {
   writeFileSync(MANIFEST_PATH, JSON.stringify(manifest));
 }
 
-async function buildPayload(absPath, relPath) {
+async function buildPayload(absPath, relPath, isTakeout) {
   const { date, dateStr, latitude, longitude } = await describePhoto(absPath);
   const contentHash = await contentHashOfFile(absPath);
   // Google Takeout sidecar (#152): people tags → entity_hints, and takenTime/geo as a FALLBACK for
@@ -47,9 +47,10 @@ async function buildPayload(absPath, relPath) {
   // sidecar only fills a gap. Best-effort — readSidecar returns null on any miss/parse failure, and
   // text_repr is left EXIF-only (the caption/face workers rebuild it, so names live in entity_hints).
   const sidecar = readSidecar(absPath);
-  // A file with a sidecar next to it is Google-origin; content-hash keying (never the file path)
-  // makes the id reproducible from the bytes and dedups Takeout's per-album copies (see keyForMedia).
-  const { source, source_id } = keyForMedia(contentHash, sidecarPathFor(absPath) != null);
+  // Google-origin is a scan-level fact (isTakeout), not per-file sidecar presence — Takeout omits a
+  // sidecar for some items, and keying those generic would duplicate the google-photos row (#176).
+  // Content-hash keying (never the file path) dedups Takeout's per-album copies (see keyForMedia).
+  const { source, source_id } = keyForMedia(contentHash, isTakeout);
   const type = mediaType(path.basename(absPath));
 
   const payload = {
@@ -126,6 +127,10 @@ async function main() {
     process.exit(1);
   }
 
+  // Decide Google-origin ONCE for the whole scan (not per file) — see keyForMedia/#176.
+  const isTakeout = isTakeoutRoot(PHOTO_ROOT, process.env.PHOTO_TAKEOUT);
+  console.error(`photo-exif: scanning ${PHOTO_ROOT} (isTakeout=${isTakeout} → source=${isTakeout ? 'google-photos' : 'photo-exif'})`);
+
   const { postIngestBatch } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
   const manifest = readManifest();
   let scanned = 0;
@@ -165,7 +170,7 @@ async function main() {
         skippedUnchanged++;
         continue;
       }
-      payload = await buildPayload(absPath, relPath);
+      payload = await buildPayload(absPath, relPath, isTakeout);
     } catch (err) {
       console.error(`photo-exif: skipping unreadable file ${relPath}`, err);
       continue;

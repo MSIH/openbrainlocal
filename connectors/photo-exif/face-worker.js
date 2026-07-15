@@ -19,8 +19,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statS
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDotEnvIfPresent, walkImageFiles, keyForMedia, contentHashOfFile, ingestClient, fetchContactPhotos } from './lib/shared.js';
-import { describePhoto, sidecarPathFor } from './lib/describe.js';
+import { loadDotEnvIfPresent, walkImageFiles, keyForMedia, isTakeoutRoot, contentHashOfFile, ingestClient, fetchContactPhotos } from './lib/shared.js';
+import { describePhoto } from './lib/describe.js';
 import { readCaptionCache, currentTextRepr } from './lib/caption-cache.js';
 import { assignCluster, euclideanDistance, parseClustersFile, serializeClustersFile } from './lib/face-cluster.js';
 import { resolveDetector } from './lib/face-detect.js';
@@ -138,6 +138,8 @@ async function scan() {
     process.exit(1);
   }
   const detectFaces = await loadDetectorOrExit();
+  // Same scan-level Google-origin decision scan.js makes, so the persisted key matches (#176).
+  const isTakeout = isTakeoutRoot(PHOTO_ROOT, process.env.PHOTO_TAKEOUT);
 
   const { postIngest } = ingestClient({ url: LIFECONTEXT_URL, apiKey: LIFECONTEXT_API_KEY });
   const faceState = readJson(FACE_STATE_PATH, {});
@@ -207,7 +209,7 @@ async function scan() {
         console.error(`photo-exif: skipping unreadable file ${relPath}`, err);
         continue;
       }
-      const { source, source_id } = keyForMedia(contentHash, sidecarPathFor(absPath) != null);
+      const { source, source_id } = keyForMedia(contentHash, isTakeout);
       entry.source = source;
       entry.source_id = source_id;
       writeJson(FACE_STATE_PATH, faceState);

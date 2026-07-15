@@ -16,8 +16,9 @@ import { readCaptionCache, writeCaptionCache, currentTextRepr } from './lib/capt
 const __dirname = path.dirname(fileURLToPath(import.meta.url)); // import.meta.dirname needs Node 20.11+; this connector declares >=18
 
 // source_id is now the content hash (keyForMedia): generic photos → source='photo-exif',
-// source_id=<sha256>; Google-origin (a Takeout sidecar next to the file) → source='google-photos',
-// source_id='gphotos:<sha256>'. Tests compute the expected hash from the bytes they wrote.
+// source_id=<sha256>; Google-origin (the scan ROOT is a Takeout export — isTakeoutRoot, #176, NOT
+// per-file sidecar) → source='google-photos', source_id='gphotos:<sha256>'. Tests force/expect
+// Takeout via a marker (a "Photos from <YYYY>" dir / a "Google Photos" root) or PHOTO_TAKEOUT.
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const sha256File = (p) => sha256(readFileSync(p));
 
@@ -170,6 +171,7 @@ test('scan.js: Google Takeout sidecar → pictured hints + takenTime/geo fallbac
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'), TZ: 'UTC',
+    PHOTO_TAKEOUT: 'true', // this temp root has no marker → force Takeout so keying is google-photos
   });
   server.closeAllConnections();
   server.close();
@@ -178,7 +180,7 @@ test('scan.js: Google Takeout sidecar → pictured hints + takenTime/geo fallbac
   const by = (name) => arts.find((a) => a.raw_path.endsWith(name));
 
   const full = by('sidecar-full.jpg');
-  assert.equal(full.source, 'google-photos', 'a file with a sidecar is Google-origin');
+  assert.equal(full.source, 'google-photos', 'a file in a Takeout tree is Google-origin');
   assert.match(full.source_id, /^gphotos:[0-9a-f]{64}$/, 'Google-origin source_id is gphotos:<hash>');
   assert.equal(full.source_id, `gphotos:${full.content_hash}`);
   assert.deepEqual(full.entity_hints, [
@@ -205,11 +207,11 @@ test('scan.js: Google Takeout sidecar → pictured hints + takenTime/geo fallbac
 
   assert.equal(by('no-sidecar.jpg').entity_hints, undefined, 'no sidecar → no hints');
   assert.equal(by('no-sidecar.jpg').occurred_at, undefined);
-  assert.equal(by('no-sidecar.jpg').source, 'photo-exif', 'no sidecar → generic keying');
-  assert.match(by('no-sidecar.jpg').source_id, /^[0-9a-f]{64}$/);
-  // A file whose sidecar exists but is unparseable is still Google-origin (presence, not content).
+  // #176: in a Takeout tree, a sidecar-less file is STILL google-photos (tree-level, not per-file).
+  assert.equal(by('no-sidecar.jpg').source, 'google-photos', 'no sidecar but Takeout tree → google-photos');
+  assert.match(by('no-sidecar.jpg').source_id, /^gphotos:[0-9a-f]{64}$/);
   assert.equal(by('bad-sidecar.jpg').entity_hints, undefined, 'malformed sidecar → EXIF-only, no crash');
-  assert.equal(by('bad-sidecar.jpg').source, 'google-photos', 'sidecar presence (even if unreadable) → Google-origin');
+  assert.equal(by('bad-sidecar.jpg').source, 'google-photos');
 });
 
 test('scan.js: same filename, different content in different subdirectories gets distinct source_ids', async () => {
@@ -292,6 +294,7 @@ test('scan.js: byte-identical copies in different folders collapse to one payloa
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
+    PHOTO_TAKEOUT: 'true', // album folders, no root marker → force Takeout for google-photos keying
   });
   server.closeAllConnections();
   server.close();
@@ -334,6 +337,76 @@ test('scan.js: folder-name pictured hint — subfolder yes, root none, year buck
   assert.equal(by('root.jpg').entity_hints, undefined, 'a file directly in PHOTO_ROOT emits no folder hint');
   assert.deepEqual(by('m.jpg').entity_hints, [{ alias: 'Aunt Mary', alias_type: 'name', role: 'pictured', confidence: 0.9 }], 'a person-named subfolder becomes a pictured hint');
   assert.equal(by('y.jpg').entity_hints, undefined, 'a Takeout year bucket is never a person');
+});
+
+test('scan.js: Takeout detected at tree level — a sidecar-less .mp4 keys google-photos (#176)', async () => {
+  // The repro: a motion-photo/Live-Photo .MP4 has no sidecar of its own, but it IS a Takeout export
+  // item. Per-file sidecar detection mis-keyed it generic and duplicated the google-photos row.
+  // Detection is now tree-level: PHOTO_ROOT named "Google Photos" is auto-recognized (no override).
+  const base = mkdtempSync(path.join(tmpdir(), 'photo-exif-takeoutroot-'));
+  const tmp = path.join(base, 'Google Photos');
+  mkdirSync(tmp);
+  writeFileSync(path.join(tmp, 'IMG_7078.MP4'), Buffer.from('sidecar-less-motion-video-bytes')); // no sidecar
+
+  const { server, port, requests } = await startMockServer((req, body, res) => {
+    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
+  });
+  const result = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(base, 'manifest.json'),
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  const [art] = requests[0].body.artifacts;
+  assert.equal(art.type, 'video');
+  assert.equal(art.source, 'google-photos', 'sidecar-less Takeout media keys google-photos, not generic');
+  assert.equal(art.source_id, `gphotos:${art.content_hash}`);
+});
+
+test('scan.js: album-layout Takeout (child dirs with metadata.json, no year bucket) keys google-photos (#177)', async () => {
+  // Copilot #177: the common layout where PHOTO_ROOT holds one folder per album, each with its own
+  // metadata.json, and the root is NOT named "Google Photos" and has no "Photos from <YYYY>" bucket.
+  // A sidecar-less .mp4 in such a tree must still key google-photos (auto-detected, no override).
+  const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-albumlayout-'));
+  mkdirSync(path.join(tmp, 'Adam Schneider'));
+  writeFileSync(path.join(tmp, 'Adam Schneider', 'metadata.json'), JSON.stringify({ title: 'Adam Schneider' }));
+  writeFileSync(path.join(tmp, 'Adam Schneider', 'IMG_9001.MP4'), Buffer.from('album-layout-sidecar-less-video')); // no sidecar
+
+  const { server, port, requests } = await startMockServer((req, body, res) => {
+    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
+  });
+  const result = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+  const mp4 = requests[0].body.artifacts.find((a) => a.raw_path.endsWith('IMG_9001.MP4'));
+  assert.equal(mp4.source, 'google-photos', 'album-layout Takeout detected via child metadata.json');
+  assert.equal(mp4.source_id, `gphotos:${mp4.content_hash}`);
+});
+
+test('scan.js: PHOTO_TAKEOUT overrides detection both ways (#176)', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-override-'));
+  writeFileSync(path.join(tmp, 'x.jpg'), Buffer.from('override-bytes')); // no sidecar, no marker
+  const runOnce = async (override) => {
+    const { server, port, requests } = await startMockServer((req, body, res) => {
+      res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
+    });
+    const result = await run('scan.js', {
+      LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
+      PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, `manifest-${override}.json`),
+      PHOTO_TAKEOUT: override,
+    });
+    server.closeAllConnections();
+    server.close();
+    assert.equal(result.status, 0, result.stderr);
+    return requests[0].body.artifacts[0];
+  };
+  assert.equal((await runOnce('true')).source, 'google-photos', 'PHOTO_TAKEOUT=true forces google-photos');
+  assert.equal((await runOnce('false')).source, 'photo-exif', 'PHOTO_TAKEOUT=false forces generic');
 });
 
 test('caption-worker.js: enriches text_repr in place, preserves EXIF fields via upsert semantics, kill-safe state', async () => {
