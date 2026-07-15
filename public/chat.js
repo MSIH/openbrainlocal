@@ -163,9 +163,11 @@ async function ask(query) {
   // multi-second search shows continuous activity, not just a (possibly static) ring. Cleared in
   // `finally` on BOTH paths — renderResults/the error replaceChildren remove the spinner node, so a
   // surviving interval would keep writing to a detached .elapsed span.
+  const elapsedEl = slot.querySelector('.elapsed');
+  let shownSecs = -1; // only touch the DOM when the whole-second value changes
   const timer = setInterval(() => {
-    const e = slot.querySelector('.elapsed');
-    if (e) e.textContent = `${Math.round((performance.now() - t0) / 1000)}s`;
+    const secs = Math.floor((performance.now() - t0) / 1000);
+    if (elapsedEl && secs !== shownSecs) { shownSecs = secs; elapsedEl.textContent = `${secs}s`; }
   }, 250);
   try {
     const path = turnMode === 'recall' ? '/api/recall' : '/api/search';
