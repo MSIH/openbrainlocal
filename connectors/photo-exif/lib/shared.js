@@ -1,5 +1,6 @@
-// Shared by scan.js and caption-worker.js. Both scripts must compute source_id identically —
-// a mismatch here would silently create duplicate artifacts instead of upserting the same one.
+// Shared by scan.js, caption-worker.js, and face-worker.js. All three must compute the
+// (source, source_id) key identically (keyForMedia below) — a mismatch would silently create
+// duplicate artifacts instead of upserting the same one.
 import { createHash } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
@@ -20,6 +21,14 @@ export function loadDotEnvIfPresent(dir) {
 }
 
 export const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff']);
+export const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.3gp']);
+
+// The core artifact type for a media file — both 'photo' and 'video' are registered ingest
+// types. A consolidated scan (a Google Takeout export especially) mixes both; a video must not
+// be stored as a photo.
+export function mediaType(name) {
+  return VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase()) ? 'video' : 'photo';
+}
 
 // Manual recursive walk rather than fs.readdir's `recursive` option — that option needs
 // Node 20.1+; this connector has zero native dependencies, so it's worth the extra lines to
@@ -42,13 +51,35 @@ export async function* walkImageFiles(root, dir = root) {
   }
 }
 
-// The relative path (POSIX-normalized so it's stable across OSes) IS the source_id — it's
-// reproducible from the source data itself (doc 04 §3), simple, and debuggable. A photo
-// library reorganized after the first scan orphans history the same way renaming any
-// connector's `source` would (doc 04 §3's "source" field rule) — documented, not silently
-// handled.
-export function sourceIdFor(relPath) {
-  return relPath;
+// Images + videos, mirroring walkImageFiles exactly (same root-relative relPath discipline — see
+// the note above). scan.js walks media so videos ingest too; the caption/face workers keep
+// walking images only (a video gets no caption/face pass).
+export async function* walkMediaFiles(root, dir = root) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const absPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkMediaFiles(root, absPath);
+    } else if (entry.isFile()) {
+      const ext = path.extname(entry.name).toLowerCase();
+      if (IMAGE_EXTENSIONS.has(ext) || VIDEO_EXTENSIONS.has(ext)) {
+        yield { absPath, relPath: path.relative(root, absPath).split(path.sep).join('/') };
+      }
+    }
+  }
+}
+
+// The (source, source_id) key for a media file, derived from its content hash — the id is
+// reproducible from the bytes (doc 04 §3), so it dedups Takeout's same-photo-in-many-folders
+// duplication and survives folder renames. A file that has a Google Takeout sidecar next to it
+// is "Google-origin" and keys under source='google-photos' with a `gphotos:`-prefixed id (this
+// MUST match the rows the retired gphotos-takeout connector wrote, so a re-scan upserts them
+// rather than duplicating); everything else keys under source='photo-exif' with the bare hash.
+// All three scripts use this so a photo keys identically no matter which one touches it.
+export function keyForMedia(contentHash, hasSidecar) {
+  return hasSidecar
+    ? { source: 'google-photos', source_id: `gphotos:${contentHash}` }
+    : { source: 'photo-exif', source_id: contentHash };
 }
 
 export function contentHashOfFile(absPath) {

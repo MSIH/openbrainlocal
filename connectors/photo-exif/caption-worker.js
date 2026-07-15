@@ -13,8 +13,8 @@ import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDotEnvIfPresent, walkImageFiles, sourceIdFor, ingestClient } from './lib/shared.js';
-import { describePhoto, buildTextRepr } from './lib/describe.js';
+import { loadDotEnvIfPresent, walkImageFiles, keyForMedia, contentHashOfFile, ingestClient } from './lib/shared.js';
+import { describePhoto, buildTextRepr, sidecarPathFor } from './lib/describe.js';
 import { readCaptionCache, writeCaptionCache } from './lib/caption-cache.js';
 
 loadDotEnvIfPresent(path.dirname(fileURLToPath(import.meta.url)));
@@ -85,8 +85,10 @@ async function main() {
     const { dateStr } = await describePhoto(absPath);
 
     let base64Image;
+    let contentHash;
     try {
       base64Image = (await readFile(absPath)).toString('base64');
+      contentHash = await contentHashOfFile(absPath);
     } catch (err) {
       // A single unreadable/corrupt file must not be mistaken for the VLM being down —
       // skip it and keep going, same posture as scan.js.
@@ -104,14 +106,18 @@ async function main() {
     }
 
     const enrichedText = `${buildTextRepr(dateStr, path.basename(absPath))} ${captionText}`;
+    // Same content-hash key scan.js computed (keyForMedia) so this enriches the SAME artifact —
+    // a Google-origin photo (sidecar present) keys under source='google-photos', everything else
+    // under 'photo-exif'. Recompute the sidecar signal per image; it's a cheap existence probe.
+    const { source, source_id } = keyForMedia(contentHash, sidecarPathFor(absPath) != null);
     try {
       // Present fields only: text_repr + extra. Per doc 04 §3 upsert merge semantics, everything
       // scan.js already stored (occurred_at, GPS, raw_path, content_hash) — plus whatever core
       // resolved into place_label from that GPS — is left untouched, since neither is present
       // in this payload. This is exactly the "enrichment wave" the contract's upsert exists for.
       await postIngest({
-        source: 'photo-exif',
-        source_id: sourceIdFor(relPath),
+        source,
+        source_id,
         type: 'photo',
         text_repr: enrichedText,
         extra: { captioned: true },

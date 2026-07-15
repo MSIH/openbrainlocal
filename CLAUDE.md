@@ -29,7 +29,7 @@ src/search.js            — query planner: LLM parse, SQL prefilter, KNN + FTS,
 src/server.js            — the server: REST + MCP tools, auth, transport (imports the modules above)
 src/migrate.js           — `npm run migrate`: OB1 memories -> artifacts (idempotent, reuses vectors)
 src/contacts.js          — `npm run import:contacts <file>`: vCard -> entities + contact artifacts
-connectors/              — external HTTP connectors, one self-contained folder each (doc 04; NEVER import src/ — `npm run check:boundary`)
+connectors/              — external HTTP connectors, one self-contained folder each (doc 04; NEVER import src/ — `npm run check:boundary`). `photo-exif` is the single photo/video connector (EXIF + Google Takeout + folder-name person hints; `gphotos-takeout` was folded into it, #171)
 docs/                    — design + setup docs (03 core design, 04 connector contract, 05 roadmap, 06 consolidation, 07 Cloudflare Tunnel remote access, 08 Claude Code web session capture)
 .env.example             — required env template (copy to .env; never commit .env)
 .claude/rules/           — coding standards, data-model, connector-conventions, design-philosophy (read before editing)

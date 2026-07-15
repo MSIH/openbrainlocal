@@ -11,8 +11,7 @@ devsession-claude/  Claude Code SessionEnd/PreCompact hook → dev_session artif
 gh-event-claude/    Claude Code PostToolUse hook → x-dev-event artifacts on gh issue/PR create (#89)
 documents/          PDF/DOCX/XLSX/PPTX tree scan + tesseract OCR worker → document artifacts (#56)
 imessage/           iMessage chat.db sync → message/photo artifacts (Milestone 3)
-photo-exif/         Photo library EXIF scan + VLM captioning → photo artifacts (Milestone 4)
-gphotos-takeout/    Google Takeout scan → photo/video artifacts + named-album `pictured` hints (#77)
+photo-exif/         Photo/video library scan (EXIF + Google Takeout sidecars + folder-name person hints) + VLM captioning + local face clustering → photo/video artifacts (Milestone 4; #171 folded the former gphotos-takeout connector in here)
 ```
 
 Each connector is self-contained: its own `package.json` (dependencies never shared), its own `README.md` (setup, env vars, trigger registration), its own `.env` (gitignored). There is no repo-wide build — these are client processes deployed wherever the source data lives (e.g. `imessage/` runs on a Mac), cloned from this repo.
