@@ -68,7 +68,7 @@ CREATE TABLE artifacts (
   ingested_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
   latitude      REAL,                 -- nullable
   longitude     REAL,                 -- nullable
-  place_label   TEXT,                 -- reverse-geocoded: "Montrose, Houston, TX"
+  place_label   TEXT,                 -- reverse-geocoded, US region as full state name: "Houston, Texas" (#186)
   raw_path      TEXT,                 -- pointer to original file on disk
   text_repr     TEXT NOT NULL,        -- normalized text — this gets embedded
   extra_json    TEXT,                 -- type-specific fields (EXIF, headers, etc.)
@@ -279,6 +279,13 @@ Then vector-rank only within those candidates (sqlite-vec supports `partition ke
 > `place` matching no `place_label`) is folded back into the ranked search text so it can't silently
 > vanish. The query parse is one small-LLM call (`QUERY_MODEL`) validated with zod; if the model or
 > the embedder is unreachable, search degrades gracefully (pure-semantic plan / FTS-only).
+>
+> **US-state place terms (#186).** When `place` resolves to a US state, the prefilter matches
+> `place_label` against **both** the full-name form (`%Texas%`, the stored format) and a code form
+> (`%, TX`, legacy/coordinate-less labels) so neither label format is missed. The planner prompt
+> also classifies a state/city/country name as `place` (never `entities`) and only sets `types`
+> when a kind is explicitly named — a small local model otherwise mis-routed "in texas" to
+> `entities` + `types:["visit"]`, leaving `place` empty.
 >
 > **Planner cost on CPU-only hosts (#179).** The parse is a tiny JSON, but generation time dominates
 > and a 3B model on CPU can take >10s. So the single planner attempt is bounded by `QUERY_PLAN_TIMEOUT_MS`

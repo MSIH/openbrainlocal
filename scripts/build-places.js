@@ -9,14 +9,16 @@
  * own countryInfo.txt — one fewer raw file to source, and the output matches GeoNames'
  * wording closely enough ("South Korea", "Japan", ...) for a place_label.
  *
- * US rows get `region` straight from GeoNames' admin1 code column, which for the US already
- * *is* the USPS postal abbreviation (e.g. "TX") — no admin1CodesASCII.txt join needed. Non-US
- * admin1 codes aren't human-readable postal abbreviations, so region stays null there, same
- * as the dataset this replaces.
+ * US rows get `region` as the full state NAME (#186): GeoNames' admin1 code column for the US
+ * already *is* the USPS postal abbreviation (e.g. "TX"), which `normalizeUsState` maps to the
+ * full name ("Texas") — so a query filter written as "texas" matches the stored label directly
+ * (no admin1CodesASCII.txt join needed). Non-US admin1 codes aren't human-readable postal
+ * abbreviations, so region stays null there, same as the dataset this replaces.
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeUsState } from '../src/us-states.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_PATH = join(repoRoot, 'src', 'geodata', 'places.json');
@@ -57,7 +59,9 @@ for (const line of lines) {
   }
   places.push({
     city: name,
-    region: countryCode === 'US' && admin1Code ? admin1Code : null,
+    // Full state name for US rows ("TX" -> "Texas"); fall back to the raw code if it's an
+    // admin1 value normalizeUsState doesn't recognize, and null for non-US.
+    region: countryCode === 'US' && admin1Code ? (normalizeUsState(admin1Code)?.name ?? admin1Code) : null,
     country,
     lat,
     lon,

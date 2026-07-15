@@ -16,6 +16,7 @@
     "backfill:links": "node scripts/backfill-entity-links.js",
     "backfill:phones": "node scripts/backfill-phone-aliases.js",
     "backfill:display-names": "node scripts/backfill-display-names.js",
+    "backfill:geo": "node scripts/backfill-place-labels.js",
     "directory:load": "node scripts/load-directory.js",
     "backfill:directory-proposals": "node scripts/backfill-directory-proposals.js",
     "schema:ingest": "node scripts/generate-ingest-schema.js",
