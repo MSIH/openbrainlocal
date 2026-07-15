@@ -385,7 +385,9 @@ const resolveAliasByTypeStmt = db.prepare('SELECT DISTINCT entity_id FROM entity
 // with the term at a token boundary ("sam" -> "sam rivera"/"sam maria rivera", never "jetsam" or a
 // mid-token "sa"). `name` aliases ONLY — a prefix on a phone/email is meaningless. Used solely by
 // hybridSearch's entity loop, never on the exact-match ingest/annotate path (see resolveNameByPrefix).
-const resolveNameByPrefixStmt = db.prepare(`SELECT DISTINCT entity_id FROM entity_aliases WHERE alias_type = 'name' AND (alias = @t OR alias LIKE @t || ' %' ESCAPE '\\')`);
+// LIMIT 2: we only ever decide "exactly one match" vs "ambiguous", so two distinct rows is enough —
+// no need to materialize every entity whose name starts with a common/short prefix.
+const resolveNameByPrefixStmt = db.prepare(`SELECT DISTINCT entity_id FROM entity_aliases WHERE alias_type = 'name' AND (alias = @t OR alias LIKE @t || ' %' ESCAPE '\\') LIMIT 2`);
 const getEntityStmt = db.prepare('SELECT * FROM entities WHERE id = ?');
 const logStmt = db.prepare('INSERT INTO ingest_log (event_type, actor, details) VALUES (?, ?, ?)');
 // entity_relations (issue #37): append-only edges, OR IGNORE for idempotency.
@@ -704,11 +706,12 @@ export function resolveEntityIds(term) {
 export function resolveNameByPrefix(term) {
   const t = normalizeName(term).replace(/[\\%_]/g, '\\$&');
   if (!t) return [];
-  const ids = resolveNameByPrefixStmt.all({ t }).map((r) => r.entity_id);
+  const ids = resolveNameByPrefixStmt.all({ t }).map((r) => r.entity_id); // capped at 2 rows (see stmt)
   if (ids.length > 1) {
-    console.error(`entity-resolve: "${term}" ambiguous across ${ids.length} entities, left unresolved`);
+    console.error(`entity-resolve: "${term}" ambiguous (≥2 entities), left unresolved`);
+    return [];
   }
-  return ids.length === 1 ? ids : [];
+  return ids; // 0 rows (no match) or the single matching entity
 }
 
 // Deterministic alias types earn confidence 1.0 outright (connector-supplied value ignored);

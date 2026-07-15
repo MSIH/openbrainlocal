@@ -54,12 +54,16 @@ test('(b) an ambiguous given name does NOT resolve; the search stays unfiltered 
 });
 
 test('(c) exact full-name resolution still works and restricts (#184)', async () => {
-  // Reuse Sam Rivera from (b): the full name exact-resolves to one entity even though bare "sam" is ambiguous.
-  const rivera = resolveEntityIds('sam rivera');
-  assert.equal(rivera.length, 1, 'the full name resolves via resolveEntityIds (exact match, unchanged)');
-  const ids = (await hybridSearch('quarterly budget memo', { limit: 10, entities: ['sam rivera'], usePlanner: false })).map((r) => r.source_id);
-  assert.ok(ids.includes('b-sam1'), "Sam Rivera's artifact is returned");
-  assert.ok(!ids.includes('b-sam2') && !ids.includes('b-other'), 'other artifacts are excluded — the exact full-name filter applied');
+  // Self-contained (no cross-test state): two "Dana …" people so bare "dana" is ambiguous, yet the
+  // full name exact-resolves to exactly one entity via resolveEntityIds (the unchanged exact path).
+  const cole = await person(['Dana Cole'], { source_id: 'c-cole', text_repr: 'release notes checklist' });
+  await person(['Dana Pearce'], { source_id: 'c-pearce', text_repr: 'release notes checklist' });
+  await executeIngest({ source: 'e184', source_id: 'c-other', type: 'note', text_repr: 'release notes checklist', occurred_at: '2026-05-01' });
+
+  assert.deepEqual(resolveEntityIds('dana cole'), [cole], 'the full name resolves via resolveEntityIds (exact match, unchanged)');
+  const ids = (await hybridSearch('release notes checklist', { limit: 10, entities: ['dana cole'], usePlanner: false })).map((r) => r.source_id);
+  assert.ok(ids.includes('c-cole'), "Dana Cole's artifact is returned");
+  assert.ok(!ids.includes('c-pearce') && !ids.includes('c-other'), 'other artifacts are excluded — the exact full-name filter applied');
 });
 
 test('(d) phone / email / handle aliases are never prefix-matched (#184)', async () => {
