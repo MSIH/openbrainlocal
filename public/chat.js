@@ -126,8 +126,11 @@ function recallCard(r) {
 function addTurn(query, turnMode) {
   // Animated in-flight state: a CSS spinner + a mode-aware label, so it's obviously working (#180).
   const label = turnMode === 'recall' ? 'Recalling…' : 'Searching…';
+  // The live seconds counter (#185) is aria-hidden so it doesn't spam SRs each tick — the static
+  // "Searching…"/"Recalling…" label carries the in-flight signal; `ask` writes elapsed here.
   const results = el('div', { class: 'results' },
-    el('p', { class: 'thinking' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), label));
+    el('p', { class: 'thinking' }, el('span', { class: 'spinner', 'aria-hidden': 'true' }), label,
+      el('span', { class: 'elapsed', 'aria-hidden': 'true' })));
   const turn = el('section', { class: 'turn' },
     el('div', { class: 'q' }, el('span', { class: 'q-mode' }, turnMode), el('span', { class: 'q-text' }, query)),
     results);
@@ -156,6 +159,16 @@ async function ask(query) {
   const turnMode = mode;
   const slot = addTurn(query, turnMode);
   const t0 = performance.now(); // wall clock around the fetch — the latency the user actually feels
+  // Live progress readout (#185): tick a whole-second counter into the thinking line so a
+  // multi-second search shows continuous activity, not just a (possibly static) ring. Cleared in
+  // `finally` on BOTH paths — renderResults/the error replaceChildren remove the spinner node, so a
+  // surviving interval would keep writing to a detached .elapsed span.
+  const elapsedEl = slot.querySelector('.elapsed');
+  let shownSecs = -1; // only touch the DOM when the whole-second value changes
+  const timer = setInterval(() => {
+    const secs = Math.floor((performance.now() - t0) / 1000);
+    if (elapsedEl && secs !== shownSecs) { shownSecs = secs; elapsedEl.textContent = `${secs}s`; }
+  }, 250);
   try {
     const path = turnMode === 'recall' ? '/api/recall' : '/api/search';
     const { results } = await api('POST', path, { body: { query, limit: RESULT_LIMIT } });
@@ -166,6 +179,8 @@ async function ask(query) {
       el('p', { class: 'results-meta' }, `Error · ${fmtSecs(elapsed)}`),
       el('p', { class: 'empty err' }, err instanceof ApiError && err.status === 401 ? 'Unauthorized — reopen this page from its full /<token>/ui/ URL.' : `Error: ${err.message || 'request failed'}`));
     reportError(err);
+  } finally {
+    clearInterval(timer); // stop ticking on both success and error — the .elapsed node is now gone
   }
 }
 
