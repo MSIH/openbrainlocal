@@ -303,10 +303,16 @@ test('loadDirectory (#154): vCard load populates the directory and creates NO en
   assert.equal(s.contacts, 1);
   assert.equal(s.loaded, 2, 'one phone + one email loaded');
   assert.ok(s.total >= 2, 'summary reports the directory total (distinct handles)');
-  assert.equal(lookupDirectoryName('5554242000', 'phone'), 'Directory Only Contact');
-  assert.equal(lookupDirectoryName('dir.only@example.com', 'email'), 'Directory Only Contact');
+  // #158: the directory name follows the first+last display rule (#156) — "Directory Only Contact"
+  // (3 tokens) is stored as "Directory Contact", consistent with a curated contact's display.
+  assert.equal(lookupDirectoryName('5554242000', 'phone'), 'Directory Contact');
+  assert.equal(lookupDirectoryName('dir.only@example.com', 'email'), 'Directory Contact');
   assert.equal(db.prepare("SELECT COUNT(*) n FROM entities WHERE kind='person'").get().n, beforePersons, 'no entity created');
   assert.equal(db.prepare('SELECT COUNT(*) n FROM entity_aliases').get().n, beforeAliases, 'no alias created');
+
+  // A 4-token name is stored full (same cutoff as the display rule).
+  loadDirectory(['BEGIN:VCARD', 'VERSION:3.0', 'FN:Maria de la Cruz', 'TEL:+15557778888', 'END:VCARD'].join('\n'));
+  assert.equal(lookupDirectoryName('5557778888', 'phone'), 'Maria de la Cruz');
 });
 
 // --- Display name = first + last (#156) ---

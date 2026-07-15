@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { db, insertDirectoryEntry, logEvent } from '../src/db.js';
-import { parseVCards } from '../src/contacts.js';
+import { parseVCards, preferredDisplayName } from '../src/contacts.js';
 
 const directoryCountStmt = db.prepare('SELECT COUNT(*) AS n FROM contact_directory');
 
@@ -24,7 +24,7 @@ export function loadDirectory(text) {
   let contacts = 0, loaded = 0, collisions = 0;
   const run = db.transaction(() => {
     for (const c of cards) {
-      const name = (c.fn || '').trim();
+      const name = preferredDisplayName(c).trim(); // #158: first+last (drops a middle name), same rule as the curated display (#156)
       if (!name) continue; // a nameless card can't label anything
       contacts++;
       for (const p of c.phones ?? []) { const r = insertDirectoryEntry(name, p, 'phone'); if (r.inserted) loaded++; if (r.collision) collisions++; }
