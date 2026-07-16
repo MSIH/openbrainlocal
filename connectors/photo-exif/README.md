@@ -74,6 +74,21 @@ node face-worker.js suggest-labels
 4. Optionally, once you have a vision model pulled in Ollama (`ollama pull llava`): `node caption-worker.js`.
 5. Optionally, for face → contact linking: download the face-api model weights into `FACE_MODELS_PATH` (the `ssdMobilenetv1`, `faceLandmark68Net`, and `faceRecognitionNet` weight files from the `@vladmandic/face-api` model repo — one-time, offline after), then `node face-worker.js`, browse clusters with `export-thumbnails`, and `label` the ones you recognize.
 
+### Prep a Takeout download (Windows) — `prep-takeout.ps1`
+
+A Google Takeout photo export arrives as multi-part zips (`takeout-*.zip`) that must be unzipped before `scan.js` can walk them, and the zips then eat a lot of disk. `prep-takeout.ps1` does that prep in one pass over `-PhotoRoot` (default `C:\Artifacts\life-context\photo`):
+
+1. Extracts each `takeout-*.zip` into `-PhotoRoot` (the parts are independent archives that merge into the shared `Takeout\` tree; `-Force` overwrites byte-identical dupes across parts).
+2. **Only after a zip extracts successfully**, sends that zip to the **Recycle Bin** (a failed extract leaves its zip in place and is logged — nothing is lost to a half-run).
+3. Recurses the extracted tree and sends every movie file (`.mp4,.mov,.m4v,.avi,.mkv,.wmv,.mpg,.mpeg,.3gp,.webm` by default, `-VideoExtensions`) to the **Recycle Bin**, so videos never reach the library.
+
+```powershell
+powershell -File prep-takeout.ps1 -WhatIf   # dry-run: log every action, change nothing
+powershell -File prep-takeout.ps1           # do it, then run `node scan.js`
+```
+
+**Recycle Bin, never permanent delete** — recoverable, and matching this project's append-only ethos and the box's delete-blocked posture (the `rm`/`Remove-Item` deny); it uses `Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(SendToRecycleBin)`, not `Remove-Item`. **Caveat:** the Recycle Bin still occupies disk until emptied — to actually reclaim the space after a verified run, empty it manually (the script can't, since permanent delete is blocked). Windows-only.
+
 ### Wave order matters
 
 Run **scan → caption → face** for each photo. The ingest contract requires `text_repr` on every upsert and replaces it (and `extra`) wholesale — there is no deep-merge (doc 04 §3). The face worker therefore reconstructs `text_repr` as *base + caption + "Pictured: …"* by reading the caption cache, so it preserves a caption rather than dropping it. Two ordering caveats follow from the wholesale replace:
@@ -118,6 +133,7 @@ On Windows, use Task Scheduler with a "Daily, 1:00 AM" trigger running `node cap
 
 ## Files
 
+- `prep-takeout.ps1` — Windows pre-scan prep: unzip a Takeout export, recycle the zips + any videos (Recycle Bin, never permanent delete)
 - `scan.js` — the media batch scanner (EXIF + Takeout sidecars + folder-name hints; walks images **and** videos)
 - `caption-worker.js` — the VLM enrichment worker (images only)
 - `face-worker.js` — the local face-detection/clustering worker, images only (`scan` / `label` / `export-thumbnails` / `suggest-labels`)
