@@ -97,19 +97,24 @@ foreach ($zip in $zips) {
 }
 
 # Only after extraction: strip videos from the merged tree so they never reach scan.js.
-$videos = @(Get-ChildItem -LiteralPath $PhotoRoot -Recurse -File |
-    Where-Object { $videoSet.Contains($_.Extension) })
-foreach ($video in $videos) {
-    # Same per-item guard as the zips: one locked video must not abort the whole cleanup.
-    try {
-        Move-ToRecycleBin -Path $video.FullName
-        if (-not $WhatIf) { Write-Host "recycled video $($video.FullName)" }
-        $recycledVideos++
-    } catch {
-        Write-Warning "video recycle failed: $($video.FullName) -- $($_.Exception.Message)"
-        $videosFailed++
+# Streamed (not materialized into an array) so a huge library doesn't build the whole
+# FileInfo list in memory. Capture $path before the try so the catch's $_ (the error
+# record, not the pipeline item) doesn't shadow it; counters use $script: to update the
+# script-scope totals from inside the ForEach-Object child scope.
+Get-ChildItem -LiteralPath $PhotoRoot -Recurse -File |
+    Where-Object { $videoSet.Contains($_.Extension) } |
+    ForEach-Object {
+        # Same per-item guard as the zips: one locked video must not abort the whole cleanup.
+        $path = $_.FullName
+        try {
+            Move-ToRecycleBin -Path $path
+            if (-not $WhatIf) { Write-Host "recycled video $path" }
+            $script:recycledVideos++
+        } catch {
+            Write-Warning "video recycle failed: $path -- $($_.Exception.Message)"
+            $script:videosFailed++
+        }
     }
-}
 
 $note = if ($WhatIf) { ' (dry-run -- nothing changed)' } else { '' }
 Write-Host "zips: extracted=$extracted recycled=$recycledZips failed=$failed | videos: recycled=$recycledVideos failed=$videosFailed$note"
