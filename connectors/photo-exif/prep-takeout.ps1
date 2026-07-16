@@ -68,7 +68,7 @@ if ($zips.Count -eq 0) {
     exit 0
 }
 
-$extracted = 0; $recycledZips = 0; $failed = 0
+$extracted = 0; $recycledZips = 0; $failed = 0; $recycledVideos = 0; $videosFailed = 0
 foreach ($zip in $zips) {
     Write-Host "extracting $($zip.Name)"
     try {
@@ -84,19 +84,32 @@ foreach ($zip in $zips) {
         $failed++
         continue
     }
-    Move-ToRecycleBin -Path $zip.FullName
-    if (-not $WhatIf) { Write-Host "recycled $($zip.Name)" }
-    $recycledZips++
+    # Recycle is its own try/catch: $ErrorActionPreference='Stop' would otherwise let one
+    # locked/undeletable zip abort the entire run. Leave a failed one in place and continue.
+    try {
+        Move-ToRecycleBin -Path $zip.FullName
+        if (-not $WhatIf) { Write-Host "recycled $($zip.Name)" }
+        $recycledZips++
+    } catch {
+        Write-Warning "recycle failed, leaving in place: $($zip.Name) -- $($_.Exception.Message)"
+        $failed++
+    }
 }
 
 # Only after extraction: strip videos from the merged tree so they never reach scan.js.
-$recycledVideos = 0
 $videos = @(Get-ChildItem -LiteralPath $PhotoRoot -Recurse -File |
     Where-Object { $videoSet.Contains($_.Extension) })
 foreach ($video in $videos) {
-    Move-ToRecycleBin -Path $video.FullName
-    if (-not $WhatIf) { Write-Host "recycled video $($video.FullName)" }
-    $recycledVideos++
+    # Same per-item guard as the zips: one locked video must not abort the whole cleanup.
+    try {
+        Move-ToRecycleBin -Path $video.FullName
+        if (-not $WhatIf) { Write-Host "recycled video $($video.FullName)" }
+        $recycledVideos++
+    } catch {
+        Write-Warning "video recycle failed: $($video.FullName) -- $($_.Exception.Message)"
+        $videosFailed++
+    }
 }
 
-Write-Host "zips extracted=$extracted recycled=$recycledZips failed=$failed videos recycled=$recycledVideos"
+$note = if ($WhatIf) { ' (dry-run -- nothing changed)' } else { '' }
+Write-Host "zips: extracted=$extracted recycled=$recycledZips failed=$failed | videos: recycled=$recycledVideos failed=$videosFailed$note"
