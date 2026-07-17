@@ -1568,7 +1568,10 @@ export const getArtifactBySource = (source, sourceId) => getArtifactBySourceStmt
 // the route schema, and this is a pure read — no write, no ingest_log row.
 export function existingSourceIds(source, sourceIds) {
   const present = [];
+  const checked = new Set(); // dedup input: a duplicate source_id → one lookup, one output at most
   for (const sourceId of sourceIds) {
+    if (checked.has(sourceId)) continue;
+    checked.add(sourceId);
     if (selectIdBySourceStmt.get(source, sourceId)) present.push(sourceId);
   }
   return present;
