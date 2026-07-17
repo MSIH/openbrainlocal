@@ -192,15 +192,19 @@ if ($NoScan) {
     $scanScript = Join-Path $PSScriptRoot 'scan.js'
     Write-Host 'launching scan.js (inject connector)...'
     Write-Log 'scan launch scan.js'
-    # Point the scan at the SAME tree we just extracted into: scan.js's loadDotEnvIfPresent only
-    # fills a var when it's unset (process env wins over the connector .env), so exporting PHOTO_ROOT
-    # here keeps a -PhotoRoot override consistent end-to-end. KEY/URL still come from the .env.
-    $env:PHOTO_ROOT = $PhotoRoot
-    # scan.js streams its progress to stderr; run with EAP=Continue so that output isn't treated as a
-    # terminating error under the script's $ErrorActionPreference='Stop' — success is read from
-    # $LASTEXITCODE. A missing `node` throws CommandNotFoundException, caught below. Neither is fatal.
+    # Point the scan at the SAME tree we just extracted into: scan.js's loadDotEnvIfPresent only fills
+    # a var when it's unset (process env wins over the connector .env), so exporting PHOTO_ROOT here
+    # keeps a -PhotoRoot override consistent end-to-end. KEY/URL still come from the .env. EAP=Continue
+    # guards PowerShell 7.4+, where $PSNativeCommandUseErrorActionPreference defaults on and a native
+    # NON-ZERO EXIT throws under 'Stop'; Continue lets us read $LASTEXITCODE and log a clean
+    # 'scan FAIL (exit N)' instead (a missing `node` still throws CommandNotFoundException → caught).
+    # Both $ErrorActionPreference and $env:PHOTO_ROOT are saved and restored in finally, so a
+    # dot-sourced / in-session run leaves no lingering side effect.
     $prevEAP = $ErrorActionPreference
+    $hadPhotoRoot = Test-Path Env:\PHOTO_ROOT
+    $prevPhotoRoot = if ($hadPhotoRoot) { $env:PHOTO_ROOT } else { $null }
     $ErrorActionPreference = 'Continue'
+    $env:PHOTO_ROOT = $PhotoRoot
     try {
         & node $scanScript
         if ($LASTEXITCODE -eq 0) {
@@ -215,5 +219,7 @@ if ($NoScan) {
         Write-Log "scan FAIL ($($_.Exception.Message))" 'WARN'
     } finally {
         $ErrorActionPreference = $prevEAP
+        # Restore exactly: remove the var if it wasn't set before ($null assignment would leave an empty one).
+        if ($hadPhotoRoot) { $env:PHOTO_ROOT = $prevPhotoRoot } else { Remove-Item Env:\PHOTO_ROOT -ErrorAction SilentlyContinue }
     }
 }
