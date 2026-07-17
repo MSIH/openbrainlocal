@@ -140,9 +140,23 @@ git fetch origin --prune      # drop the remote-tracking ref if GitHub auto-dele
 #    is the intended reload, distinct from and NOT in conflict with the never-KILL-:3000 smoke guard
 #    (which forbids ACCIDENTAL kills of the real server). May require an elevated shell.
 powershell -NoProfile -Command "Restart-Service LifeContext" 2>&1 || echo "WARN: restart failed — run 'Restart-Service LifeContext' manually (may need elevation)"
-# Verify :3000 is back — ANY HTTP response (401/404 included) proves it booted; 000 = still down.
-for i in $(seq 1 10); do code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:3000/ || echo 000); [ "$code" != "000" ] && break; sleep 1; done
-echo "LifeContext :3000 → HTTP $code (non-000 = back up on merged code)"
+# Verify :3000 is back — ANY HTTP response (401/404 included) proves it booted; 000/empty = down.
+# Use `|| true` (NOT `|| echo 000`): curl's -w already prints 000 on failure, so `|| echo 000` would
+# concatenate a SECOND 000 → "000000", which passes the `!= 000` test and falsely reports "up".
+# `|| true` also keeps the failed curl from tripping `set -e` on the assignment.
+code=000
+for i in $(seq 1 15); do
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:3000/ || true)
+  [ "$code" != "000" ] && [ -n "$code" ] && break
+  sleep 1
+done
+if [ "$code" != "000" ] && [ -n "$code" ]; then
+  echo "LifeContext :3000 → HTTP $code (back up on merged code)"
+else
+  # Exit non-zero (like the other Step 7 guards) so a downed memory server after restart is a hard
+  # failure the operator/agent must act on — not a silent exit-0 that reads as success.
+  echo "ERROR: LifeContext :3000 did not respond after restart — investigate NOW (server may be down)"; exit 1
+fi
 ```
 
 Rules:
