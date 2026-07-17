@@ -134,28 +134,44 @@ git worktree prune
 git branch -D "$BRANCH" 2>/dev/null || true
 git fetch origin --prune      # drop the remote-tracking ref if GitHub auto-deleted the head branch
 
-# 4. Restart the live LifeContext service so it loads the JUST-MERGED code and runs the boot-time
-#    schema migration (e.g. proposed_entities.attrs_json). The running node child executes PRE-merge
-#    code until restarted. DELIBERATE service restart via WinSW ("LifeContext Memory Server") — this
-#    is the intended reload, distinct from and NOT in conflict with the never-KILL-:3000 smoke guard
-#    (which forbids ACCIDENTAL kills of the real server). May require an elevated shell.
-powershell -NoProfile -Command "Restart-Service LifeContext" 2>&1 || echo "WARN: restart failed — run 'Restart-Service LifeContext' manually (may need elevation)"
-# Verify :3000 is back — ANY HTTP response (401/404 included) proves it booted; 000/empty = down.
-# Use `|| true` (NOT `|| echo 000`): curl's -w already prints 000 on failure, so `|| echo 000` would
-# concatenate a SECOND 000 → "000000", which passes the `!= 000` test and falsely reports "up".
-# `|| true` also keeps the failed curl from tripping `set -e` on the assignment.
-code=000
-for i in $(seq 1 15); do
-  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:3000/ || true)
-  [ "$code" != "000" ] && [ -n "$code" ] && break
-  sleep 1
-done
-if [ "$code" != "000" ] && [ -n "$code" ]; then
-  echo "LifeContext :3000 → HTTP $code (back up on merged code)"
+# 4. Restart the live LifeContext service ONLY when the merge changed server code/schema — i.e. the
+#    merged PR touched a `src/**` path. A doc/tooling-only merge (docs/**, .claude/**, README) runs
+#    byte-identical server behavior, so a restart would just bounce the live memory server (+ any
+#    active connector, e.g. scan.js) for zero benefit — and every needless restart risks a boot
+#    failure. When it DOES fire it's a DELIBERATE reload via WinSW ("LifeContext Memory Server") that
+#    loads the merged code + runs the boot-time schema migration (e.g. proposed_entities.attrs_json) —
+#    distinct from, and NOT in conflict with, the never-KILL-:3000 smoke guard. May need elevation.
+# Fetch the merged PR's file list FIRST, distinguishing a gh failure from a genuine no-src result:
+# a failed fetch (auth/rate-limit/network) must NOT be read as "no src/** changes" and silently
+# skip a needed restart (that would leave the live server on stale code). On fetch failure, fail
+# SAFE — restart anyway (a needless bounce on a rare gh hiccup beats a silently-stale memory server).
+if changed=$(gh pr view "$PR_NUMBER" --json files --jq '.files[].path' 2>/dev/null); then
+  printf '%s\n' "$changed" | grep -q '^src/' && need_restart=1 || need_restart=0
 else
-  # Exit non-zero (like the other Step 7 guards) so a downed memory server after restart is a hard
-  # failure the operator/agent must act on — not a silent exit-0 that reads as success.
-  echo "ERROR: LifeContext :3000 did not respond after restart — investigate NOW (server may be down)"; exit 1
+  echo "WARN: couldn't fetch the merged PR's file list (gh error) — can't tell if server code changed; restarting to be safe"
+  need_restart=1
+fi
+if [ "$need_restart" = 1 ]; then
+  powershell -NoProfile -Command "Restart-Service LifeContext" 2>&1 || echo "WARN: restart failed — run 'Restart-Service LifeContext' manually (may need elevation)"
+  # Verify :3000 is back — ANY HTTP response (401/404 included) proves it booted; 000/empty = down.
+  # Use `|| true` (NOT `|| echo 000`): curl's -w already prints 000 on failure, so `|| echo 000` would
+  # concatenate a SECOND 000 → "000000", which passes the `!= 000` test and falsely reports "up".
+  # `|| true` also keeps the failed curl from tripping `set -e` on the assignment.
+  code=000
+  for i in $(seq 1 15); do
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:3000/ || true)
+    [ "$code" != "000" ] && [ -n "$code" ] && break
+    sleep 1
+  done
+  if [ "$code" != "000" ] && [ -n "$code" ]; then
+    echo "LifeContext :3000 → HTTP $code (back up on merged code)"
+  else
+    # Exit non-zero (like the other Step 7 guards) so a downed memory server after restart is a hard
+    # failure the operator/agent must act on — not a silent exit-0 that reads as success.
+    echo "ERROR: LifeContext :3000 did not respond after restart — investigate NOW (server may be down)"; exit 1
+  fi
+else
+  echo "doc/tooling-only merge (no src/** changes) — LifeContext restart not needed"
 fi
 ```
 
@@ -166,7 +182,7 @@ Rules:
 - Always `cd "$MAIN"` before `git worktree remove` — you cannot remove the worktree you are standing in (Windows locks it).
 - `git branch -D` is correct here only because `gh` confirmed the merge; outside that guard, never force-delete a branch.
 - **Windows lock is expected, not exceptional.** A locked `git worktree remove` retries once, then recycles the leftover dir — never leave a half-removed worktree registered; `git worktree prune` + the recycle is the fallback.
-- **Restart the LifeContext service after every merge** (step 4) so the running :3000 instance loads the merged code and applies any boot-time schema migration — a merge is not "done" until the live server is restarted. Restart the *service* (`Restart-Service LifeContext`); never `taskkill` the :3000 node PID (that's the smoke-guard's forbidden action). Only smoke servers on throwaway ports are killed by PID.
+- **Restart the LifeContext service after a merge that changed server code/schema** (step 4 — gated on the merged PR touching a `src/**` path) so the running :3000 instance loads the merged code and applies any boot-time schema migration. A doc/tooling-only merge (docs/**, .claude/**, README) skips the restart — bouncing the live server for byte-identical behavior is needless risk. Restart the *service* (`Restart-Service LifeContext`); never `taskkill` the :3000 node PID (that's the smoke-guard's forbidden action). Only smoke servers on throwaway ports are killed by PID.
 
 ## Rules
 - Open the PR yourself only when a governing issue number is on record for the branch (see Clear the gate). Otherwise, output + gate-clear only — do not open the PR without being asked.
