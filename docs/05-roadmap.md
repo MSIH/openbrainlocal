@@ -118,7 +118,7 @@ Pulled forward from the original phase order: dev sessions + texts + photos is a
 1. ✅ Nightly job: `qwen3:8b` (config: `DIGEST_MODEL`) over yesterday's artifacts → one `type='digest'` artifact per day — **shipped** (`src/consolidate.js`, `npm run consolidate`; scheduling is config, see [`06-consolidation.md`](06-consolidation.md))
 2. ✅ Digest prompt treats dev sessions, messages, and photos as categories ("worked on…", "talked with…", "was at…") — **shipped**
 3. ✅ `timeline` and `search` planner awareness of digests (a month-scale question answers from digests, not 400 artifacts) — **shipped** (`src/search.js`: planner prompt steer + ≥`DIGEST_TIMELINE_DAYS` timeline preference)
-4. Event lane + first sessionization rule ships here **only if** an events-producing connector exists by now; otherwise stays deferred (lazy-branching) — **deferred**: no events-producing connector exists
+4. Event lane + first sessionization rule ships here **only if** an events-producing connector exists by now; otherwise stays deferred (lazy-branching) — **event entity representation shipped (#138)**: the `kind='event'` node, temporal (+ optional place-radius) linker, and a bottom-up `events:cluster` sessionization pass (contiguous-day GPS bursts away from home) all landed on top of the #137 place work. Still **deferred**: the trusted top-down **calendar connector** (the "events-producing connector") — a separate connector issue; doc 03 "Event entities (#138)" names it as the remaining dependency.
 
 **Exit test:** "what was I doing last week" answers in one digest-backed response that mentions code, people, and places.
 

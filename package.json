@@ -20,6 +20,7 @@
     "directory:load": "node scripts/load-directory.js",
     "backfill:directory-proposals": "node scripts/backfill-directory-proposals.js",
     "places:cluster": "node scripts/cluster-places.js",
+    "events:cluster": "node scripts/cluster-events.js",
     "schema:ingest": "node scripts/generate-ingest-schema.js",
     "check:boundary": "node scripts/check-boundary.js",
     "geocode:build": "node scripts/build-places.js"
