@@ -945,6 +945,77 @@ export const linkArtifactsToPlace = db.transaction((placeId) => {
   return linked;
 });
 
+// --- Event entities (#138): a time-bounded (optionally place-anchored) episode node. ---
+// An event's span/place lives in attrs_json {start, end, place_entity_id?}; kind='event' is
+// free-text (no DDL / vec impact — an event has no embedding). Reuses proposed_entities.attrs_json
+// and the kind-generalized approveProposedEntity from #137. Linking is temporal (occurred_at in
+// [start,end]) + an optional spatial intersect with the referenced place's radius.
+const eventArtifactsStmt = db.prepare(`
+  SELECT id, latitude, longitude FROM artifacts
+  WHERE occurred_at IS NOT NULL
+    AND datetime(occurred_at) >= datetime(@start)
+    AND datetime(occurred_at) <= datetime(@end)
+`);
+
+/**
+ * Resolve an event by name, or create it (kind='event') with its span/place in attrs_json and seed
+ * name aliases so `about_entity`/`search entities:[…]` resolve it. Mirrors ensurePlaceEntity /
+ * ensureOrgEntity: resolve-first (idempotent — a 2nd call mints 0), `derive:false` (an event name
+ * has no given/family to reduce). Does NOT link artifacts — call linkArtifactsToEvent(id) after.
+ * Returns the event entity id.
+ */
+export function ensureEventEntity(name, { start = null, end = null, place_entity_id = null } = {}) {
+  const existing = resolveEntityIds(name);
+  if (existing.length) return existing[0];
+  const id = Number(insertEntityStmt.run('event', name, JSON.stringify({ start, end, place_entity_id })).lastInsertRowid);
+  for (const alias of nameVariants({ fn: name, derive: false })) insertAliasUnlessTombstoned(id, alias, 'name');
+  logEvent('entity_created', 'events', { entity_id: id, kind: 'event', canonical_name: name });
+  return id;
+}
+
+/**
+ * Link every artifact whose `occurred_at` falls in the event's [start, end] span to it via
+ * entity_links (role 'part_of', OR IGNORE — idempotent, append-only). Dates are normalized to ISO
+ * and compared with SQLite `datetime()` so a 'YYYY-MM-DD HH:MM:SS' occurred_at and an ISO span
+ * compare correctly. If the event references a place (place_entity_id) with usable coords, linking
+ * is ADDITIONALLY constrained to that place's radius (haversine) — coordless artifacts are excluded
+ * since they can't be confirmed at the place; a referenced place with no usable coords degrades to
+ * time-only (logged). An event with a null/invalid span links nothing (logged), never throws. Runs
+ * in its own transaction (nested via savepoint from createEntity/approveProposedEntity). Returns the
+ * count of newly-created links.
+ */
+export const linkArtifactsToEvent = db.transaction((eventId) => {
+  const { start, end, place_entity_id } = getEntity(eventId)?.attrs ?? {};
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+    logEvent('event_linked', 'events', { entity_id: eventId, linked: 0, reason: 'no-span' });
+    return 0;
+  }
+  const rows = eventArtifactsStmt.all({ start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() });
+  // Optional spatial constraint: only when the referenced place has usable coords + radius.
+  let center = null, radiusKm = null;
+  if (place_entity_id != null) {
+    const { latitude, longitude, radius_km } = getEntity(place_entity_id)?.attrs ?? {};
+    const plat = Number(latitude), plon = Number(longitude), prad = Number(radius_km);
+    if (latitude != null && longitude != null && [plat, plon, prad].every(Number.isFinite) && prad > 0) {
+      center = { lat: plat, lon: plon }; radiusKm = prad;
+    } else {
+      logEvent('event_linked', 'events', { entity_id: eventId, place_entity_id, reason: 'place-no-coords-time-only' });
+    }
+  }
+  let linked = 0;
+  for (const r of rows) {
+    if (center) {
+      if (r.latitude == null || r.longitude == null) continue;
+      if (haversineKm(center.lat, center.lon, r.latitude, r.longitude) > radiusKm) continue;
+    }
+    if (insertLinkStmt.run(r.id, eventId, 'part_of', 1.0).changes > 0) linked++;
+  }
+  logEvent('event_linked', 'events', { entity_id: eventId, scanned: rows.length, linked, place_constrained: !!center });
+  return linked;
+});
+
 /**
  * Stage a relation whose related name doesn't resolve yet: recorded on the owner's contact
  * artifact in unresolved_aliases (alias_type='relation', role=raw label). When the related
@@ -1403,9 +1474,10 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
   for (const e of emails) insertAliasUnlessTombstoned(id, e, 'email');
   for (const p of phones) insertAliasUnlessTombstoned(id, p, 'phone');
   logEvent('entity_created', 'contacts-ui', { entity_id: id, kind, canonical_name });
-  // Trusted manual place creation (#137): link in-radius artifacts immediately so the place is
-  // recallable without a separate call. No-ops (never throws) when attrs carry no usable coords.
+  // Trusted manual place/event creation (#137/#138): link matching artifacts immediately so the
+  // entity is recallable without a separate call. No-ops (never throws) on absent coords/span.
   if (kind === 'place') linkArtifactsToPlace(id);
+  else if (kind === 'event') linkArtifactsToEvent(id);
   return id;
 });
 
@@ -1449,10 +1521,12 @@ export const approveProposedEntity = db.transaction((id) => {
   }
   setProposalResolvedStmt.run(entityId, id);
   const linked = resolveStagedArtifactHints(entityId);
-  // A place mints with staged coords, then links every in-radius artifact spatially (#137) — the
-  // location_of edges that make about_entity('<place>') return its photos/receipts.
+  // A place mints with staged coords then links in-radius artifacts (#137); an event mints with its
+  // staged span then links artifacts in that time window (+ place radius if referenced, #138) — the
+  // location_of / part_of edges that make about_entity('<place|event>') return its artifacts.
   const placeLinked = p.suggested_kind === 'place' ? linkArtifactsToPlace(entityId) : 0;
-  logEvent('proposed_entity_approved', 'proposed-entities', { proposal_id: id, entity_id: entityId, created, suggested_kind: p.suggested_kind, suggested_name: p.suggested_name, linked, place_linked: placeLinked });
+  const eventLinked = p.suggested_kind === 'event' ? linkArtifactsToEvent(entityId) : 0;
+  logEvent('proposed_entity_approved', 'proposed-entities', { proposal_id: id, entity_id: entityId, created, suggested_kind: p.suggested_kind, suggested_name: p.suggested_name, linked, place_linked: placeLinked, event_linked: eventLinked });
   return { entity_id: entityId };
 });
 
