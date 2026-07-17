@@ -21,7 +21,7 @@ export function loadDotEnvIfPresent(dir) {
 }
 
 export const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff']);
-export const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.3gp']);
+export const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.3gp', '.3gpp']);
 
 // The core artifact type for a media file — both 'photo' and 'video' are registered ingest
 // types. A consolidated scan (a Google Takeout export especially) mixes both; a video must not

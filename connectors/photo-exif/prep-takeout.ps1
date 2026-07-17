@@ -56,7 +56,7 @@
 param(
     [string]   $PhotoRoot       = 'C:\Artifacts\life-context\photo',
     [string]   $ZipPattern      = 'takeout-*.zip',
-    [string[]] $VideoExtensions = @('.mp4', '.mov', '.m4v', '.avi', '.mkv', '.wmv', '.mpg', '.mpeg', '.3gp', '.webm'),
+    [string[]] $VideoExtensions = @('.mp4', '.mov', '.m4v', '.avi', '.mkv', '.wmv', '.mpg', '.mpeg', '.3gp', '.3gpp', '.webm'),
     [switch]   $WhatIf,
     [switch]   $NoScan,
     [string]   $LogPath

@@ -2,7 +2,7 @@
 
 The single photo/video connector for [LifeContext](https://github.com/msih/life-context). Three scripts make a media library time/place/person-queryable with zero inference, then optionally enrich it with real content understanding. Implements [Milestone 4](https://github.com/msih/life-context/blob/2.0/docs/05-roadmap.md) of the roadmap — the **batch** reference connector, and the proof that upsert-as-enrichment works.
 
-**Handles both a plain photo library and a Google Takeout export** (#171 folded the former `gphotos-takeout` connector in here). Media from a **Google Takeout export** keys under `source='google-photos'`, `source_id='gphotos:<sha256>'`; everything else keys under `source='photo-exif'`, `source_id='<sha256>'`. Takeout-origin is decided **at the scan root, not per file** (#176): the root is a Takeout export when it *is* a `Google Photos` directory, contains one, or holds a Takeout marker (a `Photos from <YYYY>` bucket or an album `metadata.json`) — set `PHOTO_TAKEOUT=true|false` to force it. (Per-file sidecar presence is the wrong signal: Takeout omits a sidecar for some items — e.g. motion-photo `.MP4`s — and keying those generic would duplicate the `google-photos` row.) Person hints come from two sources: the sidecar's `people[]` (Google's face tags) and the immediate containing folder name (a person-named album/folder). Videos (`.mp4`/`.mov`/`.m4v`/`.3gp`) ingest as `type='video'`; images as `type='photo'`.
+**Handles both a plain photo library and a Google Takeout export** (#171 folded the former `gphotos-takeout` connector in here). Media from a **Google Takeout export** keys under `source='google-photos'`, `source_id='gphotos:<sha256>'`; everything else keys under `source='photo-exif'`, `source_id='<sha256>'`. Takeout-origin is decided **at the scan root, not per file** (#176): the root is a Takeout export when it *is* a `Google Photos` directory, contains one, or holds a Takeout marker (a `Photos from <YYYY>` bucket or an album `metadata.json`) — set `PHOTO_TAKEOUT=true|false` to force it. (Per-file sidecar presence is the wrong signal: Takeout omits a sidecar for some items — e.g. motion-photo `.MP4`s — and keying those generic would duplicate the `google-photos` row.) Person hints come from two sources: the sidecar's `people[]` (Google's face tags) and the immediate containing folder name (a person-named album/folder). Videos (`.mp4`/`.mov`/`.m4v`/`.3gp`/`.3gpp`) ingest as `type='video'`; images as `type='photo'`.
 
 ## Architecture decision: where the caption worker lives
 
@@ -15,7 +15,7 @@ The roadmap flags this as an open question ("worker lives with core or alongside
 ## What it does
 
 ### `scan.js` (deliverables 1–2)
-1. Recursively walks `PHOTO_ROOT` for image files (`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.tif`, `.tiff`) **and** videos (`.mp4`, `.mov`, `.m4v`, `.3gp`, ingested as `type='video'`).
+1. Recursively walks `PHOTO_ROOT` for image files (`.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.tif`, `.tiff`) **and** videos (`.mp4`, `.mov`, `.m4v`, `.3gp`, `.3gpp`, ingested as `type='video'`).
 2. Extracts `DateTimeOriginal` and GPS coordinates via `exifr`.
 3. Submits GPS as raw `latitude`/`longitude` — this connector does no geocoding of its own. [LifeContext core](https://github.com/msih/life-context) resolves `place_label` from those coordinates server-side, fully offline (`src/geocode.js`), so every connector with GPS gets place resolution without bundling its own city dataset.
 4. Computes a sha256 `content_hash` of the file bytes (streamed, not loaded fully into memory) — this content hash **is** the `source_id` (see keying above), so a re-organized library, a re-export, or a copy in another folder all key to the same artifact.
@@ -81,7 +81,7 @@ A Google Takeout photo export arrives as multi-part zips (`takeout-*.zip`) that 
 
 1. Extracts each `takeout-*.zip` into `-PhotoRoot` (the parts are independent archives that merge into the shared `Takeout\` tree; `-Force` overwrites byte-identical dupes across parts).
 2. **Only after a zip extracts successfully**, sends that zip to the **Recycle Bin** (a failed extract leaves its zip in place and is logged — nothing is lost to a half-run).
-3. Recurses the extracted tree and sends every movie file (`.mp4,.mov,.m4v,.avi,.mkv,.wmv,.mpg,.mpeg,.3gp,.webm` by default, `-VideoExtensions`) to the **Recycle Bin**, so videos never reach the library.
+3. Recurses the extracted tree and sends every movie file (`.mp4,.mov,.m4v,.avi,.mkv,.wmv,.mpg,.mpeg,.3gp,.3gpp,.webm` by default, `-VideoExtensions`) to the **Recycle Bin**, so videos never reach the library.
 4. **Auto-launches `scan.js`** (the inject connector) so one command does unzip → recycle → ingest. The scan runs in the foreground (prep returns only after it finishes) and only when at least one zip was extracted. `-NoScan` skips it (extract + recycle only). A scan failure is logged (`scan FAIL`) but never negates the successful extract/recycle — `scan.js` is resumable (warm manifest + `/api/v1/exists`), so re-running it later finishes the job. Assumes `node` is on PATH (the same `node scan.js` you'd otherwise run manually).
 
 ```powershell
