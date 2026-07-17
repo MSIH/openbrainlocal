@@ -12,6 +12,7 @@ import * as sqliteVec from 'sqlite-vec';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { DB_PATH, VECTOR_DIMENSION } from './config.js';
+import { haversineKm } from './geocode.js';
 
 export const db = new Database(DB_PATH);
 sqliteVec.load(db);
@@ -105,7 +106,7 @@ db.exec(`
   -- UNIQUE makes proposeEntity idempotent, mirroring unresolved_aliases' discipline.
   CREATE TABLE IF NOT EXISTS proposed_entities (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    suggested_kind     TEXT NOT NULL,                   -- person|org
+    suggested_kind     TEXT NOT NULL,                   -- person|org|place (free-text; #137)
     suggested_name     TEXT NOT NULL,
     alias              TEXT NOT NULL,                   -- normalized resolution key
     alias_type         TEXT NOT NULL,                   -- email|phone|name|handle
@@ -114,6 +115,7 @@ db.exec(`
     confidence         REAL,
     status             TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
     resolved_entity_id INTEGER REFERENCES entities(id),
+    attrs_json         TEXT,                            -- staged geo/span for a place/event proposal (#137); NULL for person/org
     created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(suggested_name, alias, alias_type)
   );
@@ -203,6 +205,15 @@ if (!db.prepare("PRAGMA table_info(entities)").all().some((c) => c.name === 'mer
     .run('schema_migration', 'db.js', JSON.stringify({ migration: 'entities.merged_into' }));
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_entities_merged_into ON entities(merged_into)');
+
+// Guarded migration (#137): carry a place/event proposal's staged geo/span so approveProposedEntity
+// can copy it into the minted entity. Nullable — a person/org proposal leaves it NULL. Same
+// table_info-guarded ALTER as merged_into above (ADD COLUMN doesn't rewrite existing rows).
+if (!db.prepare('PRAGMA table_info(proposed_entities)').all().some((c) => c.name === 'attrs_json')) {
+  db.exec('ALTER TABLE proposed_entities ADD COLUMN attrs_json TEXT');
+  db.prepare('INSERT INTO ingest_log (event_type, actor, details) VALUES (?, ?, ?)')
+    .run('schema_migration', 'db.js', JSON.stringify({ migration: 'proposed_entities.attrs_json' }));
+}
 
 // Data migration (#88): business contacts flagged isCompany were historically inserted as
 // kind='person' (the 'org' schema slot went unused). Fill the derived classification from the
@@ -419,11 +430,11 @@ const selectRelationHintsStmt = db.prepare(`SELECT artifact_id, role FROM unreso
 const selectSelfEntityStmt = db.prepare(`SELECT entity_id FROM entity_links WHERE artifact_id = ? AND role = 'self' LIMIT 1`);
 // Proposed entities (#119): stage / list / read / transition rows in proposed_entities.
 const insertProposalStmt = db.prepare(`
-  INSERT OR IGNORE INTO proposed_entities (suggested_kind, suggested_name, alias, alias_type, artifact_id, source, confidence)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  INSERT OR IGNORE INTO proposed_entities (suggested_kind, suggested_name, alias, alias_type, artifact_id, source, confidence, attrs_json)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const listProposalsStmt = db.prepare(`
-  SELECT id, suggested_kind, suggested_name, alias, alias_type, artifact_id, source, confidence, status, resolved_entity_id, created_at
+  SELECT id, suggested_kind, suggested_name, alias, alias_type, artifact_id, source, confidence, status, resolved_entity_id, attrs_json, created_at
   FROM proposed_entities WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ?
 `);
 const getProposalStmt = db.prepare('SELECT * FROM proposed_entities WHERE id = ?');
@@ -861,6 +872,78 @@ export function ensureOrgEntity(name) {
   for (const alias of nameVariants({ fn: name, derive: false })) insertAliasUnlessTombstoned(id, alias, 'name');
   return id;
 }
+
+// --- Place entities (#137): a geo-anchored, human-approved location node. ---
+// A place's coordinates live in attrs_json {latitude, longitude, radius_km}; kind='place' is
+// free-text (no DDL / vec / VECTOR_DIMENSION impact — a place has no embedding). Reuses the #68
+// bbox+haversine prefilter pattern; haversineKm comes from geocode.js (no import cycle —
+// geocode.js is I/O-pure and imports nothing from db.js).
+const KM_PER_DEG_LAT = 111.32;   // matches search.js's geo-radius prefilter (#68)
+const POLE_COS_EPSILON = 1e-6;   // below this |cos(lat)| the longitude span blows up — cover the whole band
+const LON_ABS_MAX = 180;         // longitude range is [-180, 180]
+const placeBboxStmt = db.prepare(`
+  SELECT id, latitude, longitude FROM artifacts
+  WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+    AND latitude BETWEEN @latMin AND @latMax
+    AND longitude BETWEEN @lonMin AND @lonMax
+`);
+
+/**
+ * Resolve a place by name, or create it (kind='place') with its geo in attrs_json and seed name
+ * aliases so `about_entity`/`search entities:[…]` resolve it. Mirrors ensureOrgEntity (#125):
+ * resolve-first (idempotent — a 2nd call mints 0 entities/aliases), `derive:false` (a place name
+ * has no given/family to reduce, like an org). Does NOT link artifacts — call
+ * linkArtifactsToPlace(id) after. Returns the place entity id.
+ */
+export function ensurePlaceEntity(name, { latitude = null, longitude = null, radius_km = null } = {}) {
+  const existing = resolveEntityIds(name);
+  if (existing.length) return existing[0];
+  const id = Number(insertEntityStmt.run('place', name, JSON.stringify({ latitude, longitude, radius_km })).lastInsertRowid);
+  for (const alias of nameVariants({ fn: name, derive: false })) insertAliasUnlessTombstoned(id, alias, 'name');
+  logEvent('entity_created', 'places', { entity_id: id, kind: 'place', canonical_name: name });
+  return id;
+}
+
+/**
+ * Link every GPS-bearing artifact within a place's radius to it via entity_links (role
+ * 'location_of', OR IGNORE — idempotent, append-only). A degree bounding box narrows the SQL scan,
+ * then an exact haversine pass trims it to a true circle (the #68 geoCandidateIds pattern). A place
+ * with null/invalid coords or radius links nothing (logged), never throws. Runs in its own
+ * transaction (nested via savepoint when called from createEntity/approveProposedEntity). Returns
+ * the count of newly-created links.
+ */
+export const linkArtifactsToPlace = db.transaction((placeId) => {
+  const { latitude, longitude, radius_km } = getEntity(placeId)?.attrs ?? {};
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  const radiusKm = Number(radius_km);
+  // Reject null/absent coords EXPLICITLY: Number(null) is 0, so relying on Number.isFinite alone
+  // would center the search on (0,0) instead of no-op'ing. lat/lon of 0 (equator / prime meridian)
+  // is a legitimate coordinate and still passes.
+  if (latitude == null || longitude == null || ![lat, lon, radiusKm].every(Number.isFinite) || radiusKm <= 0) {
+    logEvent('place_linked', 'places', { entity_id: placeId, linked: 0, reason: 'no-coords-or-radius' });
+    return 0;
+  }
+  const dLat = radiusKm / KM_PER_DEG_LAT;
+  const cosLat = Math.cos((lat * Math.PI) / 180);
+  // Near a pole longitude is meaningless (all meridians converge), so the box spans the ENTIRE
+  // [-180, 180] band regardless of lon (matching geoCandidateIds #68 — NOT lon±180, which would
+  // exclude valid longitudes when lon≠0); otherwise a degree-based half-width around lon.
+  const nearPole = Math.abs(cosLat) < POLE_COS_EPSILON;
+  const dLon = nearPole ? 0 : radiusKm / (KM_PER_DEG_LAT * Math.abs(cosLat));
+  const rows = placeBboxStmt.all({
+    latMin: lat - dLat, latMax: lat + dLat,
+    lonMin: nearPole ? -LON_ABS_MAX : lon - dLon,
+    lonMax: nearPole ? LON_ABS_MAX : lon + dLon,
+  });
+  let linked = 0;
+  for (const r of rows) {
+    if (haversineKm(lat, lon, r.latitude, r.longitude) > radiusKm) continue;
+    if (insertLinkStmt.run(r.id, placeId, 'location_of', 1.0).changes > 0) linked++;
+  }
+  logEvent('place_linked', 'places', { entity_id: placeId, scanned: rows.length, linked });
+  return linked;
+});
 
 /**
  * Stage a relation whose related name doesn't resolve yet: recorded on the owner's contact
@@ -1320,6 +1403,9 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
   for (const e of emails) insertAliasUnlessTombstoned(id, e, 'email');
   for (const p of phones) insertAliasUnlessTombstoned(id, p, 'phone');
   logEvent('entity_created', 'contacts-ui', { entity_id: id, kind, canonical_name });
+  // Trusted manual place creation (#137): link in-radius artifacts immediately so the place is
+  // recallable without a separate call. No-ops (never throws) when attrs carry no usable coords.
+  if (kind === 'place') linkArtifactsToPlace(id);
   return id;
 });
 
@@ -1330,8 +1416,9 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
 // Returns true when a NEW proposal row was written (false when the UNIQUE key already existed —
 // INSERT OR IGNORE). Callers that count staged proposals (the #154 backfill) rely on this to stay
 // idempotent; resolveEntityHints ignores the return.
-function proposeEntity({ suggested_kind, name, alias, alias_type, artifact_id = null, source = null, confidence = null }) {
-  return insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence).changes > 0;
+export function proposeEntity({ suggested_kind, name, alias, alias_type, artifact_id = null, source = null, confidence = null, attrs_json = null }) {
+  const attrs = attrs_json == null ? null : (typeof attrs_json === 'string' ? attrs_json : JSON.stringify(attrs_json));
+  return insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence, attrs).changes > 0;
 }
 
 // List proposals by status (default the review queue: pending), newest first.
@@ -1354,14 +1441,18 @@ export const approveProposedEntity = db.transaction((id) => {
   if (existing.length) {
     entityId = existing[0].entity_id;
   } else {
-    entityId = Number(insertEntityStmt.run(p.suggested_kind, p.suggested_name, '{}').lastInsertRowid);
+    // A place/event proposal carries its staged geo/span in attrs_json (#137); person/org have NULL.
+    entityId = Number(insertEntityStmt.run(p.suggested_kind, p.suggested_name, p.attrs_json ?? '{}').lastInsertRowid);
     for (const v of nameVariants({ fn: p.suggested_name, derive: p.suggested_kind === 'person' })) insertAliasUnlessTombstoned(entityId, v, 'name');
     insertAliasUnlessTombstoned(entityId, p.alias, p.alias_type);
     created = true;
   }
   setProposalResolvedStmt.run(entityId, id);
   const linked = resolveStagedArtifactHints(entityId);
-  logEvent('proposed_entity_approved', 'proposed-entities', { proposal_id: id, entity_id: entityId, created, suggested_kind: p.suggested_kind, suggested_name: p.suggested_name, linked });
+  // A place mints with staged coords, then links every in-radius artifact spatially (#137) — the
+  // location_of edges that make about_entity('<place>') return its photos/receipts.
+  const placeLinked = p.suggested_kind === 'place' ? linkArtifactsToPlace(entityId) : 0;
+  logEvent('proposed_entity_approved', 'proposed-entities', { proposal_id: id, entity_id: entityId, created, suggested_kind: p.suggested_kind, suggested_name: p.suggested_name, linked, place_linked: placeLinked });
   return { entity_id: entityId };
 });
 
