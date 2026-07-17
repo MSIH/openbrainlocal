@@ -282,6 +282,7 @@ test('scan.js: a video ingests as type=video, a still as type=photo', async () =
   assert.equal(video.type, 'video');
   assert.match(video.text_repr, /^Video[: ]/, "a video's text_repr says Video, not Photo");
   const gpp = arts.find((a) => a.raw_path.endsWith('oldclip.3gpp'));
+  assert.ok(gpp, '.3gpp file was walked and ingested (not skipped)');
   assert.equal(gpp.type, 'video', '.3gpp is recognized as a video, not skipped');
   assert.equal(arts.find((a) => a.raw_path.endsWith('still.jpg')).type, 'photo');
 });
