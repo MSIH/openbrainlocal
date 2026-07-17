@@ -58,6 +58,15 @@ Rubric: any Blocker → BLOCK; no Blockers but ≥1 Should-fix ≥8 → CHANGES-
 ## Smoke-test gate (required before any APPROVE)
 Boot the server against local Ollama and confirm the loop end-to-end: `POST /api/remember` then `/api/recall` returns the stored memory with a distance score and **0 server errors** (tail the server log). Needs Ollama + `qwen3-embedding:0.6b` on :11434. If unavailable, say so and do NOT APPROVE on assumption. For hook/doc-only changes with no server code touched, verify the hooks (`bash -n`, behavior) instead and note the server was unchanged.
 
+**Isolate the smoke server, then reap it (Windows).** Boot it on a **throwaway `PORT`** (e.g. `4123`) and a **temp `DB_PATH`** (under the scratchpad) so it never touches the real `:3000` LifeContext service or the real `.db`. When done, **kill it by its port's PID, not by the `$!` job**: Git Bash `kill $PID` does **not** reliably reap a detached `node src/server.js` on Windows, so a survivor lingers — holding the worktree dir (breaks Step 7's `git worktree remove`) and, on a reused port, answering later requests with a stale key (a confusing 401). Tear down and verify the port is free:
+```bash
+# Reap by the LISTENING port's PID — Git Bash `kill`/`$!` can't reliably reap a detached node on
+# Windows. `:$PORT\b` anchors the port digits so :4123 doesn't also match :41230 or a foreign address.
+netstat -ano | grep LISTENING | grep -E ":$PORT\b" | awk '{print $5}' | sort -u | while read -r pid; do [ -n "$pid" ] && taskkill //PID "$pid" //F >/dev/null 2>&1; done
+netstat -ano | grep LISTENING | grep -qE ":$PORT\b" && echo "WARN: $PORT still up" || echo "$PORT down"
+```
+NEVER target port `3000` here — that's the real LifeContext service (see the Step 7 guard).
+
 ## Step 4 — Auto-fix (apply broadly)
 Apply all Nits and all deterministic Should-fix items (single correct edit; naming, missing guard/`ArgumentNull`-equivalent, empty-catch→log, interpolated-log→structured, missing `EnsureSuccessStatusCode`-equivalent, test stubs) without per-item prompting. **Hold for a single go/no-go**: structural refactors, public-API/signature changes, behavior changes. Apply in batches; after each batch run the smoke test (and any `npm` build/lint/test); on red, revert that batch (`git restore .` + `git clean -fd` for scaffolded files) and re-classify. Commit batches separately. Re-run and re-verdict before proceeding.
 
@@ -103,26 +112,47 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   echo "Worktree has uncommitted tracked changes — STOP, report to user, do NOT remove"; exit 1
 fi
 
-# 2. Move to the primary checkout and sync the default branch (CLAUDE.md post-merge step).
+# 2. Move to the primary checkout (OUT of the worktree — else Windows locks the dir you stand in)
+#    and sync the default branch (CLAUDE.md post-merge step).
 cd "$MAIN" && git checkout 2.0 && git pull origin 2.0
 
-# 3. Remove the merged worktree, then prune the branch.
-#    --force clears disposable UNTRACKED artifacts (PR-body temp files, .pre-pr-review-done marker);
-#    tracked changes were already rejected by the guard above.
-git worktree remove "$WORKTREE" --force
+# 3. Remove the merged worktree, then prune the branch. On Windows the dir is often locked — by a
+#    transient Defender/indexer handle (clears on a short retry) or, rarely, a smoke-test server the
+#    gate failed to reap (its cwd is the worktree). So `git worktree remove --force` can fail
+#    "Permission denied": retry once, then fall back to Recycle-Bin'ing the leftover dir (registration
+#    is pruned first, so recycle is safe and matches the Recycle-over-delete preference). --force also
+#    clears disposable UNTRACKED artifacts (temp files, markers). If recycle ALSO reports the dir in
+#    use, a live smoke server is holding it — kill it by ITS throwaway port (the one the smoke gate
+#    used, e.g. 4123), never by a blind port-range sweep and NEVER :3000, then re-run the recycle.
+git worktree remove "$WORKTREE" --force || { sleep 2; git worktree remove "$WORKTREE" --force || {
+  echo "worktree remove still locked — pruning registration and recycling the leftover dir"
+  git worktree prune
+  powershell -NoProfile -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('$WORKTREE','OnlyErrorDialogs','SendToRecycleBin')" 2>&1 || echo "MANUAL: a live process holds $WORKTREE — kill the stray smoke server by its throwaway port, then recycle"; }; }
 git worktree prune
 # Branch is safe to force-delete: gh confirmed MERGED, and a squash-merge leaves the branch tip
 # unreachable from 2.0 (so plain `git branch -d` would wrongly refuse).
 git branch -D "$BRANCH" 2>/dev/null || true
 git fetch origin --prune      # drop the remote-tracking ref if GitHub auto-deleted the head branch
+
+# 4. Restart the live LifeContext service so it loads the JUST-MERGED code and runs the boot-time
+#    schema migration (e.g. proposed_entities.attrs_json). The running node child executes PRE-merge
+#    code until restarted. DELIBERATE service restart via WinSW ("LifeContext Memory Server") — this
+#    is the intended reload, distinct from and NOT in conflict with the never-KILL-:3000 smoke guard
+#    (which forbids ACCIDENTAL kills of the real server). May require an elevated shell.
+powershell -NoProfile -Command "Restart-Service LifeContext" 2>&1 || echo "WARN: restart failed — run 'Restart-Service LifeContext' manually (may need elevation)"
+# Verify :3000 is back — ANY HTTP response (401/404 included) proves it booted; 000 = still down.
+for i in $(seq 1 10); do code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://localhost:3000/ || echo 000); [ "$code" != "000" ] && break; sleep 1; done
+echo "LifeContext :3000 → HTTP $code (non-000 = back up on merged code)"
 ```
 
 Rules:
 - **No confirmation prompt.** This is the default, not a gate. Asking "should I remove the worktree?" after a merge is exactly what this step exists to eliminate.
 - Guard on `state == MERGED` first (via `gh`, the source of truth). NEVER remove a worktree whose PR is still open or was closed unmerged.
 - Refuse on uncommitted **tracked** changes (`git status --porcelain --untracked-files=no` non-empty) — STOP and report; do not `--force` over real work. Disposable untracked artifacts (temp PR-body files, markers) are fine to clear.
-- Always `cd "$MAIN"` before `git worktree remove` — you cannot remove the worktree you are standing in.
+- Always `cd "$MAIN"` before `git worktree remove` — you cannot remove the worktree you are standing in (Windows locks it).
 - `git branch -D` is correct here only because `gh` confirmed the merge; outside that guard, never force-delete a branch.
+- **Windows lock is expected, not exceptional.** A locked `git worktree remove` retries once, then recycles the leftover dir — never leave a half-removed worktree registered; `git worktree prune` + the recycle is the fallback.
+- **Restart the LifeContext service after every merge** (step 4) so the running :3000 instance loads the merged code and applies any boot-time schema migration — a merge is not "done" until the live server is restarted. Restart the *service* (`Restart-Service LifeContext`); never `taskkill` the :3000 node PID (that's the smoke-guard's forbidden action). Only smoke servers on throwaway ports are killed by PID.
 
 ## Rules
 - Open the PR yourself only when a governing issue number is on record for the branch (see Clear the gate). Otherwise, output + gate-clear only — do not open the PR without being asked.
