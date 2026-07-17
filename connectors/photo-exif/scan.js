@@ -18,6 +18,10 @@ const PHOTO_ROOT = process.env.PHOTO_ROOT;
 const MANIFEST_PATH = process.env.PHOTO_EXIF_MANIFEST_PATH
   || path.join(os.homedir(), '.life-context', 'photo-exif-manifest.json');
 const BATCH_MAX = 100; // contract cap (docs/04-connector-contract.md §2)
+// Wall-clock throttle for the progress line + mid-run manifest persistence (#197). A time
+// interval (not per-N-files) keeps a steady cadence across both the fast skip-cache prefix and
+// the slow hash+EXIF path. 0 disables progress lines and mid-run writes (end-of-run write only).
+const PROGRESS_INTERVAL_MS = Number(process.env.PHOTO_EXIF_PROGRESS_INTERVAL_MS ?? 30000);
 // Google Takeout `people[]` are user-curated face tags — high trust, but core caps name/handle
 // hints at 0.9 regardless (doc 04 §4), so 0.9 is the effective ceiling we ask for (#152). The
 // folder-name pictured hint (a person-named album/folder) rides the same confidence.
@@ -135,6 +139,9 @@ async function main() {
   const manifest = readManifest();
   let scanned = 0;
   let skippedUnchanged = 0;
+  let ingested = 0;
+  const startMs = Date.now();
+  let lastTick = startMs;
   // Keyed by source_id so byte-identical copies collapse to one payload (with unioned hints)
   // before the wire. Each entry carries every contributing copy's relPath+statKey so the manifest
   // (still keyed by relPath — the unchanged-file skip cache) is updated for all of them on success.
@@ -153,12 +160,27 @@ async function main() {
           // Only cache success — a failed item must be retried on the next scan, not skipped
           // as "unchanged" forever. Mark every copy that shared this source_id.
           for (const { relPath, statKey } of group[i].copies) manifest[relPath] = statKey;
+          ingested++;
         }
       });
     }
   };
 
+  // Time-throttled progress + resumable manifest (#197): at most once per interval, emit a
+  // progress line and persist the manifest so a killed scan resumes to within one interval.
+  // Interval 0 disables both (final-write-only), preserving the pre-#197 behavior byte-for-byte.
+  const maybeTick = () => {
+    if (!PROGRESS_INTERVAL_MS) return;
+    const now = Date.now();
+    if (now - lastTick < PROGRESS_INTERVAL_MS) return;
+    lastTick = now;
+    const elapsed = Math.round((now - startMs) / 1000);
+    console.error(`photo-exif: progress — ${scanned} scanned, ${skippedUnchanged} skipped, ${ingested} ingested, ${elapsed}s elapsed`);
+    writeManifest(manifest);
+  };
+
   for await (const { absPath, relPath } of walkMediaFiles(PHOTO_ROOT)) {
+    maybeTick();
     // statSync AND buildPayload share one try/catch — a permission error or broken file entry
     // can throw from either, and either way it must skip just this file, not abort the scan.
     let statKey;
