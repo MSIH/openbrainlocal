@@ -164,7 +164,23 @@ export function ingestClient({ url, apiKey }) {
     return res.json();
   }
 
-  return { postIngest, postIngestBatch };
+  // Read-only existence check (#198): which of these source_ids core already has, so scan.js can
+  // skip the expensive EXIF-read + ingest for already-stored files. Returns `{ exists: [...] }`, or
+  // `null` on 404 — the signal that core predates the endpoint, so the caller falls back to full
+  // processing rather than hard-failing an upgraded connector against an older server. Other non-ok
+  // statuses throw (like postIngestBatch) — a 500 is a real error, not a reason to skip the check.
+  async function postExists({ source, source_ids }) {
+    const res = await fetch(`${url}/api/v1/exists`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
+      body: JSON.stringify({ source, source_ids }),
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`exists returned ${res.status}`);
+    return res.json();
+  }
+
+  return { postIngest, postIngestBatch, postExists };
 }
 
 // #84 — photographed contacts (entity_id/name/raw_path) for face-worker's suggest-labels

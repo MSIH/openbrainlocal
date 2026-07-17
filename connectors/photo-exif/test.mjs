@@ -54,6 +54,29 @@ function startMockServer(handler) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, requests })));
 }
 
+// Mock the connector-facing REST surface (#198): /api/v1/exists → { exists } and
+// /api/v1/ingest/batch → per-item created results. `exists(sourceIds)` lets a test declare which
+// ids core already has (default: none stored → every file is new, i.e. pre-#198 behavior). Pass
+// `existsStatus: 404` to simulate an older core with no /exists route (graceful-degrade path).
+function ingestMock({ exists = () => [], existsStatus = 200 } = {}) {
+  return (req, body, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/api/v1/exists') {
+      if (existsStatus !== 200) { res.statusCode = existsStatus; res.end(JSON.stringify({ error: 'not found' })); return; }
+      res.end(JSON.stringify({ exists: exists(body.source_ids) }));
+      return;
+    }
+    res.end(JSON.stringify({
+      summary: {},
+      results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })),
+    }));
+  };
+}
+
+// The single /api/v1/ingest/batch request (scan.js also calls /api/v1/exists first, #198).
+const batchReq = (requests) => requests.find((r) => r.url === '/api/v1/ingest/batch');
+const batchReqs = (requests) => requests.filter((r) => r.url === '/api/v1/ingest/batch');
+
 function run(script, env, args = []) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, script), ...args], {
@@ -73,13 +96,7 @@ test('scan.js: EXIF + GPS photo, GPS-only photo, no-metadata photo, unchanged-fi
   writeFileSync(path.join(tmp, 'gps-only.jpg'), jpegWithExif({ lat: 51.5074, lon: -0.1278 }));
   writeFileSync(path.join(tmp, 'no-metadata.jpg'), Buffer.from(BASE_JPEG_BASE64, 'base64'));
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({
-      summary: {},
-      results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })),
-    }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
 
   const manifestPath = path.join(tmp, 'manifest.json');
   const result = await run('scan.js', {
@@ -92,8 +109,8 @@ test('scan.js: EXIF + GPS photo, GPS-only photo, no-metadata photo, unchanged-fi
   server.closeAllConnections();
   server.close();
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(requests.length, 1);
-  const artifacts = requests[0].body.artifacts;
+  assert.equal(batchReqs(requests).length, 1);
+  const artifacts = batchReq(requests).body.artifacts;
   assert.equal(artifacts.length, 3);
 
   const both = artifacts.find((a) => a.raw_path.endsWith('with-both.jpg'));
@@ -165,9 +182,7 @@ test('scan.js: Google Takeout sidecar → pictured hints + takenTime/geo fallbac
   writeFileSync(path.join(tmp, 'bad-sidecar.jpg'), noExif('bad-sidecar'));
   writeFileSync(path.join(tmp, 'bad-sidecar.jpg.supplemental-metadata.json'), '{ not valid json');
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'), TZ: 'UTC',
@@ -176,7 +191,7 @@ test('scan.js: Google Takeout sidecar → pictured hints + takenTime/geo fallbac
   server.closeAllConnections();
   server.close();
   assert.equal(result.status, 0, result.stderr);
-  const arts = requests[0].body.artifacts;
+  const arts = batchReq(requests).body.artifacts;
   const by = (name) => arts.find((a) => a.raw_path.endsWith(name));
 
   const full = by('sidecar-full.jpg');
@@ -224,12 +239,7 @@ test('scan.js: same filename, different content in different subdirectories gets
   writeFileSync(path.join(tmp, '2019', 'trip', 'IMG_1234.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00' }));
   writeFileSync(path.join(tmp, '2020', 'trip', 'IMG_1234.jpg'), jpegWithExif({ dateTimeOriginal: '2020:03:04 14:30:00' }));
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.end(JSON.stringify({
-      summary: {},
-      results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })),
-    }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
 
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`,
@@ -241,7 +251,7 @@ test('scan.js: same filename, different content in different subdirectories gets
   server.close();
   assert.equal(result.status, 0, result.stderr);
 
-  const artifacts = requests[0].body.artifacts;
+  const artifacts = batchReq(requests).body.artifacts;
   assert.equal(artifacts.length, 2, 'two distinct photos, not one collapsed into the other');
   const ids = artifacts.map((a) => a.source_id);
   assert.notEqual(ids[0], ids[1], 'different bytes -> different content-hash source_ids');
@@ -257,9 +267,7 @@ test('scan.js: a video ingests as type=video, a still as type=photo', async () =
   writeFileSync(path.join(tmp, 'clip.mp4'), Buffer.from('fake-mp4-bytes'));
   writeFileSync(path.join(tmp, 'still.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00' }));
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
@@ -267,7 +275,7 @@ test('scan.js: a video ingests as type=video, a still as type=photo', async () =
   server.closeAllConnections();
   server.close();
   assert.equal(result.status, 0, result.stderr);
-  const arts = requests[0].body.artifacts;
+  const arts = batchReq(requests).body.artifacts;
   assert.equal(arts.length, 2, 'both the video and the still are walked (walkMediaFiles)');
   const video = arts.find((a) => a.raw_path.endsWith('clip.mp4'));
   assert.equal(video.type, 'video');
@@ -288,9 +296,7 @@ test('scan.js: byte-identical copies in different folders collapse to one payloa
   writeFileSync(path.join(tmp, 'Bob Album', 'photo.jpg'), bytes);
   writeFileSync(path.join(tmp, 'Bob Album', 'photo.jpg.supplemental-metadata.json'), JSON.stringify({ people: [{ name: 'Bob' }] }));
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
@@ -299,7 +305,7 @@ test('scan.js: byte-identical copies in different folders collapse to one payloa
   server.closeAllConnections();
   server.close();
   assert.equal(result.status, 0, result.stderr);
-  const arts = requests[0].body.artifacts;
+  const arts = batchReq(requests).body.artifacts;
   assert.equal(arts.length, 1, 'two byte-identical copies collapse to one payload');
   const [art] = arts;
   assert.equal(art.source, 'google-photos');
@@ -322,9 +328,7 @@ test('scan.js: folder-name pictured hint — subfolder yes, root none, year buck
   mkdirSync(path.join(tmp, 'Photos from 2019'));
   writeFileSync(path.join(tmp, 'Photos from 2019', 'y.jpg'), Buffer.from('img-year'));
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
@@ -332,7 +336,7 @@ test('scan.js: folder-name pictured hint — subfolder yes, root none, year buck
   server.closeAllConnections();
   server.close();
   assert.equal(result.status, 0, result.stderr);
-  const arts = requests[0].body.artifacts;
+  const arts = batchReq(requests).body.artifacts;
   const by = (name) => arts.find((a) => a.raw_path.endsWith(name));
   assert.equal(by('root.jpg').entity_hints, undefined, 'a file directly in PHOTO_ROOT emits no folder hint');
   assert.deepEqual(by('m.jpg').entity_hints, [{ alias: 'Aunt Mary', alias_type: 'name', role: 'pictured', confidence: 0.9 }], 'a person-named subfolder becomes a pictured hint');
@@ -348,9 +352,7 @@ test('scan.js: Takeout detected at tree level — a sidecar-less .mp4 keys googl
   mkdirSync(tmp);
   writeFileSync(path.join(tmp, 'IMG_7078.MP4'), Buffer.from('sidecar-less-motion-video-bytes')); // no sidecar
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(base, 'manifest.json'),
@@ -358,7 +360,7 @@ test('scan.js: Takeout detected at tree level — a sidecar-less .mp4 keys googl
   server.closeAllConnections();
   server.close();
   assert.equal(result.status, 0, result.stderr);
-  const [art] = requests[0].body.artifacts;
+  const [art] = batchReq(requests).body.artifacts;
   assert.equal(art.type, 'video');
   assert.equal(art.source, 'google-photos', 'sidecar-less Takeout media keys google-photos, not generic');
   assert.equal(art.source_id, `gphotos:${art.content_hash}`);
@@ -373,9 +375,7 @@ test('scan.js: album-layout Takeout (child dirs with metadata.json, no year buck
   writeFileSync(path.join(tmp, 'Adam Schneider', 'metadata.json'), JSON.stringify({ title: 'Adam Schneider' }));
   writeFileSync(path.join(tmp, 'Adam Schneider', 'IMG_9001.MP4'), Buffer.from('album-layout-sidecar-less-video')); // no sidecar
 
-  const { server, port, requests } = await startMockServer((req, body, res) => {
-    res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
-  });
+  const { server, port, requests } = await startMockServer(ingestMock());
   const result = await run('scan.js', {
     LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
     PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest.json'),
@@ -383,7 +383,7 @@ test('scan.js: album-layout Takeout (child dirs with metadata.json, no year buck
   server.closeAllConnections();
   server.close();
   assert.equal(result.status, 0, result.stderr);
-  const mp4 = requests[0].body.artifacts.find((a) => a.raw_path.endsWith('IMG_9001.MP4'));
+  const mp4 = batchReq(requests).body.artifacts.find((a) => a.raw_path.endsWith('IMG_9001.MP4'));
   assert.equal(mp4.source, 'google-photos', 'album-layout Takeout detected via child metadata.json');
   assert.equal(mp4.source_id, `gphotos:${mp4.content_hash}`);
 });
@@ -392,9 +392,7 @@ test('scan.js: PHOTO_TAKEOUT overrides detection both ways (#176)', async () => 
   const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-override-'));
   writeFileSync(path.join(tmp, 'x.jpg'), Buffer.from('override-bytes')); // no sidecar, no marker
   const runOnce = async (override) => {
-    const { server, port, requests } = await startMockServer((req, body, res) => {
-      res.end(JSON.stringify({ summary: {}, results: body.artifacts.map((_, i) => ({ id: i + 1, created: true, resolved_entities: 0, unresolved_aliases: 0 })) }));
-    });
+    const { server, port, requests } = await startMockServer(ingestMock());
     const result = await run('scan.js', {
       LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
       PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, `manifest-${override}.json`),
@@ -403,10 +401,57 @@ test('scan.js: PHOTO_TAKEOUT overrides detection both ways (#176)', async () => 
     server.closeAllConnections();
     server.close();
     assert.equal(result.status, 0, result.stderr);
-    return requests[0].body.artifacts[0];
+    return batchReq(requests).body.artifacts[0];
   };
   assert.equal((await runOnce('true')).source, 'google-photos', 'PHOTO_TAKEOUT=true forces google-photos');
   assert.equal((await runOnce('false')).source, 'photo-exif', 'PHOTO_TAKEOUT=false forces generic');
+});
+
+test('scan.js: /exists skips already-stored files (no ingest) and a 404 falls back to full processing (#198)', async () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-exists-'));
+  // Two distinct files → two distinct content hashes → two distinct source_ids. No sidecar/marker,
+  // so generic keying: source='photo-exif', source_id === the bare content hash.
+  writeFileSync(path.join(tmp, 'stored.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00' }));
+  writeFileSync(path.join(tmp, 'new.jpg'), jpegWithExif({ dateTimeOriginal: '2020:03:04 14:30:00' }));
+  const storedHash = sha256File(path.join(tmp, 'stored.jpg'));
+  const newHash = sha256File(path.join(tmp, 'new.jpg'));
+
+  // (1) /exists reports stored.jpg already present → only new.jpg is enriched + ingested.
+  const manifestPath = path.join(tmp, 'manifest.json');
+  const { server, port, requests } = await startMockServer(ingestMock({ exists: (ids) => ids.filter((id) => id === storedHash) }));
+  const result = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${port}`, LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: manifestPath, TZ: 'UTC',
+  });
+  server.closeAllConnections();
+  server.close();
+  assert.equal(result.status, 0, result.stderr);
+
+  const existsReq = requests.find((r) => r.url === '/api/v1/exists');
+  assert.ok(existsReq, 'scan.js calls /api/v1/exists');
+  assert.deepEqual([...existsReq.body.source_ids].sort(), [newHash, storedHash].sort(), 'both hashed source_ids are checked');
+  const batch = batchReq(requests);
+  assert.equal(batch.body.artifacts.length, 1, 'only the not-already-stored file is ingested');
+  assert.equal(batch.body.artifacts[0].source_id, newHash);
+  assert.match(result.stderr, /skip-check — 2 hashed, 1 already stored, 1 new/);
+
+  // The already-stored file is still recorded in the manifest, so subsequent LOCAL runs skip it via
+  // a cheap stat with no hash and no server round-trip.
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert.equal(Object.keys(manifest).length, 2, 'both files (stored + ingested) are manifest-recorded');
+
+  // (2) 404 fallback: an older core with no /exists route → process everything, no crash. A fresh
+  // manifest path forces both files to miss the local skip cache and be re-hashed + checked.
+  const { server: s2, port: p2, requests: r2 } = await startMockServer(ingestMock({ existsStatus: 404 }));
+  const result2 = await run('scan.js', {
+    LIFECONTEXT_URL: `http://127.0.0.1:${p2}`, LIFECONTEXT_API_KEY: 'test-key',
+    PHOTO_ROOT: tmp, PHOTO_EXIF_MANIFEST_PATH: path.join(tmp, 'manifest-404.json'), TZ: 'UTC',
+  });
+  s2.closeAllConnections();
+  s2.close();
+  assert.equal(result2.status, 0, result2.stderr);
+  assert.match(result2.stderr, /\/api\/v1\/exists unavailable \(404\)/);
+  assert.equal(batchReq(r2).body.artifacts.length, 2, '404 → all files processed (graceful fallback)');
 });
 
 test('caption-worker.js: enriches text_repr in place, preserves EXIF fields via upsert semantics, kill-safe state', async () => {

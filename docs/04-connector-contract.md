@@ -63,6 +63,7 @@ All endpoints require the standard `x-api-key` header. All bodies are JSON. Size
 |---|---|
 | `POST /api/v1/ingest` | Submit one artifact (upsert on `(source, source_id)`) |
 | `POST /api/v1/ingest/batch` | Submit up to 100 artifacts in one call (EXIF backlogs, export imports) |
+| `POST /api/v1/exists` | Read-only: which of up to 100 `source_ids` are already stored for a `source` (skip-already-imported) |
 | `POST /api/v1/events` | Submit raw high-frequency events for sessionization |
 | `GET  /api/v1/ingest/types` | The current type registry (machine-readable) |
 | `GET  /api/v1/sources/:source/state` | Optional per-connector cursor/state blob (see §7) |
@@ -84,6 +85,8 @@ All endpoints require the standard `x-api-key` header. All bodies are JSON. Size
 Design note: prefer **accept-with-warning** over rejection wherever data isn't destructive. A community connector that mostly works should mostly work.
 
 **Batch (implemented, `POST /api/v1/ingest/batch`).** Request body is `{ "artifacts": [ …1–100 payloads… ] }` — each item is the same shape as §3. Per-item isolation: each artifact gets its own enrich-then-commit transaction (it reuses `executeIngest` from single ingest, unchanged), so one bad item is skipped and reported at its index — it never rolls back or blocks the items around it.
+
+**Existence check (implemented, `POST /api/v1/exists`, #198).** Request body is `{ "source": string, "source_ids": [ …1–100… ] }`; response is `{ "exists": [ …the subset already stored… ] }` (order not guaranteed, unknown ids omitted). Purely **read-only** — no upsert, no `ingest_log` row. It lets a connector skip the expensive enrich+ingest for artifacts core already has: the common trigger is a source whose local skip-state was lost or invalidated (e.g. a Google Takeout re-extract resets every file's mtime, so `photo-exif`'s mtime-keyed manifest misses on everything even though the library is fully imported). The check is by the exact upsert key `(source, source_id)`, so a Takeout-origin key (`gphotos:<hash>`) and a generic key (`<hash>`) are correctly treated as distinct. Validation failures are `422` (same funnel as `/ingest`); a connector built against a newer core must treat a `404` as "this core predates `/exists`" and fall back to processing everything, never a hard failure.
 
 ```jsonc
 // Request

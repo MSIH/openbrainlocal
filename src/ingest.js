@@ -21,7 +21,7 @@
 import express from 'express';
 import { z } from 'zod';
 
-import { upsertArtifactTxn, getArtifactBySource } from './db.js';
+import { upsertArtifactTxn, getArtifactBySource, existingSourceIds } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
 import { reverseGeocode } from './geocode.js';
 import { isRegisteredType, isExtensionType } from './ingest-types.js';
@@ -81,6 +81,14 @@ export const IngestPayloadSchema = z.object({
 export const BatchEnvelopeSchema = z.object({
   artifacts: z.array(z.unknown()).min(1).max(INGEST_BATCH_MAX),
 });
+
+// Read-only existence check (#198): given a source and up to INGEST_BATCH_MAX source_ids, report
+// which are already stored. `.strict()` (an unknown key is a likely typo); 1..100 ids, each
+// non-empty. Validation failures are 422 via the router error middleware, exactly like /ingest.
+export const ExistsSchema = z.object({
+  source: z.string().min(1),
+  source_ids: z.array(z.string().min(1)).min(1).max(INGEST_BATCH_MAX),
+}).strict();
 
 // Validate hints one at a time: good ones pass through, malformed ones are dropped and
 // reported as warnings (the artifact itself is never lost over a bad hint — doc 04 §2).
@@ -208,6 +216,15 @@ export function buildIngestRouter({ requireAuth }) {
     const payload = IngestPayloadSchema.parse(req.body); // ZodError → router error mw → 422
     const { result, warnings } = await executeIngest(payload);
     res.status(result.created ? 201 : 200).json(formatIngestResult(result, warnings));
+  }));
+
+  // Existence check (#198, doc 04 §2): read-only — report which source_ids are already stored so a
+  // connector can skip the expensive enrich+ingest for artifacts core already has (e.g. a Takeout
+  // re-extract resets file mtimes → the connector's local skip-manifest misses on everything). No
+  // upsert, no ingest_log row. 422 on a bad envelope (shape/count) via the same middleware below.
+  router.post('/exists', requireAuth, express.json({ limit: JSON_BODY_LIMIT }), wrap(async (req, res) => {
+    const { source, source_ids } = ExistsSchema.parse(req.body); // ZodError → router error mw → 422
+    res.status(200).json({ exists: existingSourceIds(source, source_ids) });
   }));
 
   // Batch (#19, doc 04 §2): envelope-level 422 only for shape/count problems (not an array, 0

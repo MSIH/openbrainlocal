@@ -1562,6 +1562,17 @@ export function annotateArtifactRows(rows) {
 // Raw artifact row by its upsert key, or undefined. Used by the ingest orchestrator to decide
 // whether text_repr changed (and thus whether to re-embed) before opening upsertArtifactTxn.
 export const getArtifactBySource = (source, sourceId) => getArtifactBySourceStmt.get(source, sourceId);
+// Read-only existence check for the connector /exists endpoint (#198): the subset of `sourceIds`
+// already stored under `source`. Point lookups reuse the prepared selectIdBySourceStmt (indexed by
+// UNIQUE(source, source_id)), so there's no dynamically-built IN() SQL; the batch is capped ≤100 by
+// the route schema, and this is a pure read — no write, no ingest_log row.
+export function existingSourceIds(source, sourceIds) {
+  const present = [];
+  for (const sourceId of sourceIds) {
+    if (selectIdBySourceStmt.get(source, sourceId)) present.push(sourceId);
+  }
+  return present;
+}
 // The entity a contact artifact self-links to (role='self') — the authoritative owner for the
 // contacts re-import update path (#94), resilient to a post-import merge (links repoint to survivor).
 export const getSelfEntityId = (artifactId) => selectSelfEntityStmt.get(artifactId)?.entity_id ?? null;
