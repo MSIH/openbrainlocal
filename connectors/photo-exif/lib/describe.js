@@ -10,6 +10,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import exifr from 'exifr';
+import { mediaType } from './shared.js';
 
 // Per-directory cache of sidecar-candidate JSON filenames, populated lazily the first time a file
 // in that directory needs the truncation-prefix fallback below. Keeps that fallback amortized to
@@ -100,6 +101,12 @@ export function readSidecar(absPath) {
 }
 
 export async function describePhoto(absPath) {
+  // exifr is an image parser (it never extracts EXIF/GPS from an mp4/mov/m4v/3gp container), so for a
+  // video the whole readFile below would allocate O(fileSize) bytes only to yield the empty result.
+  // Short-circuit videos before the read — walkMediaFiles feeds this both images and videos (#196).
+  if (mediaType(path.basename(absPath)) === 'video') {
+    return { date: null, dateStr: null, latitude: null, longitude: null };
+  }
   // Hand exifr a Buffer, never a path: for a path input exifr opens an internal FileHandle it does
   // not always close (HEIC observed), and Node >=26 promotes a GC-closed FileHandle to a fatal
   // ERR_INVALID_STATE thrown asynchronously from the finalizer — the .catch()es below can't catch
