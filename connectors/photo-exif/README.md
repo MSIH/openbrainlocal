@@ -87,6 +87,17 @@ powershell -File prep-takeout.ps1 -WhatIf   # dry-run: log every action, change 
 powershell -File prep-takeout.ps1           # do it, then run `node scan.js`
 ```
 
+**Persistent, append-only run log (`-LogPath`).** Stdout is ephemeral, so every run also **appends** to a log — default `<PhotoRoot>\prep-takeout.log`, overridable with `-LogPath` — that accumulates the full history of every part ever processed, so you can later answer "did I process every Takeout part?" or audit a destructive run. It is written *alongside* the stdout output (tee, so interactive use is unchanged), and is **append-only** (never truncated). Each line is `UTC-timestamp LEVEL message` (`LEVEL` = `INFO`/`WARN`); a run logs a run-start header (start time, PhotoRoot, zip count, WhatIf flag), a per-zip `extract ok|FAIL <reason>` and `recycle ok|FAIL <reason>` (the failure line carries the exception message, e.g. `A local file header is corrupt.`), a single `videos recycled=<n> failed=<n>` summary (not one line per video), and a final `run end ...` tally. `-WhatIf` lines carry a `[WhatIf]` marker. Logging is **best-effort** — an unwritable log degrades to a stdout warning and never aborts the run — and the `.log` is inert to the script's own scans (it is neither a `takeout-*.zip` nor a video). Example:
+
+```
+2026-07-16T20:14:03Z INFO  run start PhotoRoot=C:\Artifacts\life-context\photo zips=10 whatif=False
+2026-07-16T20:14:03Z WARN  extract FAIL takeout-...-015.zip -- A local file header is corrupt.
+2026-07-16T20:19:41Z INFO  extract ok takeout-...-021.zip
+2026-07-16T20:19:58Z INFO  recycle ok takeout-...-021.zip
+2026-07-16T21:02:10Z INFO  videos recycled=1234 failed=0
+2026-07-16T21:02:10Z INFO  run end zips: extracted=9 recycled=9 failed=1 | videos: recycled=1234 failed=0
+```
+
 **Recycle Bin, never permanent delete** — recoverable, and matching this project's append-only ethos and the box's delete-blocked posture (the `rm`/`Remove-Item` deny); it uses `Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(SendToRecycleBin)`, not `Remove-Item`. **Caveat:** the Recycle Bin still occupies disk until emptied — to actually reclaim the space after a verified run, empty it manually (the script can't, since permanent delete is blocked). Windows-only.
 
 ### Wave order matters
