@@ -106,7 +106,7 @@ const ListEntitiesQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).optional(),
   offset: z.coerce.number().int().min(0).optional(),
 });
-const CreateEntitySchema = z.object({ kind: z.enum(['person', 'org']), canonical_name: z.string().trim().min(1), attrs: AttrsSchema.optional() });
+const CreateEntitySchema = z.object({ kind: z.enum(['person', 'org', 'place']), canonical_name: z.string().trim().min(1), attrs: AttrsSchema.optional() });
 const UpdateEntitySchema = z.object({ canonical_name: z.string().trim().min(1).optional(), attrs: AttrsSchema.optional() })
   .refine((v) => v.canonical_name !== undefined || v.attrs !== undefined, { message: 'nothing to update' });
 const AliasBodySchema = z.object({ alias: z.string().trim().min(1), alias_type: AliasTypeSchema });
