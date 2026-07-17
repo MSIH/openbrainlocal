@@ -7,6 +7,7 @@
 // connector doesn't need its own bundled place dataset (and neither does any other connector
 // that has GPS but no code of its own for describing where it is).
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import exifr from 'exifr';
 
@@ -99,9 +100,16 @@ export function readSidecar(absPath) {
 }
 
 export async function describePhoto(absPath) {
+  // Hand exifr a Buffer, never a path: for a path input exifr opens an internal FileHandle it does
+  // not always close (HEIC observed), and Node >=26 promotes a GC-closed FileHandle to a fatal
+  // ERR_INVALID_STATE thrown asynchronously from the finalizer — the .catch()es below can't catch
+  // it, so the whole scan aborts (#196). readFile owns and closes its own descriptor; an unreadable
+  // file resolves to the same "no EXIF/GPS" result the exifr .catch() paths already produce.
+  const buf = await readFile(absPath).catch(() => null);
+  if (!buf) return { date: null, dateStr: null, latitude: null, longitude: null };
   // exifr resolves to undefined (not an error) when the file has no EXIF/GPS at all.
-  const parsed = await exifr.parse(absPath, { pick: ['DateTimeOriginal'] }).catch(() => undefined);
-  const gps = await exifr.gps(absPath).catch(() => undefined);
+  const parsed = await exifr.parse(buf, { pick: ['DateTimeOriginal'] }).catch(() => undefined);
+  const gps = await exifr.gps(buf).catch(() => undefined);
   const date = parsed?.DateTimeOriginal instanceof Date ? parsed.DateTimeOriginal : null;
   const dateStr = date ? date.toISOString().slice(0, 10) : null;
   return {
