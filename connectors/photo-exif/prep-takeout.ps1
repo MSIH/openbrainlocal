@@ -62,7 +62,10 @@ if (-not $LogPath) { $LogPath = Join-Path $PhotoRoot 'prep-takeout.log' }
 function Write-Log {
     param([string] $Message, [string] $Level = 'INFO')
     try {
-        $line = "{0:yyyy-MM-ddTHH:mm:ssZ} {1,-5} {2}" -f (Get-Date).ToUniversalTime(), $Level, $Message
+        # Collapse CR/LF to spaces so one event is always one line (an exception message
+        # passed in can be multi-line, which would otherwise break the one-line format).
+        $flat = $Message -replace '\r?\n', ' '
+        $line = "{0:yyyy-MM-ddTHH:mm:ssZ} {1,-5} {2}" -f (Get-Date).ToUniversalTime(), $Level, $flat
         Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
     } catch {
         Write-Warning "log write failed ($LogPath): $($_.Exception.Message)"
