@@ -265,6 +265,7 @@ test('scan.js: same filename, different content in different subdirectories gets
 test('scan.js: a video ingests as type=video, a still as type=photo', async () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'photo-exif-video-'));
   writeFileSync(path.join(tmp, 'clip.mp4'), Buffer.from('fake-mp4-bytes'));
+  writeFileSync(path.join(tmp, 'oldclip.3gpp'), Buffer.from('fake-3gpp-bytes'));
   writeFileSync(path.join(tmp, 'still.jpg'), jpegWithExif({ dateTimeOriginal: '2019:03:04 14:30:00' }));
 
   const { server, port, requests } = await startMockServer(ingestMock());
@@ -276,10 +277,12 @@ test('scan.js: a video ingests as type=video, a still as type=photo', async () =
   server.close();
   assert.equal(result.status, 0, result.stderr);
   const arts = batchReq(requests).body.artifacts;
-  assert.equal(arts.length, 2, 'both the video and the still are walked (walkMediaFiles)');
+  assert.equal(arts.length, 3, 'both videos and the still are walked (walkMediaFiles)');
   const video = arts.find((a) => a.raw_path.endsWith('clip.mp4'));
   assert.equal(video.type, 'video');
   assert.match(video.text_repr, /^Video[: ]/, "a video's text_repr says Video, not Photo");
+  const gpp = arts.find((a) => a.raw_path.endsWith('oldclip.3gpp'));
+  assert.equal(gpp.type, 'video', '.3gpp is recognized as a video, not skipped');
   assert.equal(arts.find((a) => a.raw_path.endsWith('still.jpg')).type, 'photo');
 });
 
