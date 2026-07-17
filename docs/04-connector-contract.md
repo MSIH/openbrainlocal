@@ -63,6 +63,7 @@ All endpoints require the standard `x-api-key` header. All bodies are JSON. Size
 |---|---|
 | `POST /api/v1/ingest` | Submit one artifact (upsert on `(source, source_id)`) |
 | `POST /api/v1/ingest/batch` | Submit up to 100 artifacts in one call (EXIF backlogs, export imports) |
+| `POST /api/v1/exists` | Read-only: which of up to 100 `source_ids` are already stored for a `source` (skip-already-imported) |
 | `POST /api/v1/events` | Submit raw high-frequency events for sessionization |
 | `GET  /api/v1/ingest/types` | The current type registry (machine-readable) |
 | `GET  /api/v1/sources/:source/state` | Optional per-connector cursor/state blob (see §7) |
@@ -86,7 +87,7 @@ Design note: prefer **accept-with-warning** over rejection wherever data isn't d
 **Batch (implemented, `POST /api/v1/ingest/batch`).** Request body is `{ "artifacts": [ …1–100 payloads… ] }` — each item is the same shape as §3. Per-item isolation: each artifact gets its own enrich-then-commit transaction (it reuses `executeIngest` from single ingest, unchanged), so one bad item is skipped and reported at its index — it never rolls back or blocks the items around it.
 
 ```jsonc
-// Request
+// Batch request (POST /api/v1/ingest/batch)
 { "artifacts": [ { …ingest payload per §3… }, … ] }   // 1–100 items
 
 // 200 — per-item results, index-aligned with the request (results[i] ↔ artifacts[i])
@@ -104,6 +105,19 @@ Design note: prefer **accept-with-warning** over rejection wherever data isn't d
 ```
 
 The envelope schema validates only shape and count (1–100 items) — a malformed *item* is never an envelope-level 422; it becomes a `{error, issues?}` entry at its index instead, so 99 good artifacts in a batch of 100 are never held hostage by 1 bad one. The response is **always HTTP 200** once the envelope itself is well-formed, even when some items failed — the request succeeded; per-item status lives in the body (`summary` gives the quick read, so a connector doesn't have to count `results` itself). Batch is a backlog path (cron/one-shot backfills), processed sequentially, not a low-latency path — see doc `05-roadmap.md` Milestone 0.
+
+**Existence check (implemented, `POST /api/v1/exists`, #198).** Purely **read-only** — no upsert, no `ingest_log` row. It lets a connector skip the expensive enrich+ingest for artifacts core already has: the common trigger is a source whose local skip-state was lost or invalidated (e.g. a Google Takeout re-extract resets every file's mtime, so `photo-exif`'s mtime-keyed manifest misses on everything even though the library is fully imported). The check is by the exact upsert key `(source, source_id)`, so a Takeout-origin key (`gphotos:<hash>`) and a generic key (`<hash>`) are correctly treated as distinct. Validation failures are `422` (same funnel as `/ingest`); a connector built against a newer core must treat a `404` as "this core predates `/exists`" and fall back to processing everything, never a hard failure.
+
+```jsonc
+// Request (POST /api/v1/exists) — up to 100 source_ids per call
+{ "source": "google-photos", "source_ids": ["gphotos:<hash1>", "gphotos:<hash2>", …] }
+
+// 200 — the subset already stored (order not guaranteed; unknown ids omitted)
+{ "exists": ["gphotos:<hash1>"] }
+
+// 422 — envelope invalid (missing source, 0 ids, >100 ids, or an unknown key); nothing read
+{ "error": "validation", "issues": [ … ] }
+```
 
 ---
 
