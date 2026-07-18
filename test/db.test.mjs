@@ -45,11 +45,12 @@ test('busy_timeout: DB_BUSY_TIMEOUT_MS env override is honored', () => {
   // throwaway DB. Pass the module as a file:// URL so dynamic import works on Windows too.
   const dbUrl = new URL('../src/db.js', import.meta.url).href;
   const tmp = path.join(os.tmpdir(), `lc-busytimeout-${process.pid}.db`);
-  // Sentinel prefix so a dotenv boot tip (or any other stdout noise) doesn't defeat the match.
+  // Pass the module URL via env (not an -e positional arg — argv semantics under `node -e` are
+  // subtle); sentinel prefix so a dotenv boot tip or other stdout noise doesn't defeat the match.
   const out = execFileSync(
     process.execPath,
-    ['-e', 'import(process.argv[1]).then((m) => { console.log("BUSY_TIMEOUT=" + m.db.pragma("busy_timeout", { simple: true })); m.db.close(); });', dbUrl],
-    { env: { ...process.env, DB_BUSY_TIMEOUT_MS: '1234', DB_PATH: tmp }, encoding: 'utf8' },
+    ['-e', 'import(process.env.DB_MODULE_URL).then((m) => { console.log("BUSY_TIMEOUT=" + m.db.pragma("busy_timeout", { simple: true })); m.db.close(); });'],
+    { env: { ...process.env, DB_BUSY_TIMEOUT_MS: '1234', DB_PATH: tmp, DB_MODULE_URL: dbUrl }, encoding: 'utf8' },
   );
   assert.match(out, /BUSY_TIMEOUT=1234\b/);
   rmSync(tmp, { force: true });
