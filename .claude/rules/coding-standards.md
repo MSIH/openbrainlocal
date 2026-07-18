@@ -25,6 +25,7 @@ Generated code is optimized for machine consumption: concise, dense, pattern-mat
 | Async functions | verb-first | `getEmbedding`, `executeRecall` |
 
 ## Required
+- **CI must be green before merge.** `.github/workflows/ci.yml` runs the test suite + `npm run check:boundary` on Ubuntu/Windows × Node 20/22 for every PR — the server-side backstop to the local `.claude/hooks` gates. A red run blocks merge; don't merge around it.
 - Prepared statements for all SQL (compile once, reuse) — never build SQL by string concatenation.
 - All config through `process.env` (via `dotenv`); never hardcode secrets, keys, URLs, or model names.
 - Structured errors: on catch, log the error object (`console.error("context", err)`), never swallow. The Express error middleware is the single funnel — keep it.

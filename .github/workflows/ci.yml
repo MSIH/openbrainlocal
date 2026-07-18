@@ -1,0 +1,62 @@
+name: CI
+
+# Runs the test suite + connector-boundary check on every PR and on pushes to the default
+# branch (2.0). The repo's mandatory workflow (draft-issue → worktree → pre-pr-review) is a
+# LOCAL honor-system gate (.claude/hooks) that a direct push or a second contributor bypasses;
+# this is the server-side net. No Ollama in CI — the suite passes with the embedder/planner
+# offline (graceful-degradation paths), and we assert that stays true by NOT installing it.
+
+on:
+  pull_request:
+  push:
+    branches: [2.0]
+
+# One in-flight run per ref; a new push cancels the previous run for the same PR/branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # report every matrix cell, don't cancel siblings on first red
+      matrix:
+        # Pin windows-2022 (VS 2022), NOT windows-latest: the latest image ships VS "18"/2026, which
+        # node-gyp@10 (bundled with Node 20) can't parse ("unknown version undefined") — so better-sqlite3's
+        # source-compile fallback fails on windows × node-20 when no prebuilt binary is found. VS 2022 is
+        # the newest node-gyp@10 recognizes. (Node 22's newer bundled node-gyp handles the latest image.)
+        os: [ubuntu-latest, windows-2022]
+        node: [20, 22] # Node 18 is EOL (Apr 2025); README floor bump tracked separately
+    env:
+      # Server-booting tests (server.test / ui-token.test) require a non-placeholder key.
+      # This is a throwaway CI value, NOT a secret — it authorizes nothing outside the runner.
+      LIFECONTEXT_API_KEY: ci-throwaway-key-0123456789abcdef
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install (locked)
+        run: npm ci
+
+      # better-sqlite3 / sqlite-vec are native; a cached or prebuilt binary can mismatch the
+      # runner's Node ABI. Rebuild is cheap insurance against a "was compiled against a
+      # different Node.js version" load error.
+      - name: Rebuild native module (guard)
+        run: npm rebuild better-sqlite3
+
+      # `shell: bash` so bash expands the test/*.test.mjs glob on Windows too. npm's default
+      # script-shell on Windows is cmd.exe, which does NOT expand globs, and Node 20's test runner
+      # has no native glob support (added in Node 21) — so `npm test` would find zero files on the
+      # windows-latest × node-20 cell. Bash expands the glob to explicit paths every Node accepts.
+      - name: Test
+        shell: bash
+        run: node --test test/*.test.mjs
+
+      - name: Connector boundary check
+        run: npm run check:boundary
