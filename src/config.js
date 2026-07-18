@@ -37,6 +37,12 @@ export const TRUST_PROXY = int(process.env.TRUST_PROXY, 1);
 // Local file store. Overridable via DB_PATH — set it in .env to point at an existing DB.
 export const DB_PATH = process.env.DB_PATH || 'life-context.db';
 
+// SQLite busy_timeout (ms): how long a writer waits for a competing writer's lock before throwing
+// SQLITE_BUSY. better-sqlite3 defaults to 0 — brief cross-process overlap (a connector POSTing during
+// a backfill/migrate) fails instantly; 5s lets a short writer finish first. This only softens transient
+// overlap — the single-live-server rule still stands (two long-lived servers share vec/FTS state badly).
+export const DB_BUSY_TIMEOUT_MS = int(process.env.DB_BUSY_TIMEOUT_MS, 5000);
+
 // Where contacts.js writes decoded vCard PHOTO bytes (raw_path target). Relative to cwd by
 // default so a fresh install just works; override to keep raw originals on a bigger disk.
 export const CONTACTS_RAW_DIR = process.env.CONTACTS_RAW_DIR || 'raw/contacts';

@@ -11,13 +11,14 @@ import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { DB_PATH, VECTOR_DIMENSION } from './config.js';
+import { DB_PATH, VECTOR_DIMENSION, DB_BUSY_TIMEOUT_MS } from './config.js';
 import { haversineKm } from './geocode.js';
 
 export const db = new Database(DB_PATH);
 sqliteVec.load(db);
 db.pragma('journal_mode = WAL'); // concurrent readers (data-model.md rule 5)
 db.pragma('foreign_keys = ON');  // enforce REFERENCES clauses — per-connection, defaults OFF (#110)
+db.pragma(`busy_timeout = ${DB_BUSY_TIMEOUT_MS}`); // wait out a brief competing writer instead of throwing SQLITE_BUSY instantly (#224)
 
 // --- SCHEMA (idempotent; VECTOR_DIMENSION must match the embedding model — rule 2) ---
 db.exec(`

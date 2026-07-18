@@ -44,7 +44,7 @@ npm run setup
 npm start                         # REST + MCP on http://localhost:3000
 ```
 
-**Developing against your data?** Use `npm run dev` — it boots a second server on `:3001` against a **copy** of `life-context.db` (`.dev.db`, a consistent online snapshot), so tests never write your live memory. Add `-- --fresh` to re-copy. **Never** run a second `npm start` / `node src/server.js` against the live DB — concurrent SQLite writers cause `SQLITE_BUSY`/locks. Every instance logs its resolved DB file at boot, so a mis-pointed one is obvious.
+**Developing against your data?** Use `npm run dev` — it boots a second server on `:3001` against a **copy** of `life-context.db` (`.dev.db`, a consistent online snapshot), so tests never write your live memory. Add `-- --fresh` to re-copy. A *brief* overlap — a connector POSTing while a backfill or `npm run migrate` runs — now waits up to `DB_BUSY_TIMEOUT_MS` (default 5s) for the lock instead of throwing `SQLITE_BUSY` instantly. But still **never** run a second long-lived `npm start` / `node src/server.js` against the live DB — two servers sharing the vec/FTS state cause locks the timeout can't paper over. Every instance logs its resolved DB file at boot, so a mis-pointed one is obvious.
 
 `npm run setup` prints the generated `LIFECONTEXT_API_KEY` once — **save it**; it's the `x-api-key` header for every call. Prefer to do it by hand? The manual equivalent (pull `qwen3-embedding:0.6b` + `qwen2.5:3b`, `cp .env.example .env`, set a key) is in [`docs/local-llm-setup-guide.md`](docs/local-llm-setup-guide.md).
 

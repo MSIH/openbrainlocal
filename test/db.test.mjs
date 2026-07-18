@@ -6,6 +6,9 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import os from 'node:os';
+import { rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { useTempDb, f32 } from './helpers.mjs';
 
 const { cleanup } = useTempDb();
@@ -30,6 +33,29 @@ const countVecStmt = db.prepare('SELECT COUNT(*) AS n FROM vec_artifacts WHERE a
 
 let seq = 0;
 const uniqueSource = () => `test-${++seq}`;
+
+test('busy_timeout: the connection applies DB_BUSY_TIMEOUT_MS (default 5000)', () => {
+  // #224 — better-sqlite3 defaults busy_timeout to 0, throwing SQLITE_BUSY instantly on brief
+  // cross-process write overlap; the pragma at connection open installs the 5s default.
+  assert.equal(db.pragma('busy_timeout', { simple: true }), 5000);
+});
+
+test('busy_timeout: DB_BUSY_TIMEOUT_MS env override is honored', () => {
+  // config reads the env once at import, so exercise the override in a child process against a
+  // throwaway DB. Pass the module as a file:// URL so dynamic import works on Windows too.
+  const dbUrl = new URL('../src/db.js', import.meta.url).href;
+  const tmp = path.join(os.tmpdir(), `lc-busytimeout-${process.pid}.db`);
+  // Sentinel prefix so a dotenv boot tip (or any other stdout noise) doesn't defeat the match.
+  const out = execFileSync(
+    process.execPath,
+    ['-e', 'import(process.argv[1]).then((m) => { console.log("BUSY_TIMEOUT=" + m.db.pragma("busy_timeout", { simple: true })); m.db.close(); });', dbUrl],
+    { env: { ...process.env, DB_BUSY_TIMEOUT_MS: '1234', DB_PATH: tmp }, encoding: 'utf8' },
+  );
+  assert.match(out, /BUSY_TIMEOUT=1234\b/);
+  rmSync(tmp, { force: true });
+  rmSync(`${tmp}-wal`, { force: true });
+  rmSync(`${tmp}-shm`, { force: true });
+});
 
 test('storeArtifactTxn: create stores a rank-ordered vector under the right id (BigInt vec0 PK)', () => {
   // If the internal BigInt(id) cast regressed to a plain Number, insertVecArtifactStmt would
