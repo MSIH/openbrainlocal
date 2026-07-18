@@ -2,6 +2,8 @@
 
 *(formerly Open Brain Local)*
 
+[![CI](https://github.com/MSIH/life-context/actions/workflows/ci.yml/badge.svg?branch=2.0)](https://github.com/MSIH/life-context/actions/workflows/ci.yml)
+
 A local-first, self-owned memory layer that any AI tool can plug into — one database, one gateway, running entirely on your own machine. LifeContext stores your notes, contacts, and (soon) emails, photos, and location history as a unified memory your AI assistants can actually recall from: by meaning, by person, by place, and by time.
 
 ## Origins & lineage
@@ -45,6 +47,8 @@ npm start                         # REST + MCP on http://localhost:3000
 **Developing against your data?** Use `npm run dev` — it boots a second server on `:3001` against a **copy** of `life-context.db` (`.dev.db`, a consistent online snapshot), so tests never write your live memory. Add `-- --fresh` to re-copy. **Never** run a second `npm start` / `node src/server.js` against the live DB — concurrent SQLite writers cause `SQLITE_BUSY`/locks. Every instance logs its resolved DB file at boot, so a mis-pointed one is obvious.
 
 `npm run setup` prints the generated `LIFECONTEXT_API_KEY` once — **save it**; it's the `x-api-key` header for every call. Prefer to do it by hand? The manual equivalent (pull `qwen3-embedding:0.6b` + `qwen2.5:3b`, `cp .env.example .env`, set a key) is in [`docs/local-llm-setup-guide.md`](docs/local-llm-setup-guide.md).
+
+**Tests & CI.** `npm test` runs the full suite (no Ollama needed — the embedder/planner-offline paths degrade gracefully). `npm run check:boundary` asserts connectors never import `src/`, and `npm run test:connectors` runs each connector's own suite (skipping any whose deps aren't installed). The [CI workflow](.github/workflows/ci.yml) runs the suite + boundary check on Ubuntu and Windows (Node 20 & 22) for every PR and push to `2.0`. Recommended: enable branch protection on `2.0` requiring the `test` check before merge.
 
 Upgrading from an earlier version? Migrate your existing memories into the artifact store once (back up your DB file first — `life-context.db` by default, or whatever `DB_PATH` points to — it's idempotent and safe to re-run). It reuses the stored vectors as-is, so it's only valid while the embedding model and `VECTOR_DIMENSION` are unchanged:
 
