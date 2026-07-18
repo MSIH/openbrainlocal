@@ -23,7 +23,11 @@ jobs:
     strategy:
       fail-fast: false # report every matrix cell, don't cancel siblings on first red
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Pin windows-2022 (VS 2022), NOT windows-latest: the latest image ships VS "18"/2026, which
+        # node-gyp@10 (bundled with Node 20) can't parse ("unknown version undefined") — so better-sqlite3's
+        # source-compile fallback fails on windows × node-20 when no prebuilt binary is found. VS 2022 is
+        # the newest node-gyp@10 recognizes. (Node 22's newer bundled node-gyp handles the latest image.)
+        os: [ubuntu-latest, windows-2022]
         node: [20, 22] # Node 18 is EOL (Apr 2025); README floor bump tracked separately
     env:
       # Server-booting tests (server.test / ui-token.test) require a non-placeholder key.
