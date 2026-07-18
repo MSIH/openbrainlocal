@@ -29,7 +29,9 @@ for (const name of readdirSync(connectorsRoot)) {
   console.log(`  test ${name}…`);
   const r = spawnSync(process.execPath, ['--test', 'test.mjs'], { cwd: dir, stdio: 'inherit' });
   ran++;
-  if (r.status !== 0) { failed++; console.error(`  FAIL ${name} (exit ${r.status})`); }
+  // status is null when the runner couldn't launch or was signal-killed — surface r.error so a
+  // spawn failure isn't reported as a bare "exit null" with no cause.
+  if (r.status !== 0) { failed++; console.error(`  FAIL ${name} (exit ${r.status})${r.error ? ` — ${r.error.message}` : ''}`); }
 }
 
 console.log(`test:connectors — ${ran} suite(s) run, ${failed} failed, ${skipped} skipped`);

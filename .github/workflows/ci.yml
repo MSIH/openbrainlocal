@@ -46,8 +46,13 @@ jobs:
       - name: Rebuild native module (guard)
         run: npm rebuild better-sqlite3
 
+      # `shell: bash` so bash expands the test/*.test.mjs glob on Windows too. npm's default
+      # script-shell on Windows is cmd.exe, which does NOT expand globs, and Node 20's test runner
+      # has no native glob support (added in Node 21) — so `npm test` would find zero files on the
+      # windows-latest × node-20 cell. Bash expands the glob to explicit paths every Node accepts.
       - name: Test
-        run: npm test
+        shell: bash
+        run: node --test test/*.test.mjs
 
       - name: Connector boundary check
         run: npm run check:boundary
