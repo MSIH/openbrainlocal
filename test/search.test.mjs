@@ -61,6 +61,33 @@ test('planner: a filter it returns within the timeout is applied (fake-Ollama) (
   assert.ok(!ids.includes('p-jan'), 'the January note is excluded by the planner time filter');
 });
 
+test('#227 candidate temp table: two sequential searches with different type filters do not cross-contaminate', async () => {
+  // A note and a message sharing a distinctive keyword — the shared candidate temp table is
+  // cleared + refilled per search, so search N's candidate set must never leak into search N+1.
+  // 'zebra-widget' is rare enough to drive the FTS (EXISTS) arm; the type filter is the only
+  // discriminator, exactly as the temp table constrains both the KNN (IN) and FTS (EXISTS) arms.
+  await executeIngest({ source: 'iso', source_id: 'iso-note', type: 'note', text_repr: 'zebra-widget quarterly recap', occurred_at: '2026-02-01' });
+  await executeIngest({ source: 'iso', source_id: 'iso-msg', type: 'message', text_repr: 'zebra-widget quarterly recap', occurred_at: '2026-02-01' });
+
+  const first = (await hybridSearch('zebra-widget quarterly recap', { limit: 10, types: ['note'], usePlanner: false })).map((r) => r.source_id);
+  const second = (await hybridSearch('zebra-widget quarterly recap', { limit: 10, types: ['message'], usePlanner: false })).map((r) => r.source_id);
+
+  assert.ok(first.includes('iso-note') && !first.includes('iso-msg'), 'search 1 (types:[note]) returns only the note');
+  assert.ok(second.includes('iso-msg') && !second.includes('iso-note'), 'search 2 (types:[message]) returns only the message — no leftover candidates from search 1');
+});
+
+test('#227 recent sort orders the candidate set via the temp table (occurred_at DESC)', async () => {
+  // sort:'recent' bypasses KNN/FTS and orders the temp-table candidate set directly — exercise it
+  // so the recentOrderStmt rewrite (json_each -> temp table) is covered end-to-end.
+  await executeIngest({ source: 'rec', source_id: 'rec-old', type: 'note', text_repr: 'sprint retro notes', occurred_at: '2026-04-01' });
+  await executeIngest({ source: 'rec', source_id: 'rec-new', type: 'note', text_repr: 'sprint retro notes', occurred_at: '2026-05-01' });
+  const ids = (await hybridSearch('sprint retro notes', { limit: 10, types: ['note'], sort: 'recent', usePlanner: false })).map((r) => r.source_id);
+  const iOld = ids.indexOf('rec-old');
+  const iNew = ids.indexOf('rec-new');
+  assert.ok(iNew !== -1 && iOld !== -1, 'both notes are candidates');
+  assert.ok(iNew < iOld, 'the newer note (May) sorts before the older (April) under sort:recent');
+});
+
 test('timeline + about_entity annotate handles with the resolved contact name (#149)', async () => {
   // A contact with a phone alias, then a message from that number — the ingest hint links it.
   const eid = Number(insertEntityStmt.run('person', 'Marta Reyes', null).lastInsertRowid);

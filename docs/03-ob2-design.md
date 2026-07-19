@@ -285,12 +285,22 @@ Then vector-rank only within those candidates (sqlite-vec supports `partition ke
 
 > **v2.0 implementation note.** vec0 metadata filtering can't span the `entity_links` join or a
 > `place_label LIKE`, so the planner runs the SQL prefilter to a candidate id set first, then ranks
-> *within* it (filter-then-rank): the candidate ids are pushed into both arms — the KNN via a
-> `artifact_id IN (…)` constraint (sqlite-vec ≥ 0.1.6) and FTS `bm25()` via `rowid IN (…)` — before
-> fusing with RRF (`RRF_K`). A filter term that can't actually filter (an unresolved entity name, a
-> `place` matching no `place_label`) is folded back into the ranked search text so it can't silently
-> vanish. The query parse is one small-LLM call (`QUERY_MODEL`) validated with zod; if the model or
-> the embedder is unreachable, search degrades gracefully (pure-semantic plan / FTS-only).
+> *within* it (filter-then-rank). The candidate ids are delivered to both arms through a
+> per-connection `search_candidates` **TEMP table** (`id INTEGER PRIMARY KEY`), refilled once per
+> search — **not** marshaled into a `json_each(?)` string re-parsed by each arm (#227). The two arms
+> constrain against it differently, and the difference is load-bearing at scale: the **KNN** arm uses
+> `artifact_id IN (SELECT id FROM search_candidates)` (sqlite-vec ≥ 0.1.6 handles the vec0-PK IN
+> efficiently); the **FTS** arm uses a correlated `EXISTS (SELECT 1 FROM search_candidates sc WHERE
+> sc.id = artifacts_fts.rowid)`, **never** `rowid IN (…)`. On a ~210k-row store the `rowid IN
+> (subquery)` shape makes FTS5 rank the full match set before filtering (~27 s/query, whether the set
+> is `json_each` or an indexed temp table); the EXISTS form probes the PK index per match (<1 ms).
+> Results and bm25 order are identical (equivalence-tested). Because the temp table is shared across
+> calls, the refill sits in the same synchronous, await-free stretch as the reads it feeds, so a
+> concurrent search can't refill it mid-flight. Both arms fuse with RRF (`RRF_K`). A filter term that
+> can't actually filter (an unresolved entity name, a `place` matching no `place_label`) is folded
+> back into the ranked search text so it can't silently vanish. The query parse is one small-LLM call
+> (`QUERY_MODEL`) validated with zod; if the model or the embedder is unreachable, search degrades
+> gracefully (pure-semantic plan / FTS-only).
 >
 > **US-state place terms (#186).** When `place` resolves to a US state, the prefilter matches
 > `place_label` against **both** the full-name form (`%Texas%`, the stored format) and a code form

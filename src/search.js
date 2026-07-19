@@ -106,12 +106,24 @@ const candidateStmt = db.prepare(`
     AND (@place IS NULL OR a.place_label LIKE @place OR (@place2 IS NOT NULL AND a.place_label LIKE @place2))
     AND (@geo_required = 0 OR a.place_label IS NOT NULL)
 `);
-// Recency ordering (#190): order a fixed candidate id set by occurred_at DESC (ties broken by id
+// Candidate delivery to the ranking arms (#227). The prefiltered id set is written to a
+// per-connection TEMP table with an INTEGER PRIMARY KEY (so lookups are index probes), not
+// marshaled into a `json_each(?)` string re-parsed by every arm. This is not cosmetic: at
+// scale (~210k rows) the FTS arm written as `rowid IN (SELECT value FROM json_each(?))`
+// degrades to ~27s/query, and — measured — an indexed `rowid IN (SELECT id FROM …)` does NOT
+// help (the `IN (subquery)` shape is what defeats FTS5's index). The EXISTS form below,
+// correlated on the temp table's PK, drops the same query to <1ms. TEMP tables are
+// per-connection and better-sqlite3 is single-connection, so there's no cross-request leakage;
+// each search clears + refills. DELETE (not DROP) keeps these prepared statements valid.
+db.exec('CREATE TEMP TABLE IF NOT EXISTS search_candidates (id INTEGER PRIMARY KEY)');
+const clearCandidatesStmt = db.prepare('DELETE FROM search_candidates');
+const fillCandidatesStmt = db.prepare('INSERT INTO search_candidates(id) SELECT value FROM json_each(?)');
+// Recency ordering (#190): order the candidate set by occurred_at DESC (ties broken by id
 // DESC for determinism). Used when the plan/caller sort is 'recent' — the candidate set already
 // carries the topical (type/entity/geo) constraint, so recency over it is the "last seen" answer.
 const recentOrderStmt = db.prepare(`
   SELECT id FROM artifacts
-  WHERE id IN (SELECT value FROM json_each(?))
+  WHERE id IN (SELECT id FROM search_candidates)
   ORDER BY occurred_at DESC, id DESC
   LIMIT ?
 `);
@@ -119,17 +131,23 @@ const recentOrderStmt = db.prepare(`
 // supports IN constraints on the vec0 primary key in KNN queries — this ranks *within* the
 // candidates instead of hoping a global top-k happens to intersect a tight filter. Compiled
 // at startup, so an sqlite-vec too old to support it fails loudly at boot rather than
-// silently degrading (verified against 0.1.9).
+// silently degrading (verified against 0.1.9). The IN (over the indexed temp table) stays an
+// IN here: unlike FTS, sqlite-vec's KNN handles the PK IN-constraint efficiently (#227).
 const knnInStmt = db.prepare(`
   SELECT artifact_id, distance FROM vec_artifacts
   WHERE embedding MATCH ? AND k = ?
-    AND artifact_id IN (SELECT value FROM json_each(?))
+    AND artifact_id IN (SELECT id FROM search_candidates)
   ORDER BY distance
 `);
+// FTS arm: candidate constraint expressed as a correlated EXISTS on the temp table's PK, NOT
+// `rowid IN (SELECT …)` — the IN shape makes FTS5 rank the full match set before filtering
+// (~27s at 210k rows); EXISTS probes the PK index per match (<1ms). Same result set + bm25
+// order, verified by the equivalence tests (#227).
 const ftsInStmt = db.prepare(`
   SELECT rowid AS artifact_id, bm25(artifacts_fts) AS score
   FROM artifacts_fts
-  WHERE artifacts_fts MATCH ? AND rowid IN (SELECT value FROM json_each(?))
+  WHERE artifacts_fts MATCH ?
+    AND EXISTS (SELECT 1 FROM search_candidates sc WHERE sc.id = artifacts_fts.rowid)
   ORDER BY score LIMIT ?
 `);
 // Cheap existence probe: is this place string a usable filter at all? Same two-pattern shape as
@@ -391,15 +409,27 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
     }
   }
   if (candidates.size === 0) return []; // no default_searchable artifacts to rank
-  const candidatesJson = JSON.stringify([...candidates]);
+
+  // Deliver the finalized candidate set (post-retry, post-geo) to the ranking arms via the
+  // indexed TEMP table (#227). The fill MUST sit in the same synchronous, await-free stretch as
+  // the reads it feeds: the table is per-connection (shared across calls), so a concurrent
+  // hybridSearch awaiting elsewhere must never refill it between this call's fill and its reads.
+  // better-sqlite3 is synchronous, so `fill → read` runs atomically w.r.t. the event loop — this
+  // restores the per-call isolation the old json_each local gave us. Helper keeps the two paths
+  // (recent below; KNN/FTS after the embed await) from drifting apart.
+  const fillCandidates = () => {
+    clearCandidatesStmt.run();
+    fillCandidatesStmt.run(JSON.stringify([...candidates]));
+  };
 
   // Recency ordering (#190): once the candidate set carries the topical constraint (type/entity/geo),
   // "last seen" is a pure recency question — order by occurred_at DESC and skip the vec/FTS/RRF arms
   // (no embedding call, so this path is unaffected by the embedder being offline). `distance` is null,
   // like an FTS-only hit. getArtifactById attaches display_text just as the RRF path does.
   if (effSort === 'recent') {
+    fillCandidates();
     return recentOrderStmt
-      .all(candidatesJson, limit)
+      .all(limit)
       .map((r) => getArtifactById(r.id))
       .filter(Boolean)
       .map((a) => ({ ...a, distance: null }));
@@ -408,20 +438,24 @@ export async function hybridSearch(query, { limit = 3, types, timeRange, entitie
   const k = clamp(limit * KNN_OVERFETCH, KNN_MIN, KNN_MAX);
 
   // Vector arm — ranked *within* the candidate set (filter-then-rank).
-  // Best-effort; FTS still works if the embedding model is offline.
-  let vec = [];
+  // Best-effort; FTS still works if the embedding model is offline. The embed is the only await
+  // on this path, so it runs BEFORE the candidate fill — everything after (fill → KNN → FTS) is
+  // synchronous and cannot be interleaved by another search.
+  let qvec = null;
   try {
-    const qvec = await embedToFloat32(searchText);
-    vec = knnInStmt.all(qvec, Math.min(k, candidates.size), candidatesJson);
+    qvec = await embedToFloat32(searchText);
   } catch (err) {
     console.error('search: embedding unavailable, FTS-only:', err.message);
   }
+  fillCandidates();
+  let vec = [];
+  if (qvec) vec = knnInStmt.all(qvec, Math.min(k, candidates.size));
 
   // Keyword arm — same constraint.
   const ftsQuery = toFtsQuery(searchText);
   let fts = [];
   if (ftsQuery) {
-    fts = ftsInStmt.all(ftsQuery, candidatesJson, k);
+    fts = ftsInStmt.all(ftsQuery, k);
   }
 
   const fusedIds = rrf([vec.map((r) => r.artifact_id), fts.map((r) => r.artifact_id)]).slice(0, limit);
