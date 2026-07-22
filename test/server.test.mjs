@@ -155,6 +155,33 @@ test('/api/search: near + radius_km geo-filters by coordinate (#68)', async () =
   assert.equal(blankNear.status, 400, 'whitespace-only near is rejected rather than silently ignored');
 });
 
+test('/api/search: geo_required and sort are honored as caller opts (#190, #238)', async () => {
+  // Caller-supplied geo_required/sort must reach hybridSearch the same way types/near/radius_km
+  // already do — search.test.mjs covers hybridSearch's own geo_required/sort behavior in depth;
+  // this only proves the REST plumbing actually passes them through.
+  const geoVec = await embedToFloat32('a geo-required-test artifact with coordinates');
+  const plainVec = await embedToFloat32('a geo-required-test artifact with no coordinates');
+  const geotagged = storeArtifactTxn({ type: 'note', source: 'geo-required-test', source_id: 'geo', text_repr: 'a geo-required-test artifact with coordinates', latitude: 51.5074, longitude: -0.1278, place_label: 'London, England' }, geoVec, []);
+  const untagged = storeArtifactTxn({ type: 'note', source: 'geo-required-test', source_id: 'plain', text_repr: 'a geo-required-test artifact with no coordinates' }, plainVec, []);
+
+  const filtered = await post('/api/search', { query: 'geo-required-test artifact', geo_required: true, limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(filtered.status, 200);
+  const filteredIds = (await filtered.json()).results.map((r) => r.id);
+  assert.ok(filteredIds.includes(geotagged.id), 'geo_required:true keeps the geotagged artifact');
+  assert.ok(!filteredIds.includes(untagged.id), 'geo_required:true excludes the non-geotagged artifact');
+
+  const recent = await post('/api/search', { query: 'geo-required-test artifact', sort: 'recent', limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(recent.status, 200);
+  const recentIds = (await recent.json()).results.map((r) => r.id);
+  const geoPos = recentIds.indexOf(geotagged.id);
+  const plainPos = recentIds.indexOf(untagged.id);
+  assert.ok(geoPos !== -1 && plainPos !== -1, 'both artifacts are returned under sort:recent');
+  assert.ok(plainPos < geoPos, 'sort:recent orders by occurred_at DESC (the later-inserted artifact first)');
+
+  const bad = await post('/api/search', { query: 'x', sort: 'bogus' }, { 'x-api-key': API_KEY });
+  assert.equal(bad.status, 400, 'an invalid sort value is rejected at the schema');
+});
+
 test('/api/v1/entities/duplicates + /api/v1/entities/merge (#75): surfaces, merges, and rejects bad merges', async () => {
   // Two entities sharing a phone number — the residue contacts.js's own auto-merge (email/exact
   // name only) never catches, and exactly the gap list_probable_duplicates exists to surface.
