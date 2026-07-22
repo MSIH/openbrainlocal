@@ -76,6 +76,10 @@ const SearchSchema = z.object({
   entities: z.array(z.string()).optional(),
   near: NearSchema.optional(),
   radius_km: RadiusSchema.optional(),
+  // #190/#238: no .default() here — undefined must mean "defer to the planner's own
+  // inference", not silently override it (hybridSearch: `geoRequired ?? plan.geo_required`).
+  geo_required: z.boolean().optional(),
+  sort: z.enum(['relevance', 'recent']).optional(),
   limit: LimitSchema.optional(),
 });
 const TimelineSchema = z.object({
@@ -319,12 +323,14 @@ function buildMcpServer() {
         entities: z.array(z.string()).optional().describe("People/places/orgs to require (resolved via the entity graph)."),
         near: NearSchema.optional().describe("Search near a place: a name (e.g. \"San Francisco\") or explicit {lat, lon}. Surfaces artifacts within radius_km by coordinate, catching nearby places the label text doesn't literally name."),
         radius_km: RadiusSchema.optional().describe(`Radius in km for \`near\` (default ${GEO_RADIUS_DEFAULT_KM}, max ${GEO_RADIUS_MAX_KM}).`),
+        geo_required: z.boolean().optional().describe("Restrict to artifacts with a non-null place_label. Omit to defer to the query planner's own inference."),
+        sort: z.enum(['relevance', 'recent']).optional().describe("\"recent\" orders results by occurred_at DESC instead of relevance ranking. Omit to defer to the query planner's own inference."),
         limit: LimitSchema.optional().describe("Max results (1-50, default 3)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ query, types, time_range, entities, near, radius_km, limit = 3 }) => {
-      const results = await hybridSearch(query, { limit, types, timeRange: time_range, entities, near, radiusKm: radius_km });
+    async ({ query, types, time_range, entities, near, radius_km, geo_required, sort, limit = 3 }) => {
+      const results = await hybridSearch(query, { limit, types, timeRange: time_range, entities, near, radiusKm: radius_km, geoRequired: geo_required, sort });
       if (results.length === 0) return { content: [{ type: "text", text: "No matching artifacts found." }] };
       return { content: [{ type: "text", text: results.map(artifactLine).join("\n") }] };
     }
@@ -635,8 +641,8 @@ app.post('/api/recall', requireAuth, wrap(async (req, res) => {
 }));
 
 app.post('/api/search', requireAuth, wrap(async (req, res) => {
-  const { query, types, time_range, entities, near, radius_km, limit } = SearchSchema.parse(req.body);
-  const results = await hybridSearch(query, { limit: limit ?? 3, types, timeRange: time_range, entities, near, radiusKm: radius_km });
+  const { query, types, time_range, entities, near, radius_km, geo_required, sort, limit } = SearchSchema.parse(req.body);
+  const results = await hybridSearch(query, { limit: limit ?? 3, types, timeRange: time_range, entities, near, radiusKm: radius_km, geoRequired: geo_required, sort });
   res.json({ results });
 }));
 
