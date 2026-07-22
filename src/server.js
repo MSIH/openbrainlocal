@@ -30,7 +30,7 @@ import rateLimit from 'express-rate-limit';
 
 import { PORT, TRUST_PROXY, DB_PATH, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES, ACCESS_LOG_ENABLED, ACCESS_LOG_DIR, ACCESS_LOG_RETENTION_DAYS } from './config.js';
 import { accessLogMiddleware, pruneOldLogs, ensureCompressed, closeAccessLog } from './access-log.js';
-import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, logEvent, normalizeName, normalizePhone } from './db.js';
+import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, resolveEntityIds, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, logEvent, normalizeName, normalizePhone } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
@@ -151,6 +151,37 @@ const stageProposedEntity = ({ kind, name, alias, alias_type, source, confidence
   if (result.created) logEvent('proposed_entity_staged', src, { proposal_id: result.id, suggested_kind: kind, suggested_name: name, alias: normAlias, alias_type });
   return result;
 };
+
+// Resolve an entity reference (a numeric id OR a name) to { id, name }, for add_relationship (#234).
+// A number is treated as an id and existence-checked; a string goes through the exact-match
+// resolveEntityIds — 0 matches → NOT_FOUND, >1 → AMBIGUOUS (message lists the candidate ids so the
+// caller can retry with an explicit id; a wrong edge is worse than a guessed one). Throws a typed Error.
+export const resolveEntityRef = (ref) => {
+  if (typeof ref === 'number') {
+    const e = getEntity(ref);
+    if (!e) { const err = new Error(`no entity with id ${ref}`); err.code = 'NOT_FOUND'; throw err; }
+    return { id: ref, name: e.canonical_name };
+  }
+  const ids = resolveEntityIds(ref);
+  if (ids.length === 0) { const err = new Error(`no entity named "${ref}"`); err.code = 'NOT_FOUND'; throw err; }
+  if (ids.length > 1) { const err = new Error(`"${ref}" is ambiguous (entities ${ids.map((i) => `#${i}`).join(', ')}) — pass a numeric id`); err.code = 'AMBIGUOUS'; throw err; }
+  return { id: ids[0], name: getEntity(ids[0])?.canonical_name ?? ref };
+};
+
+// Create a directional edge between two EXISTING entities (#234), the logic behind the add_relationship
+// MCP tool. Resolves each ref by name-or-id, rejects a self-loop and a missing type, then writes the edge
+// via upsertEntityRelation (append-only, OR IGNORE idempotent, ungated — both endpoints are already
+// curated). Throws typed errors (NOT_FOUND/AMBIGUOUS/SELF_LOOP/MISSING_TYPE); returns { added, relation_type,
+// from, to } for the caller to format. Exported so the logic is unit-tested without an MCP transport.
+export function addRelationship({ from, to, relation_type = null, raw_label = null }) {
+  if (!relation_type && !raw_label) { const err = new Error('relation_type or raw_label required'); err.code = 'MISSING_TYPE'; throw err; }
+  const a = resolveEntityRef(from);
+  const b = resolveEntityRef(to);
+  if (a.id === b.id) { const err = new Error('a relation cannot point at itself'); err.code = 'SELF_LOOP'; throw err; }
+  const type = relation_type ?? canonicalRelationType(raw_label);
+  const added = upsertEntityRelation({ from_entity_id: a.id, to_entity_id: b.id, relation_type: type, raw_label: raw_label ?? null, confidence: 1.0, source: 'mcp' });
+  return { added, relation_type: type, from: a.name, to: b.name };
+}
 
 // --- OUTPUT FORMATTERS (MCP tools return text) ---
 const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
@@ -511,6 +542,35 @@ function buildMcpServer() {
       } catch (err) {
         console.error("reject_proposed_entity tool failed:", err);
         return { content: [{ type: "text", text: `Reject failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
+    "add_relationship",
+    {
+      title: "Link two existing entities",
+      description:
+        "Create a directional relationship between two entities that ALREADY exist in the graph (e.g. a person " +
+        "worksAt an org). Each side is a name (resolved) or a numeric entity id; the edge points from → to. Both " +
+        "entities must exist first — if one doesn't, propose_entity it and get it approved, then call this. Give a " +
+        "canonical relation_type (e.g. worksAt, spouse, manager) or a free-text raw_label. Idempotent.",
+      inputSchema: {
+        from: z.union([z.number().int().positive(), z.string().trim().min(1)]).describe("Source entity (edge points from here): a name or a numeric id. For employment, the person."),
+        to: z.union([z.number().int().positive(), z.string().trim().min(1)]).describe("Target entity: a name or a numeric id. For employment, the org."),
+        relation_type: z.string().trim().min(1).optional().describe("Canonical type, e.g. worksAt, spouse, parent, manager. One of relation_type/raw_label is required."),
+        raw_label: z.string().trim().min(1).optional().describe("Free-text label for a relation with no canonical type."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ from, to, relation_type, raw_label }) => {
+      try {
+        const { added, relation_type: type, from: fromName, to: toName } = addRelationship({ from, to, relation_type, raw_label });
+        const arrow = `"${fromName}" —[${type}]→ "${toName}"`;
+        return { content: [{ type: "text", text: added ? `Linked ${arrow}.` : `Relationship already existed: ${arrow}.` }] };
+      } catch (err) {
+        console.error("add_relationship tool failed:", err);
+        return { content: [{ type: "text", text: `Add relationship failed: ${err.message}` }], isError: true };
       }
     }
   );

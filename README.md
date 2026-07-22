@@ -129,6 +129,7 @@ Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Author
   - `get_artifact` — one artifact's full text, metadata, and entity links by id
   - `list_probable_duplicates` / `merge_entities` — surface and merge likely-duplicate contacts (30 years across Google/Yahoo/iPhone rarely dedup perfectly); merge tombstones the absorbed entity rather than deleting it
   - `propose_entity` — suggest a NEW entity (person/org/place/event — e.g. a broker or agent you learned about) for review; stages a *pending* proposal, never mints, so a human approves it (`list_proposed_entities` / `approve_proposed_entity` / `reject_proposed_entity`, or the contacts UI "Proposed" panel). Idempotent — re-proposing the same one is a no-op. REST equivalent: `POST /api/v1/entities/proposed`. This is the only way an agent adds to the graph, and it can't do so unapproved
+  - `add_relationship` — link two entities that **already exist** (e.g. a person `worksAt` an org): `from`/`to` are each a name (resolved) or a numeric id, plus a canonical `relation_type` (worksAt, spouse, manager, …) or free-text `raw_label`. Directional (from → to); idempotent; ungated (both endpoints already passed approval). If an endpoint doesn't exist yet, `propose_entity` it and approve first. Ambiguous or unknown names error rather than guess
 
 ### Connectors write; recall is separate
 
