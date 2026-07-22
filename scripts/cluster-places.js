@@ -56,7 +56,7 @@ export function clusterPlaces() {
       alias_type: 'name',
       source: 'places-cluster',
       attrs_json: { latitude, longitude, radius_km: DEFAULT_RADIUS_KM },
-    })) staged += 1;
+    }).created) staged += 1;
   }
   const summary = { scanned: rows.length, clusters, staged, unnamed };
   logEvent('places_clustered', 'cluster-places.js', summary);

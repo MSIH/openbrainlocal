@@ -89,7 +89,7 @@ export function clusterEvents() {
       alias_type: 'name',
       source: 'events-cluster',
       attrs_json: { start, end, place_entity_id: null },
-    })) staged += 1;
+    }).created) staged += 1;
   }
   const summary = { scanned: rows.length, home_filtered: !!home, clusters, staged, unnamed };
   logEvent('events_clustered', 'cluster-events.js', summary);

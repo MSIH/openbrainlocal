@@ -312,3 +312,46 @@ test('#119 proposed entities: reject retains + auth-gated; no-suggested_kind hin
   r = await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY });
   assert.equal((await r.json()).proposals.some((p) => p.suggested_name === 'PlainCo'), false, 'no proposal without suggested_kind');
 });
+
+test('#232 propose_entity: agent-staged person proposal is idempotent, auth-gated, then approvable', async () => {
+  assert.equal((await post('/api/v1/entities/proposed', { kind: 'person', name: 'Jane Broker' })).status, 401, 'propose is auth-gated');
+
+  let r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Jane Broker' }, { 'x-api-key': API_KEY });
+  assert.equal(r.status, 201, 'new proposal → 201');
+  const staged = await r.json();
+  assert.deepEqual({ proposed: staged.proposed, status: staged.status }, { proposed: true, status: 'pending' });
+  assert.ok(Number.isInteger(staged.id));
+
+  // defaulted alias=(name,'name'); appears in the same review queue the UI reads
+  r = await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY });
+  const p = (await r.json()).proposals.find((x) => x.suggested_name === 'Jane Broker');
+  assert.ok(p && p.alias === 'Jane Broker' && p.alias_type === 'name' && p.source === 'mcp-proposal', 'staged with defaulted name alias + agent source');
+
+  // re-proposing the identical (name, alias, alias_type) is a no-op returning the same id
+  r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Jane Broker' }, { 'x-api-key': API_KEY });
+  assert.equal(r.status, 200, 'duplicate → 200');
+  const dup = await r.json();
+  assert.deepEqual({ id: dup.id, proposed: dup.proposed, status: dup.status }, { id: staged.id, proposed: false, status: 'pending' });
+
+  // approval mints the entity (nothing was created before) and it resolves by name
+  assert.equal((await (await post('/api/about_entity', { name: 'Jane Broker' }, { 'x-api-key': API_KEY })).json()).resolved, false, 'no entity before approval');
+  r = await fetch(`${base}/api/v1/entities/proposed/${staged.id}/approve`, { method: 'POST', headers: { 'x-api-key': API_KEY } });
+  assert.equal(r.status, 200);
+  const ab = await (await post('/api/about_entity', { name: 'Jane Broker' }, { 'x-api-key': API_KEY })).json();
+  assert.equal(ab.resolved, true, 'entity created on approve');
+});
+
+test('#232 propose_entity: org proposal approves with kind=org and full name preserved', async () => {
+  const r = await post('/api/v1/entities/proposed', { kind: 'org', name: 'Acme Insurance' }, { 'x-api-key': API_KEY });
+  assert.equal(r.status, 201);
+  const { id } = await r.json();
+  assert.equal((await fetch(`${base}/api/v1/entities/proposed/${id}/approve`, { method: 'POST', headers: { 'x-api-key': API_KEY } })).status, 200);
+
+  const ab = await (await post('/api/about_entity', { name: 'Acme Insurance' }, { 'x-api-key': API_KEY })).json();
+  assert.equal(ab.resolved, true, 'org entity created on approve');
+  assert.equal(ab.entities[0].entity.kind, 'org', 'created as kind=org (no first/last reduction)');
+  assert.equal(ab.entities[0].entity.canonical_name, 'Acme Insurance', 'full org name preserved');
+
+  // a supplied alias without its type is rejected by the schema
+  assert.equal((await post('/api/v1/entities/proposed', { kind: 'person', name: 'No Type', alias: 'x@y.com' }, { 'x-api-key': API_KEY })).status, 400, 'alias without alias_type → 400');
+});

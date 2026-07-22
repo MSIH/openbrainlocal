@@ -129,7 +129,7 @@ test('events:cluster: a "home" place excludes at-home artifacts from clustering 
 
 test('proposeEntity: carries attrs_json span for an event proposal', () => {
   const staged = proposeEntity({ suggested_kind: 'event', name: 'Manual Event Prop', alias: 'manual event prop', alias_type: 'name', attrs_json: { start: '2026-12-01T00:00:00Z', end: '2026-12-02T00:00:00Z', place_entity_id: null } });
-  assert.equal(staged, true);
+  assert.equal(staged.created, true);
   const row = listProposedEntities('pending', 1000).find((p) => p.suggested_name === 'Manual Event Prop');
   assert.deepEqual(JSON.parse(row.attrs_json), { start: '2026-12-01T00:00:00Z', end: '2026-12-02T00:00:00Z', place_entity_id: null });
 });

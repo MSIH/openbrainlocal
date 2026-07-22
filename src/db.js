@@ -439,6 +439,9 @@ const listProposalsStmt = db.prepare(`
   FROM proposed_entities WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ?
 `);
 const getProposalStmt = db.prepare('SELECT * FROM proposed_entities WHERE id = ?');
+// Look up a proposal by its UNIQUE key so proposeEntity can return the row id + status even when
+// INSERT OR IGNORE staged nothing new (the key already existed) — see proposeEntity.
+const getProposalByKeyStmt = db.prepare('SELECT id, status FROM proposed_entities WHERE suggested_name = ? AND alias = ? AND alias_type = ?');
 const setProposalStatusStmt = db.prepare('UPDATE proposed_entities SET status = ? WHERE id = ?');
 const setProposalResolvedStmt = db.prepare(`UPDATE proposed_entities SET status = 'approved', resolved_entity_id = ? WHERE id = ?`);
 
@@ -486,7 +489,7 @@ export function backfillDirectoryProposals() {
       const name = lookupDirectoryName(row.alias, row.alias_type);
       if (!name) continue;
       if (resolveAliasByTypeStmt.all(row.alias, row.alias_type).length) continue; // became curated since
-      if (proposeEntity({ suggested_kind: 'person', name, alias: row.alias, alias_type: row.alias_type, artifact_id: row.artifact_id, source: 'directory-backfill' })) proposed++;
+      if (proposeEntity({ suggested_kind: 'person', name, alias: row.alias, alias_type: row.alias_type, artifact_id: row.artifact_id, source: 'directory-backfill' }).created) proposed++;
     }
   });
   run();
@@ -1486,12 +1489,18 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
 // Stage a proposal (no entity is minted). Plain function (no transaction of its own): it runs
 // INSIDE resolveEntityHints, which runs inside the caller's ingest transaction. Hoisted so
 // resolveEntityHints (defined earlier) can call it. Idempotent via the table's UNIQUE key.
-// Returns true when a NEW proposal row was written (false when the UNIQUE key already existed —
-// INSERT OR IGNORE). Callers that count staged proposals (the #154 backfill) rely on this to stay
-// idempotent; resolveEntityHints ignores the return.
+// Returns { id, created, status }: `created` is true when a NEW proposal row was written (false when
+// the UNIQUE key already existed — INSERT OR IGNORE), and id/status come from the (new or existing)
+// row so external callers (propose_entity, #232) can reference it. Logs a proposed_entity_staged
+// ingest_log row only on a fresh stage (the internal hint path is otherwise silent — resolveEntityHints
+// logs at a higher level — but an external write earns its own audit row). Callers that count staged
+// proposals (the #154 backfill) check `.created`; resolveEntityHints ignores the return.
 export function proposeEntity({ suggested_kind, name, alias, alias_type, artifact_id = null, source = null, confidence = null, attrs_json = null }) {
   const attrs = attrs_json == null ? null : (typeof attrs_json === 'string' ? attrs_json : JSON.stringify(attrs_json));
-  return insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence, attrs).changes > 0;
+  const created = insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence, attrs).changes > 0;
+  const row = getProposalByKeyStmt.get(name, alias, alias_type);
+  if (created) logEvent('proposed_entity_staged', source ?? 'proposed-entities', { proposal_id: row.id, suggested_kind, suggested_name: name, alias, alias_type });
+  return { id: row.id, created, status: row.status };
 }
 
 // List proposals by status (default the review queue: pending), newest first.

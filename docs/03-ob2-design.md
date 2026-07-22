@@ -337,6 +337,7 @@ Keep the per-session server factory and Streamable HTTP transport from v2.2 unch
 - `timeline(start, end, types?)` — pure chronological recall
 - `about_entity(name)` — resolve → profile + linked artifact digest + person↔person `relations` ("everything about Sarah")
 - `get_artifact(id)` — full `text_repr` + metadata + `raw_path`
+- `propose_entity(kind, name, alias?, alias_type?, source?, confidence?)` (#232) — an agent *suggests* a new entity (a broker, an agent) instead of asserting one. Stages a **pending** `proposed_entities` row (`source='mcp-proposal'`, `alias` defaults to `(name,'name')`); mints nothing. A human then `approve_proposed_entity` / `reject_proposed_entity` (or uses the contacts-UI "Proposed" panel). Idempotent per `(name, alias, alias_type)`. REST: `POST /api/v1/entities/proposed`. This is the *only* graph-write an agent can make, and approval is the gate that keeps it from polluting the graph — distinct from the trusted, ungated `POST /api/v1/entities` (`createEntity`) the contacts UI uses.
 
 ---
 
