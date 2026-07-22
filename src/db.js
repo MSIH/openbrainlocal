@@ -1491,15 +1491,18 @@ export const createEntity = db.transaction(({ kind, canonical_name, attrs = {} }
 // resolveEntityHints (defined earlier) can call it. Idempotent via the table's UNIQUE key.
 // Returns { id, created, status }: `created` is true when a NEW proposal row was written (false when
 // the UNIQUE key already existed — INSERT OR IGNORE), and id/status come from the (new or existing)
-// row so external callers (propose_entity, #232) can reference it. Logs a proposed_entity_staged
-// ingest_log row only on a fresh stage (the internal hint path is otherwise silent — resolveEntityHints
-// logs at a higher level — but an external write earns its own audit row). Callers that count staged
+// row so external callers (propose_entity, #232) can reference it. Silent by design — the internal
+// hint/backfill/cluster paths log at a higher level (a per-run summary), and the external write logs
+// its own proposed_entity_staged row in stageProposedEntity (server.js). Callers that count staged
 // proposals (the #154 backfill) check `.created`; resolveEntityHints ignores the return.
 export function proposeEntity({ suggested_kind, name, alias, alias_type, artifact_id = null, source = null, confidence = null, attrs_json = null }) {
   const attrs = attrs_json == null ? null : (typeof attrs_json === 'string' ? attrs_json : JSON.stringify(attrs_json));
   const created = insertProposalStmt.run(suggested_kind, name, alias, alias_type, artifact_id, source, confidence, attrs).changes > 0;
+  // The UNIQUE(suggested_name, alias, alias_type) columns are the exact WHERE key, and every caller
+  // passes non-null name/alias/alias_type, so a row always exists here — guard defensively anyway so a
+  // future null-keyed caller (which INSERT OR IGNOREs but then SELECTs nothing) fails loud, not with a bare TypeError.
   const row = getProposalByKeyStmt.get(name, alias, alias_type);
-  if (created) logEvent('proposed_entity_staged', source ?? 'proposed-entities', { proposal_id: row.id, suggested_kind, suggested_name: name, alias, alias_type });
+  if (!row) { const err = new Error('proposeEntity: staged row not found by its unique key'); err.code = 'STAGE_LOOKUP_FAILED'; throw err; }
   return { id: row.id, created, status: row.status };
 }
 

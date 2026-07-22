@@ -327,6 +327,10 @@ test('#232 propose_entity: agent-staged person proposal is idempotent, auth-gate
   const p = (await r.json()).proposals.find((x) => x.suggested_name === 'Jane Broker');
   assert.ok(p && p.alias === 'Jane Broker' && p.alias_type === 'name' && p.source === 'mcp-proposal', 'staged with defaulted name alias + agent source');
 
+  // the external write earns an audit row (the internal hint path stays silent — logged by its own summary)
+  const logged = db.prepare(`SELECT COUNT(*) AS n FROM ingest_log WHERE event_type = 'proposed_entity_staged' AND details LIKE '%Jane Broker%'`).get();
+  assert.equal(logged.n, 1, 'one proposed_entity_staged ingest_log row for the fresh external stage');
+
   // re-proposing the identical (name, alias, alias_type) is a no-op returning the same id
   r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Jane Broker' }, { 'x-api-key': API_KEY });
   assert.equal(r.status, 200, 'duplicate → 200');
