@@ -174,14 +174,17 @@ export const resolveEntityRef = (ref) => {
 // curated). Throws typed errors (NOT_FOUND/AMBIGUOUS/SELF_LOOP/MISSING_TYPE); returns { added, relation_type,
 // from, to } for the caller to format. Exported so the logic is unit-tested without an MCP transport.
 export function addRelationship({ from, to, relation_type = null, raw_label = null }) {
-  if (!relation_type && !raw_label) { const err = new Error('relation_type or raw_label required'); err.code = 'MISSING_TYPE'; throw err; }
+  // Trim and treat blank (''/whitespace) as absent — this is exported, so a direct caller could pass
+  // "   " (MCP zod's .trim().min(1) blocks it there); a blank must never slip past the guard or become
+  // a whitespace relation_type. `||` (not `??`) then falls a blank relation_type through to canonicalize.
+  const rt = relation_type?.trim() || null;
+  const rl = raw_label?.trim() || null;
+  if (!rt && !rl) { const err = new Error('relation_type or raw_label required'); err.code = 'MISSING_TYPE'; throw err; }
   const a = resolveEntityRef(from);
   const b = resolveEntityRef(to);
   if (a.id === b.id) { const err = new Error('a relation cannot point at itself'); err.code = 'SELF_LOOP'; throw err; }
-  // `||` not `??`: a direct caller could pass relation_type:'' (MCP zod blocks it, but this is exported),
-  // and an empty type must fall through to canonicalize raw_label rather than write a blank relation_type.
-  const type = relation_type || canonicalRelationType(raw_label);
-  const added = upsertEntityRelation({ from_entity_id: a.id, to_entity_id: b.id, relation_type: type, raw_label: raw_label ?? null, confidence: 1.0, source: 'mcp' });
+  const type = rt || canonicalRelationType(rl);
+  const added = upsertEntityRelation({ from_entity_id: a.id, to_entity_id: b.id, relation_type: type, raw_label: rl, confidence: 1.0, source: 'mcp' });
   return { added, relation_type: type, from: a.name, to: b.name };
 }
 

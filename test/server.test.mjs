@@ -381,10 +381,14 @@ test('#234 add_relationship: links by name, directional, idempotent; errors leav
   // by numeric id + a free-text raw_label (→ canonical 'custom')
   assert.equal(addRelationship({ from: person, to: org, raw_label: 'advisor' }).relation_type, 'custom', 'raw_label maps to custom');
 
-  // error cases throw typed codes and write nothing new
+  // error cases throw typed codes and write NOTHING new (row count is unchanged across all throws)
+  const countRels = () => db.prepare('SELECT COUNT(*) AS n FROM entity_relations').get().n;
+  const before = countRels();
   assert.throws(() => addRelationship({ from: 'Rel Person', to: 'Rel Person', relation_type: 'friend' }), (e) => e.code === 'SELF_LOOP');
   assert.throws(() => addRelationship({ from: 'Rel Person', to: 'Rel Org' }), (e) => e.code === 'MISSING_TYPE');
+  assert.throws(() => addRelationship({ from: 'Rel Person', to: 'Rel Org', relation_type: '   ' }), (e) => e.code === 'MISSING_TYPE'); // whitespace-only → missing
   assert.throws(() => addRelationship({ from: 'Nobody Here At All', to: 'Rel Org', relation_type: 'friend' }), (e) => e.code === 'NOT_FOUND');
+  assert.equal(countRels(), before, 'no edge written by any error case');
 });
 
 test('#234 resolveEntityRef: resolves by id/name, errors on unknown + ambiguous', () => {
