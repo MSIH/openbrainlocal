@@ -26,7 +26,7 @@ const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-server-raw-'));
 process.env.CONTACTS_RAW_DIR = rawDir;
 const writePhoto = (name) => { const p = path.join(rawDir, name); writeFileSync(p, 'img-bytes'); return p; };
 
-const { app, serverInstance, secureCompare } = await import('../src/server.js');
+const { app, serverInstance, secureCompare, addRelationship, resolveEntityRef } = await import('../src/server.js');
 const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn, upsertEntityRelation } = await import('../src/db.js');
 const { embedToFloat32 } = await import('../src/embeddings.js');
 
@@ -358,6 +358,53 @@ test('#232 propose_entity: org proposal approves with kind=org and full name pre
 
   // a supplied alias without its type is rejected by the schema
   assert.equal((await post('/api/v1/entities/proposed', { kind: 'person', name: 'No Type', alias: 'x@y.com' }, { 'x-api-key': API_KEY })).status, 400, 'alias without alias_type → 400');
+});
+
+test('#234 add_relationship: links by name, directional, idempotent; errors leave no edge', async () => {
+  const person = Number(insertEntityStmt.run('person', 'Rel Person', '{}').lastInsertRowid);
+  const org = Number(insertEntityStmt.run('org', 'Rel Org', '{}').lastInsertRowid);
+  insertAliasStmt.run(person, 'rel person', 'name');
+  insertAliasStmt.run(org, 'rel org', 'name');
+
+  const res = addRelationship({ from: 'Rel Person', to: 'Rel Org', relation_type: 'worksAt' });
+  assert.deepEqual({ added: res.added, type: res.relation_type, from: res.from, to: res.to }, { added: true, type: 'worksAt', from: 'Rel Person', to: 'Rel Org' });
+
+  // directional: worksAt shows outgoing on the person, incoming (relations_in) on the org
+  const abP = await (await post('/api/about_entity', { name: 'Rel Person' }, { 'x-api-key': API_KEY })).json();
+  assert.ok(abP.entities[0].relations.some((r) => r.relation_type === 'worksAt' && r.name === 'Rel Org'), 'person → worksAt → org');
+  const abO = await (await post('/api/about_entity', { name: 'Rel Org' }, { 'x-api-key': API_KEY })).json();
+  assert.ok(abO.entities[0].relations_in.some((r) => r.relation_type === 'worksAt' && r.name === 'Rel Person'), 'org referenced-by the person');
+
+  // idempotent: same triple is a no-op
+  assert.equal(addRelationship({ from: 'Rel Person', to: 'Rel Org', relation_type: 'worksAt' }).added, false, 're-add is a no-op');
+
+  // by numeric id + a free-text raw_label (→ canonical 'custom')
+  assert.equal(addRelationship({ from: person, to: org, raw_label: 'advisor' }).relation_type, 'custom', 'raw_label maps to custom');
+
+  // error cases throw typed codes and write NOTHING new (row count is unchanged across all throws)
+  const countRels = () => db.prepare('SELECT COUNT(*) AS n FROM entity_relations').get().n;
+  const before = countRels();
+  assert.throws(() => addRelationship({ from: 'Rel Person', to: 'Rel Person', relation_type: 'friend' }), (e) => e.code === 'SELF_LOOP');
+  assert.throws(() => addRelationship({ from: 'Rel Person', to: 'Rel Org' }), (e) => e.code === 'MISSING_TYPE');
+  assert.throws(() => addRelationship({ from: 'Rel Person', to: 'Rel Org', relation_type: '   ' }), (e) => e.code === 'MISSING_TYPE'); // whitespace-only → missing
+  assert.throws(() => addRelationship({ from: 'Nobody Here At All', to: 'Rel Org', relation_type: 'friend' }), (e) => e.code === 'NOT_FOUND');
+  assert.equal(countRels(), before, 'no edge written by any error case');
+});
+
+test('#234 resolveEntityRef: resolves by id/name, errors on unknown + ambiguous', () => {
+  const id = Number(insertEntityStmt.run('person', 'Ref Lookup', '{}').lastInsertRowid);
+  insertAliasStmt.run(id, 'ref lookup', 'name');
+  assert.deepEqual(resolveEntityRef(id), { id, name: 'Ref Lookup' }, 'by id');
+  assert.equal(resolveEntityRef('Ref Lookup').id, id, 'by name');
+  assert.throws(() => resolveEntityRef(999999), (e) => e.code === 'NOT_FOUND', 'unknown id');
+  assert.throws(() => resolveEntityRef('No Such Name Here'), (e) => e.code === 'NOT_FOUND', 'unknown name');
+
+  // ambiguous: the same alias value owned by two entities under different types (resolveAliasStmt is type-agnostic)
+  const x = Number(insertEntityStmt.run('person', 'Ambig X', '{}').lastInsertRowid);
+  const y = Number(insertEntityStmt.run('org', 'Ambig Y', '{}').lastInsertRowid);
+  insertAliasStmt.run(x, 'ambig token', 'name');
+  insertAliasStmt.run(y, 'ambig token', 'handle');
+  assert.throws(() => resolveEntityRef('ambig token'), (e) => e.code === 'AMBIGUOUS');
 });
 
 test('#232 propose_entity: email/phone aliases are normalized (idempotent across casing/format)', async () => {
