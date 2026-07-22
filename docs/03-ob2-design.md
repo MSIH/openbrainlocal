@@ -332,6 +332,8 @@ Then vector-rank only within those candidates (sqlite-vec supports `partition ke
 
 Keep the per-session server factory and Streamable HTTP transport from v2.2 unchanged. New/updated tools:
 
+> Note: MCP clients cache the tool list at connect time, so a newly added tool needs a client **reconnect** to appear (a service restart alone doesn't reach already-connected clients) — see the "Reconnect after a tool changes" note in `README.md`.
+
 - `store_memory(content)` — unchanged (manual notes are just `type='note'` artifacts)
 - `search(query, types?, time_range?, entities?, near?, radius_km?, limit?)` — hybrid planner above; `near` (place name or `{lat, lon}`) + `radius_km` add a geo-radius filter (#68)
 - `timeline(start, end, types?)` — pure chronological recall
