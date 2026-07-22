@@ -131,7 +131,7 @@ test('places:cluster: re-running stages no duplicate proposal (proposed_entities
 
 test('proposeEntity: carries attrs_json for a place proposal (person/org leave it NULL)', () => {
   const staged = proposeEntity({ suggested_kind: 'place', name: 'Manual Prop Place', alias: 'manual prop place', alias_type: 'name', attrs_json: { latitude: 1, longitude: 2, radius_km: 3 } });
-  assert.equal(staged, true);
+  assert.equal(staged.created, true);
   const row = listProposedEntities('pending', 1000).find((p) => p.suggested_name === 'Manual Prop Place');
   assert.deepEqual(JSON.parse(row.attrs_json), { latitude: 1, longitude: 2, radius_km: 3 });
 });

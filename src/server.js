@@ -30,7 +30,7 @@ import rateLimit from 'express-rate-limit';
 
 import { PORT, TRUST_PROXY, DB_PATH, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES, ACCESS_LOG_ENABLED, ACCESS_LOG_DIR, ACCESS_LOG_RETENTION_DAYS } from './config.js';
 import { accessLogMiddleware, pruneOldLogs, ensureCompressed, closeAccessLog } from './access-log.js';
-import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals } from './db.js';
+import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, logEvent, normalizeName, normalizePhone } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
@@ -121,6 +121,36 @@ const ProposedQuerySchema = z.object({
   status: z.enum(['pending', 'approved', 'rejected']).optional(),
   limit: z.coerce.number().int().positive().max(100).optional(),
 });
+// propose_entity (#232): the external WRITE entry into the #119 queue. An agent (MCP/REST) SUGGESTS an
+// entity; it is staged pending, never minted — human approval (list/approve_proposed_entity, or the UI
+// "Proposed contacts" panel) is the gate that keeps an agent from polluting the graph. alias/alias_type
+// default to (name,'name') when no handle is supplied (a supplied alias requires its type). kind mirrors
+// CreateEntitySchema's set. Shared by the REST route and the MCP tool so the rules live in one place.
+const ProposeEntitySchema = z.object({
+  kind: z.enum(['person', 'org', 'place', 'event']),
+  name: z.string().trim().min(1),
+  alias: z.string().trim().min(1).optional(),
+  alias_type: AliasTypeSchema.optional(),
+  source: z.string().trim().min(1).optional(),
+  confidence: z.coerce.number().min(0).max(1).optional(),
+  attrs: AttrsSchema.optional(),
+}).refine((v) => (v.alias === undefined) === (v.alias_type === undefined), { message: 'alias and alias_type must be provided together' })
+  .transform((v) => (v.alias ? v : { ...v, alias: v.name, alias_type: 'name' }));
+// Stage a proposal from a validated ProposeEntitySchema value (agent-facing default source). Returns
+// { id, created, status } from proposeEntity so callers can report the queue row + whether it was new.
+// This is the external write entry point, so it owns the proposed_entity_staged audit row (proposeEntity
+// itself stays silent for the internal hint/backfill/cluster paths — see its comment).
+const stageProposedEntity = ({ kind, name, alias, alias_type, source, confidence, attrs }) => {
+  const src = source ?? 'mcp-proposal';
+  // Normalize the resolution key exactly as ingest does (resolveEntityHints): phone via normalizePhone,
+  // everything else lowercased/trimmed. Without this an email/phone alias stages un-normalized — it
+  // breaks idempotency (two casings stage twice) and, on approval, won't match the normalized lookup
+  // path. `name` stays the raw display string (the entity's canonical_name at approval).
+  const normAlias = alias_type === 'phone' ? normalizePhone(alias) : normalizeName(alias);
+  const result = proposeEntity({ suggested_kind: kind, name, alias: normAlias, alias_type, source: src, confidence: confidence ?? null, attrs_json: attrs ?? null });
+  if (result.created) logEvent('proposed_entity_staged', src, { proposal_id: result.id, suggested_kind: kind, suggested_name: name, alias: normAlias, alias_type });
+  return result;
+};
 
 // --- OUTPUT FORMATTERS (MCP tools return text) ---
 const snippet = (s, n = 200) => (s && s.length > n ? s.slice(0, n) + "…" : s || "");
@@ -383,6 +413,39 @@ function buildMcpServer() {
   );
 
   server.registerTool(
+    "propose_entity",
+    {
+      title: "Propose a new entity for review",
+      description:
+        "Suggest a NEW entity (person, org, place, event) — e.g. a broker or agent you learned about — so a " +
+        "human can approve it. This does NOT create the entity: it stages a pending proposal in the review " +
+        "queue (list_proposed_entities → approve_proposed_entity). Use this instead of asserting entities " +
+        "directly; approval is what keeps the graph clean. Idempotent — re-proposing the same one is a no-op.",
+      inputSchema: {
+        kind: z.enum(['person', 'org', 'place', 'event']).describe("Entity kind."),
+        name: z.string().trim().min(1).describe("Display/canonical name of the proposed entity."),
+        alias: z.string().trim().min(1).optional().describe("Resolution key (email/phone/handle/name). Defaults to name when omitted."),
+        alias_type: z.enum(['email', 'phone', 'name', 'handle']).optional().describe("Type of alias; required if alias is given."),
+        source: z.string().trim().min(1).optional().describe("Where this suggestion came from (default 'mcp-proposal')."),
+        confidence: z.coerce.number().min(0).max(1).optional().describe("Optional 0–1 confidence in the suggestion."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (args) => {
+      try {
+        const { id, created, status } = stageProposedEntity(ProposeEntitySchema.parse(args));
+        const text = created
+          ? `Staged proposal #${id} [${args.kind}] "${args.name}". Review with list_proposed_entities, then approve_proposed_entity.`
+          : `Already ${status} as proposal #${id} — not re-staged.`;
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        console.error("propose_entity tool failed:", err);
+        return { content: [{ type: "text", text: `Propose failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.registerTool(
     "list_proposed_entities",
     {
       title: "List proposed entities awaiting review",
@@ -616,6 +679,14 @@ app.post('/api/v1/entities', requireAuth, wrap(async (req, res) => {
 app.get('/api/v1/entities/proposed', requireAuth, wrap(async (req, res) => {
   const { status, limit } = ProposedQuerySchema.parse(req.query);
   res.json({ proposals: listProposedEntities(status ?? 'pending', limit ?? 20) });
+}));
+
+// #232: propose a new entity (agent-facing WRITE). Stages a pending proposal — never mints — so it
+// lands in the same review queue the GET above serves. 201 when newly staged, 200 when the
+// (name, alias, alias_type) already existed (idempotent; returns the existing id + status).
+app.post('/api/v1/entities/proposed', requireAuth, wrap(async (req, res) => {
+  const { id, created, status } = stageProposedEntity(ProposeEntitySchema.parse(req.body));
+  res.status(created ? 201 : 200).json({ id, proposed: created, status });
 }));
 
 app.post('/api/v1/entities/proposed/:id/approve', requireAuth, wrap(async (req, res) => {

@@ -128,6 +128,7 @@ Every endpoint/tool requires the key, sent as the `x-api-key` header (or `Author
   - `about_entity` — resolve a person/place/org and return their profile, recent linked artifacts, and person↔person relations (spouse, child, parent, …)
   - `get_artifact` — one artifact's full text, metadata, and entity links by id
   - `list_probable_duplicates` / `merge_entities` — surface and merge likely-duplicate contacts (30 years across Google/Yahoo/iPhone rarely dedup perfectly); merge tombstones the absorbed entity rather than deleting it
+  - `propose_entity` — suggest a NEW entity (person/org/place/event — e.g. a broker or agent you learned about) for review; stages a *pending* proposal, never mints, so a human approves it (`list_proposed_entities` / `approve_proposed_entity` / `reject_proposed_entity`, or the contacts UI "Proposed" panel). Idempotent — re-proposing the same one is a no-op. REST equivalent: `POST /api/v1/entities/proposed`. This is the only way an agent adds to the graph, and it can't do so unapproved
 
 ### Connectors write; recall is separate
 

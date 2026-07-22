@@ -40,7 +40,7 @@ docs/                    — design + setup docs (03 core design, 04 connector c
 | Interface | Endpoints / tools | Auth |
 |-----------|-------------------|------|
 | REST | `POST /api/{remember,recall,search,timeline,about_entity}`, `GET /api/artifact/:id` | `x-api-key` header |
-| MCP (Streamable HTTP) | `/mcp` — tools `store_memory`, `search_memories`, `search`, `timeline`, `about_entity`, `get_artifact` | `x-api-key` header |
+| MCP (Streamable HTTP) | `/mcp` — tools `store_memory`, `search_memories`, `search`, `timeline`, `about_entity`, `get_artifact` + entity curation (`merge_entities`, `propose_entity`, `list_proposed_entities`, `approve_proposed_entity`, `reject_proposed_entity`) | `x-api-key` header |
 
 ## Run & Test
 ```bash
