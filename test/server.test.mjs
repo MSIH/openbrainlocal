@@ -325,7 +325,7 @@ test('#232 propose_entity: agent-staged person proposal is idempotent, auth-gate
   // defaulted alias=(name,'name'); appears in the same review queue the UI reads
   r = await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY });
   const p = (await r.json()).proposals.find((x) => x.suggested_name === 'Jane Broker');
-  assert.ok(p && p.alias === 'Jane Broker' && p.alias_type === 'name' && p.source === 'mcp-proposal', 'staged with defaulted name alias + agent source');
+  assert.ok(p && p.alias === 'jane broker' && p.alias_type === 'name' && p.source === 'mcp-proposal', 'staged with defaulted, normalized name alias + agent source');
 
   // the external write earns an audit row (the internal hint path stays silent — logged by its own summary)
   const logged = db.prepare(`SELECT COUNT(*) AS n FROM ingest_log WHERE event_type = 'proposed_entity_staged' AND details LIKE '%Jane Broker%'`).get();
@@ -358,4 +358,21 @@ test('#232 propose_entity: org proposal approves with kind=org and full name pre
 
   // a supplied alias without its type is rejected by the schema
   assert.equal((await post('/api/v1/entities/proposed', { kind: 'person', name: 'No Type', alias: 'x@y.com' }, { 'x-api-key': API_KEY })).status, 400, 'alias without alias_type → 400');
+});
+
+test('#232 propose_entity: email/phone aliases are normalized (idempotent across casing/format)', async () => {
+  // Mixed-case email stages once, lowercased; re-proposing the lowercase form is the same row.
+  let r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Pat Agent', alias: 'Pat.Agent@Example.COM', alias_type: 'email' }, { 'x-api-key': API_KEY });
+  assert.equal(r.status, 201);
+  const first = await r.json();
+  r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Pat Agent', alias: 'pat.agent@example.com', alias_type: 'email' }, { 'x-api-key': API_KEY });
+  assert.deepEqual({ id: (await r.json()).id, s: r.status }, { id: first.id, s: 200 }, 'different casing → same proposal, not a duplicate');
+  const q = await (await get('/api/v1/entities/proposed?status=pending', { 'x-api-key': API_KEY })).json();
+  assert.equal(q.proposals.find((x) => x.id === first.id).alias, 'pat.agent@example.com', 'email alias stored lowercased');
+
+  // Same for a NANP phone: +1 form and bare 10-digit collapse to one key (#129 normalizePhone).
+  r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Dial Broker', alias: '+1 (256) 468-0130', alias_type: 'phone' }, { 'x-api-key': API_KEY });
+  const ph = await r.json();
+  r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Dial Broker', alias: '2564680130', alias_type: 'phone' }, { 'x-api-key': API_KEY });
+  assert.equal((await r.json()).id, ph.id, 'phone alias canonicalized to one key');
 });

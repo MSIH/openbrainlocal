@@ -30,7 +30,7 @@ import rateLimit from 'express-rate-limit';
 
 import { PORT, TRUST_PROXY, DB_PATH, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES, ACCESS_LOG_ENABLED, ACCESS_LOG_DIR, ACCESS_LOG_RETENTION_DAYS } from './config.js';
 import { accessLogMiddleware, pruneOldLogs, ensureCompressed, closeAccessLog } from './access-log.js';
-import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, logEvent } from './db.js';
+import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, logEvent, normalizeName, normalizePhone } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
@@ -142,8 +142,13 @@ const ProposeEntitySchema = z.object({
 // itself stays silent for the internal hint/backfill/cluster paths — see its comment).
 const stageProposedEntity = ({ kind, name, alias, alias_type, source, confidence, attrs }) => {
   const src = source ?? 'mcp-proposal';
-  const result = proposeEntity({ suggested_kind: kind, name, alias, alias_type, source: src, confidence: confidence ?? null, attrs_json: attrs ?? null });
-  if (result.created) logEvent('proposed_entity_staged', src, { proposal_id: result.id, suggested_kind: kind, suggested_name: name, alias, alias_type });
+  // Normalize the resolution key exactly as ingest does (resolveEntityHints): phone via normalizePhone,
+  // everything else lowercased/trimmed. Without this an email/phone alias stages un-normalized — it
+  // breaks idempotency (two casings stage twice) and, on approval, won't match the normalized lookup
+  // path. `name` stays the raw display string (the entity's canonical_name at approval).
+  const normAlias = alias_type === 'phone' ? normalizePhone(alias) : normalizeName(alias);
+  const result = proposeEntity({ suggested_kind: kind, name, alias: normAlias, alias_type, source: src, confidence: confidence ?? null, attrs_json: attrs ?? null });
+  if (result.created) logEvent('proposed_entity_staged', src, { proposal_id: result.id, suggested_kind: kind, suggested_name: name, alias: normAlias, alias_type });
   return result;
 };
 
