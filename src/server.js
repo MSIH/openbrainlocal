@@ -178,7 +178,9 @@ export function addRelationship({ from, to, relation_type = null, raw_label = nu
   const a = resolveEntityRef(from);
   const b = resolveEntityRef(to);
   if (a.id === b.id) { const err = new Error('a relation cannot point at itself'); err.code = 'SELF_LOOP'; throw err; }
-  const type = relation_type ?? canonicalRelationType(raw_label);
+  // `||` not `??`: a direct caller could pass relation_type:'' (MCP zod blocks it, but this is exported),
+  // and an empty type must fall through to canonicalize raw_label rather than write a blank relation_type.
+  const type = relation_type || canonicalRelationType(raw_label);
   const added = upsertEntityRelation({ from_entity_id: a.id, to_entity_id: b.id, relation_type: type, raw_label: raw_label ?? null, confidence: 1.0, source: 'mcp' });
   return { added, relation_type: type, from: a.name, to: b.name };
 }
