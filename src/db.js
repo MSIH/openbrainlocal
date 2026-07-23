@@ -653,9 +653,11 @@ export const upsertArtifactTxn = db.transaction((artifact, float32Vector, hints 
 // ones actually exist in the store, alongside the static TYPE_REGISTRY. GLOB (not LIKE) — SQLite's
 // LIKE is case-insensitive by default, but ingest-types.js's isExtensionType() (the write-side
 // gate) is a case-sensitive, lowercase-only pattern; GLOB matches that case-sensitivity so this
-// can never surface a row no write path would have accepted as an extension type.
+// can never surface a row no write path would have accepted as an extension type. 'x-?*' (not
+// 'x-*') requires at least one character after the prefix — plain '*' also matches the bare
+// string "x-", which isExtensionType's `+` quantifier rejects.
 const listExtensionTypesStmt = db.prepare(
-  `SELECT type, COUNT(*) AS count FROM artifacts WHERE type GLOB 'x-*' GROUP BY type ORDER BY type`
+  `SELECT type, COUNT(*) AS count FROM artifacts WHERE type GLOB 'x-?*' GROUP BY type ORDER BY type`
 );
 export const listObservedExtensionTypes = () => listExtensionTypesStmt.all();
 

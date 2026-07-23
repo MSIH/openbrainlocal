@@ -510,11 +510,28 @@ test('#244 x- extension isolation + read-back: excluded from an untyped search, 
 
   const untyped = await post('/api/search', { query: 'quokka dev marker memory', limit: 10 }, { 'x-api-key': API_KEY });
   assert.equal(untyped.status, 200);
-  const untypedIds = (await untyped.json()).results.map((r) => r.type);
-  assert.ok(!untypedIds.includes('x-244-iso'), 'an untyped search never surfaces an x- extension artifact (default_searchable)');
+  const untypedTypes = (await untyped.json()).results.map((r) => r.type);
+  assert.ok(!untypedTypes.includes('x-244-iso'), 'an untyped search never surfaces an x- extension artifact (default_searchable)');
 
   const typed = await post('/api/search', { query: 'quokka dev marker memory', types: ['x-244-iso'], limit: 10 }, { 'x-api-key': API_KEY });
   assert.equal(typed.status, 200);
   const typedResults = (await typed.json()).results;
   assert.ok(typedResults.some((r) => r.type === 'x-244-iso' && /quokka/.test(r.text_repr)), 'naming the x- type explicitly reads the marker back');
+});
+
+test('#244 dev_session default_searchable:false: excluded from an untyped search, still explicit-searchable', async () => {
+  // dev_session joined the ambient-session set (visit/listening_session/browsing_session) — a
+  // coding-session summary is dev-workflow noise for ordinary personal recall (#244). Stored via
+  // storeArtifactTxn directly since store_memory/executeStore rejects non-note registered types.
+  const vec = await embedToFloat32('lemur coding session summary about refactoring the parser');
+  storeArtifactTxn({ type: 'dev_session', source: 'devsession-test', source_id: '244-dev', text_repr: 'lemur coding session summary about refactoring the parser' }, vec, []);
+
+  const untyped = await post('/api/search', { query: 'lemur coding session summary', limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(untyped.status, 200);
+  const untypedTypes = (await untyped.json()).results.map((r) => r.type);
+  assert.ok(!untypedTypes.includes('dev_session'), 'an untyped search never surfaces a dev_session artifact (default_searchable:false)');
+
+  const typed = await post('/api/search', { query: 'lemur coding session summary', types: ['dev_session'], limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(typed.status, 200);
+  assert.ok((await typed.json()).results.some((r) => r.type === 'dev_session'), 'an explicit types:["dev_session"] filter still surfaces it');
 });
