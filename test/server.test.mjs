@@ -26,7 +26,7 @@ const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-server-raw-'));
 process.env.CONTACTS_RAW_DIR = rawDir;
 const writePhoto = (name) => { const p = path.join(rawDir, name); writeFileSync(p, 'img-bytes'); return p; };
 
-const { app, serverInstance, secureCompare, addRelationship, resolveEntityRef } = await import('../src/server.js');
+const { app, serverInstance, secureCompare, addRelationship, resolveEntityRef, executeStore } = await import('../src/server.js');
 const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn, upsertEntityRelation } = await import('../src/db.js');
 const { embedToFloat32 } = await import('../src/embeddings.js');
 
@@ -449,4 +449,32 @@ test('#232 propose_entity: email/phone aliases are normalized (idempotent across
   const ph = await r.json();
   r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Dial Broker', alias: '2564680130', alias_type: 'phone' }, { 'x-api-key': API_KEY });
   assert.equal((await r.json()).id, ph.id, 'phone alias canonicalized to one key');
+});
+
+test('#244 GET /api/v1/ingest/types: registry + observed x- extension_types, auth-gated', async () => {
+  assert.equal((await get('/api/v1/ingest/types')).status, 401, 'auth-gated');
+
+  const before = await (await get('/api/v1/ingest/types', { 'x-api-key': API_KEY })).json();
+  assert.equal(before.version, 'v1');
+  assert.ok(before.types.some((t) => t.type === 'note'), 'static registry is present');
+  assert.ok(!before.extension_types.some((t) => t.type === 'x-244-marker'), 'not observed yet');
+
+  // Two artifacts under the same x- type, one under a different x- type.
+  await executeStore('dev memory one', 'x-244-marker');
+  await executeStore('dev memory two', 'x-244-marker');
+  await executeStore('a different dev marker', 'x-244-other');
+
+  const after = await (await get('/api/v1/ingest/types', { 'x-api-key': API_KEY })).json();
+  const marker = after.extension_types.find((t) => t.type === 'x-244-marker');
+  assert.ok(marker, 'newly-observed x- type is surfaced');
+  assert.equal(marker.count, 2, 'count reflects both artifacts stored under that type');
+  assert.ok(after.extension_types.some((t) => t.type === 'x-244-other'), 'a second distinct x- type is also surfaced');
+});
+
+test('#244 executeStore: optional type defaults to note, accepts an x- extension, stored as given', async () => {
+  const defaultId = await executeStore('typed-store default check');
+  assert.equal(db.prepare('SELECT type FROM artifacts WHERE id = ?').get(defaultId).type, 'note', 'omitted type defaults to note (back-compat with /api/remember)');
+
+  const typedId = await executeStore('typed-store x- check', 'x-244-solo');
+  assert.equal(db.prepare('SELECT type FROM artifacts WHERE id = ?').get(typedId).type, 'x-244-solo', 'an x- extension type is stored verbatim');
 });

@@ -65,7 +65,7 @@ All endpoints require the standard `x-api-key` header. All bodies are JSON. Size
 | `POST /api/v1/ingest/batch` | Submit up to 100 artifacts in one call (EXIF backlogs, export imports) |
 | `POST /api/v1/exists` | Read-only: which of up to 100 `source_ids` are already stored for a `source` (skip-already-imported) |
 | `POST /api/v1/events` | Submit raw high-frequency events for sessionization |
-| `GET  /api/v1/ingest/types` | The current type registry (machine-readable) |
+| `GET  /api/v1/ingest/types` | The current type registry, plus `x-` extension types observed in the store (machine-readable) |
 | `GET  /api/v1/sources/:source/state` | Optional per-connector cursor/state blob (see §7) |
 | `PUT  /api/v1/sources/:source/state` | Store the cursor/state blob |
 
@@ -281,8 +281,9 @@ Registered event streams (v1): `music`, `browsing`, `location`, `terminal`.
 Rules:
 
 - Unregistered types must be prefixed `x-` (e.g., `x-dream-journal`). Accepted with a warning; the planner treats `x-` types as searchable-but-generic. If an `x-` type proves broadly useful, it gets promoted into the registry in a minor version — the `x-` name remains accepted as an alias forever. `src/ingest-types.js` exports `isRegisteredType()` / `isExtensionType()` for this check; accept-with-warning handling at ingest is a later issue.
-- The registry is machine-readable at `GET /api/v1/ingest/types` so connectors can self-check at startup.
+- The registry is machine-readable at `GET /api/v1/ingest/types` so connectors can self-check at startup. Since `x-` types are unregistered by design, there's no static list for them — the same endpoint's `extension_types` field (`[{type, count}]`) reports which ones actually exist in the store, derived from `artifacts` at read time (#244). The MCP `list_types` tool surfaces the same registry + extension_types for an MCP-only caller.
 - Types carry planner policy (default-searchable: yes/no; digest-eligible: yes/no) — one more reason the vocabulary is governed rather than free-form.
+- The MCP `store_memory` tool accepts an optional `type` (registered or `x-` extension, default `note`) so an MCP consumer can write a typed marker directly instead of going through `POST /api/v1/ingest` (#244). `POST /api/remember` (the legacy REST note-store) is unchanged — always `type: 'note'`.
 
 ---
 

@@ -648,6 +648,14 @@ export const upsertArtifactTxn = db.transaction((artifact, float32Vector, hints 
   return { id: existing.id, created: false, resolved, unresolved };
 });
 
+// x- extension types (#244) are unregistered by design (docs/04-connector-contract.md §6), so
+// there's no static list to publish for them — this is the only way a caller can discover which
+// ones actually exist in the store, alongside the static TYPE_REGISTRY.
+const listExtensionTypesStmt = db.prepare(
+  `SELECT type, COUNT(*) AS count FROM artifacts WHERE type LIKE 'x-%' GROUP BY type ORDER BY type`
+);
+export const listObservedExtensionTypes = () => listExtensionTypesStmt.all();
+
 // --- Shared helpers ---
 export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 

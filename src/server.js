@@ -30,11 +30,11 @@ import rateLimit from 'express-rate-limit';
 
 import { PORT, TRUST_PROXY, DB_PATH, LIFECONTEXT_API_KEY, LIFECONTEXT_API_KEY_PLACEHOLDER, MCP_URL_TOKEN, UI_URL_TOKEN, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM, CONTACTS_RAW_DIR, CONTACT_PHOTO_MAX_BYTES, ACCESS_LOG_ENABLED, ACCESS_LOG_DIR, ACCESS_LOG_RETENTION_DAYS } from './config.js';
 import { accessLogMiddleware, pruneOldLogs, ensureCompressed, closeAccessLog } from './access-log.js';
-import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, resolveEntityIds, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, logEvent, normalizeName, normalizePhone } from './db.js';
+import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, resolveEntityIds, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, listObservedExtensionTypes, logEvent, normalizeName, normalizePhone } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
 import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
-import { TYPE_REGISTRY } from './ingest-types.js';
+import { TYPE_REGISTRY, isRegisteredType, isExtensionType } from './ingest-types.js';
 import { buildIngestRouter } from './ingest.js';
 
 // Fail closed instantly if the secret is unset or still the placeholder.
@@ -44,11 +44,20 @@ if (!LIFECONTEXT_API_KEY || LIFECONTEXT_API_KEY === LIFECONTEXT_API_KEY_PLACEHOL
 }
 
 // --- CORE ASYNC UTILITIES (enrich-then-commit: embed BEFORE the transaction) ---
-async function executeStore(content) {
+// type defaults to 'note' (unchanged wire behavior for /api/remember); an MCP caller may pass a
+// registered type or an x- extension (#244) to keep dev/personal memories separable — validated
+// by TypeOrExtensionSchema at the store_memory tool boundary, not here (internal callers are trusted).
+async function executeStore(content, type = 'note') {
   const vec = await embedToFloat32(content);
   // A manual note: source='manual', no source_id (each note is a distinct row).
-  const { id } = storeArtifactTxn({ type: 'note', source: 'manual', content_hash: sha256(content), text_repr: content }, vec);
+  const { id } = storeArtifactTxn({ type, source: 'manual', content_hash: sha256(content), text_repr: content }, vec);
   return id;
+}
+
+// #244: the type registry (static) + observed x- extension types (dynamic, DB-derived) in one
+// shape, shared by GET /api/v1/ingest/types and the list_types MCP tool.
+function typesInfo() {
+  return { version: 'v1', types: TYPE_REGISTRY, extension_types: listObservedExtensionTypes() };
 }
 
 // Legacy recall shape: hybrid search over artifacts, mapped back to {content, created_at, distance}.
@@ -63,6 +72,11 @@ async function executeRecall(query, limit) {
 const ContentSchema = z.string().min(1, "Content cannot be empty");
 const LimitSchema = z.number().int().min(1).max(50).default(3);
 const TypeEnum = z.enum(ARTIFACT_TYPES);
+// A registered type or an x- extension marker (#244, mirrors ingest.js's IngestSchema.type) —
+// lets store_memory write dev/personal-isolating markers (e.g. "x-dev-note") through MCP.
+const TypeOrExtensionSchema = z.string().refine((t) => isRegisteredType(t) || isExtensionType(t), {
+  message: 'type must be a registered type or an x- extension (see GET /api/v1/ingest/types or list_types)',
+});
 const RememberSchema = z.object({ content: ContentSchema });
 const RecallSchema = z.object({ query: z.string().min(1, "Query cannot be empty"), limit: LimitSchema });
 // Geo-radius center (#68): a place name (resolved to a center point via the bundled gazetteer)
@@ -277,12 +291,37 @@ function buildMcpServer() {
           "One self-contained fact to remember, phrased so it stands alone without surrounding context " +
           "(e.g. \"User's sister Sarah lives in Austin and is a pediatric nurse.\")."
         ),
+        type: TypeOrExtensionSchema.optional().describe(
+          "Artifact type to store as (default \"note\"). Use a registered type or an x- extension marker " +
+          "(e.g. \"x-dev-note\") to keep a memory out of default_searchable recall — see list_types for what exists."
+        ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ content }) => {
-      const id = await executeStore(content);
+    async ({ content, type }) => {
+      const id = await executeStore(content, type);
       return { content: [{ type: "text", text: `Memory logged successfully under local ID: ${id}` }] };
+    }
+  );
+
+  server.registerTool(
+    "list_types",
+    {
+      title: "List artifact types",
+      description:
+        "List the registered artifact type vocabulary plus any x- extension markers observed in the store " +
+        "(e.g. x-dev-note). Call before passing type to store_memory or types to search, so a marker convention " +
+        "is discoverable instead of hardcoded.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      const { types, extension_types } = typesInfo();
+      const lines = [
+        ...types.map((t) => `- ${t.type}${t.default_searchable ? '' : ' (not default-searchable)'}`),
+        ...extension_types.map((t) => `- ${t.type} (x- extension, ${t.count} artifact${t.count === 1 ? '' : 's'})`),
+      ];
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
@@ -666,9 +705,10 @@ app.get('/api/artifact/:id', requireAuth, wrap(async (req, res) => {
 // First /api/v1 route (docs/04-connector-contract.md §6, roadmap M0 deliverable 4): the
 // registry connectors self-check against at startup. No streams array — the event lane
 // is deferred, and advertising streams with no POST /api/v1/events behind them would
-// mislead connector authors.
+// mislead connector authors. extension_types (#244) is the store-observed x- marker set — the
+// registry above is static, so this is the only way to discover which ones actually exist.
 app.get('/api/v1/ingest/types', requireAuth, wrap(async (req, res) => {
-  res.json({ version: 'v1', types: TYPE_REGISTRY });
+  res.json(typesInfo());
 }));
 
 // Entity merge + duplicate detection (#75): the core-owned curation admin surface (doc
@@ -987,4 +1027,4 @@ process.on('SIGTERM', shutdown);
 
 // Test seams (no runtime behavior): the app + its listener for an in-process HTTP smoke test,
 // and the constant-time auth comparator for a direct unit test. Not imported by any src/ module.
-export { app, serverInstance, secureCompare };
+export { app, serverInstance, secureCompare, executeStore };
