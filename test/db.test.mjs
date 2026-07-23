@@ -19,7 +19,7 @@ const {
   addAlias, removeAlias, insertAliasUnlessTombstoned, normalizePhone,
   listProposedEntities, approveProposedEntity, rejectProposedEntity,
   insertDirectoryEntry, lookupDirectoryName, backfillDirectoryProposals,
-  reduceEntityDisplayName,
+  reduceEntityDisplayName, listObservedExtensionTypes,
 } = await import('../src/db.js');
 const { backfillPhoneAliases } = await import('../scripts/backfill-phone-aliases.js');
 const { loadDirectory } = await import('../scripts/load-directory.js');
@@ -826,4 +826,20 @@ test('backfill:phones (#129): a canonical key tombstoned for this entity is NOT 
     !s.collisionDetails.some((c) => c.loser === t && c.canonical === '5554443333'),
     'a tombstoned canonical key is not reported as a cross-entity collision',
   );
+});
+
+test('listObservedExtensionTypes (#244): the JS isExtensionType() filter catches what GLOB alone would miss (Copilot review)', () => {
+  // GLOB 'x-?*' has no repeated character-class quantifier, so it can't itself exclude
+  // "x-Bad-Case" (uppercase) or "x-foo_bar" (underscore) the way isExtensionType()'s
+  // /^x-[a-z0-9-]+$/ does. No current write path can produce such a row (every write goes
+  // through isRegisteredType/isExtensionType), so insert directly to simulate a legacy/manual row.
+  const source = uniqueSource();
+  storeArtifactTxn({ type: 'x-244-conforming', source, source_id: 'ok', text_repr: 'a conforming marker' }, f32(0.11));
+  storeArtifactTxn({ type: 'x-Bad-Case', source, source_id: 'bad-case', text_repr: 'an uppercase marker' }, f32(0.12));
+  storeArtifactTxn({ type: 'x-foo_bar', source, source_id: 'bad-char', text_repr: 'an underscore marker' }, f32(0.13));
+
+  const observed = listObservedExtensionTypes().map((t) => t.type);
+  assert.ok(observed.includes('x-244-conforming'), 'a conforming x- type is surfaced');
+  assert.ok(!observed.includes('x-Bad-Case'), 'an uppercase-prefixed row is excluded');
+  assert.ok(!observed.includes('x-foo_bar'), 'an underscore-containing row is excluded');
 });
