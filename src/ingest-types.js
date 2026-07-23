@@ -21,7 +21,10 @@ export const TYPE_REGISTRY = Object.freeze([
   { type: 'video', default_searchable: true, digest_eligible: true },
   { type: 'contact', default_searchable: true, digest_eligible: false },
   { type: 'post', default_searchable: true, digest_eligible: true },
-  { type: 'dev_session', default_searchable: true, digest_eligible: true },
+  // default_searchable:false (#244) — dev-session summaries are dev-workflow noise for an
+  // ordinary personal recall, same ambient-out-of-default treatment as visit/listening_session/
+  // browsing_session below; still fully searchable via an explicit types:['dev_session'] filter.
+  { type: 'dev_session', default_searchable: false, digest_eligible: true },
   { type: 'visit', default_searchable: false, digest_eligible: true },
   { type: 'listening_session', default_searchable: false, digest_eligible: true },
   { type: 'browsing_session', default_searchable: false, digest_eligible: true },

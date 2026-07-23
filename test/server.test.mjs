@@ -26,7 +26,7 @@ const rawDir = mkdtempSync(path.join(tmpdir(), 'lc-server-raw-'));
 process.env.CONTACTS_RAW_DIR = rawDir;
 const writePhoto = (name) => { const p = path.join(rawDir, name); writeFileSync(p, 'img-bytes'); return p; };
 
-const { app, serverInstance, secureCompare, addRelationship, resolveEntityRef } = await import('../src/server.js');
+const { app, serverInstance, secureCompare, addRelationship, resolveEntityRef, executeStore, StoreTypeSchema } = await import('../src/server.js');
 const { db, insertEntityStmt, insertAliasStmt, storeArtifactTxn, upsertEntityRelation } = await import('../src/db.js');
 const { embedToFloat32 } = await import('../src/embeddings.js');
 
@@ -449,4 +449,89 @@ test('#232 propose_entity: email/phone aliases are normalized (idempotent across
   const ph = await r.json();
   r = await post('/api/v1/entities/proposed', { kind: 'person', name: 'Dial Broker', alias: '2564680130', alias_type: 'phone' }, { 'x-api-key': API_KEY });
   assert.equal((await r.json()).id, ph.id, 'phone alias canonicalized to one key');
+});
+
+test('#244 GET /api/v1/ingest/types: registry + observed x- extension_types, auth-gated', async () => {
+  assert.equal((await get('/api/v1/ingest/types')).status, 401, 'auth-gated');
+
+  const before = await (await get('/api/v1/ingest/types', { 'x-api-key': API_KEY })).json();
+  assert.equal(before.version, 'v1');
+  assert.ok(before.types.some((t) => t.type === 'note'), 'static registry is present');
+  assert.ok(!before.extension_types.some((t) => t.type === 'x-244-marker'), 'not observed yet');
+
+  // Two artifacts under the same x- type, one under a different x- type.
+  await executeStore('dev memory one', 'x-244-marker');
+  await executeStore('dev memory two', 'x-244-marker');
+  await executeStore('a different dev marker', 'x-244-other');
+
+  const after = await (await get('/api/v1/ingest/types', { 'x-api-key': API_KEY })).json();
+  const marker = after.extension_types.find((t) => t.type === 'x-244-marker');
+  assert.ok(marker, 'newly-observed x- type is surfaced');
+  assert.equal(marker.count, 2, 'count reflects both artifacts stored under that type');
+  assert.equal(marker.default_searchable, false, 'an extension type is always flagged not default-searchable');
+  assert.ok(after.extension_types.some((t) => t.type === 'x-244-other'), 'a second distinct x- type is also surfaced');
+});
+
+test('#244 executeStore: optional type defaults to note, accepts an x- extension, stored as given', async () => {
+  const defaultId = await executeStore('typed-store default check');
+  assert.equal(db.prepare('SELECT type FROM artifacts WHERE id = ?').get(defaultId).type, 'note', 'omitted type defaults to note (back-compat with /api/remember)');
+
+  const typedId = await executeStore('typed-store x- check', 'x-244-solo');
+  assert.equal(db.prepare('SELECT type FROM artifacts WHERE id = ?').get(typedId).type, 'x-244-solo', 'an x- extension type is stored verbatim');
+});
+
+test('#244 StoreTypeSchema (store_memory\'s type validation): accepts note/x-, rejects everything else', () => {
+  assert.equal(StoreTypeSchema.safeParse('note').success, true, 'the existing default is accepted');
+  assert.equal(StoreTypeSchema.safeParse('x-dev-note').success, true, 'an x- extension marker is accepted');
+  assert.equal(StoreTypeSchema.safeParse('bogus').success, false, 'garbage is rejected');
+  assert.equal(StoreTypeSchema.safeParse('Note').success, false, 'wrong case is rejected, not coerced');
+  assert.equal(StoreTypeSchema.safeParse('X-Dev-Note').success, false, 'an uppercase x- prefix is rejected (matches isExtensionType, not just LIKE)');
+  // Registered types other than 'note' are rejected — store_memory writes only a freeform
+  // manual note (no source_id/extra_json/raw_path), so a caller can't mint a structurally-hollow
+  // "contact"/"digest"/"photo" row through this path.
+  for (const t of ['contact', 'digest', 'photo', 'visit', 'dev_session']) {
+    assert.equal(StoreTypeSchema.safeParse(t).success, false, `registered non-note type "${t}" is rejected for store_memory`);
+  }
+});
+
+test('#244 /api/search + /api/timeline: types filter rejects a malformed value (not registered, not x-)', async () => {
+  let r = await post('/api/search', { query: 'anything', types: ['bogus'] }, { 'x-api-key': API_KEY });
+  assert.equal(r.status, 400, 'a type that is neither registered nor x-prefixed is rejected');
+
+  r = await post('/api/search', { query: 'anything', types: ['Note'] }, { 'x-api-key': API_KEY });
+  assert.equal(r.status, 400, 'wrong-case registered type is rejected (case-sensitive, not silently coerced)');
+
+  r = await post('/api/timeline', { start: '2020-01-01', end: '2030-01-01', types: ['bogus'] }, { 'x-api-key': API_KEY });
+  assert.equal(r.status, 400, 'timeline applies the same types validation');
+});
+
+test('#244 x- extension isolation + read-back: excluded from an untyped search, surfaced by an explicit types filter', async () => {
+  await executeStore('quokka dev marker memory for isolation check', 'x-244-iso');
+
+  const untyped = await post('/api/search', { query: 'quokka dev marker memory', limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(untyped.status, 200);
+  const untypedTypes = (await untyped.json()).results.map((r) => r.type);
+  assert.ok(!untypedTypes.includes('x-244-iso'), 'an untyped search never surfaces an x- extension artifact (default_searchable)');
+
+  const typed = await post('/api/search', { query: 'quokka dev marker memory', types: ['x-244-iso'], limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(typed.status, 200);
+  const typedResults = (await typed.json()).results;
+  assert.ok(typedResults.some((r) => r.type === 'x-244-iso' && /quokka/.test(r.text_repr)), 'naming the x- type explicitly reads the marker back');
+});
+
+test('#244 dev_session default_searchable:false: excluded from an untyped search, still explicit-searchable', async () => {
+  // dev_session joined the ambient-session set (visit/listening_session/browsing_session) — a
+  // coding-session summary is dev-workflow noise for ordinary personal recall (#244). Stored via
+  // storeArtifactTxn directly since store_memory/executeStore rejects non-note registered types.
+  const vec = await embedToFloat32('lemur coding session summary about refactoring the parser');
+  storeArtifactTxn({ type: 'dev_session', source: 'devsession-test', source_id: '244-dev', text_repr: 'lemur coding session summary about refactoring the parser' }, vec, []);
+
+  const untyped = await post('/api/search', { query: 'lemur coding session summary', limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(untyped.status, 200);
+  const untypedTypes = (await untyped.json()).results.map((r) => r.type);
+  assert.ok(!untypedTypes.includes('dev_session'), 'an untyped search never surfaces a dev_session artifact (default_searchable:false)');
+
+  const typed = await post('/api/search', { query: 'lemur coding session summary', types: ['dev_session'], limit: 10 }, { 'x-api-key': API_KEY });
+  assert.equal(typed.status, 200);
+  assert.ok((await typed.json()).results.some((r) => r.type === 'dev_session'), 'an explicit types:["dev_session"] filter still surfaces it');
 });

@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { DB_PATH, VECTOR_DIMENSION, DB_BUSY_TIMEOUT_MS } from './config.js';
 import { haversineKm } from './geocode.js';
+import { isExtensionType } from './ingest-types.js';
 
 export const db = new Database(DB_PATH);
 sqliteVec.load(db);
@@ -647,6 +648,20 @@ export const upsertArtifactTxn = db.transaction((artifact, float32Vector, hints 
   logEvent('ingest_update', artifact.source, { artifact_id: existing.id, type: artifact.type, changed, prior });
   return { id: existing.id, created: false, resolved, unresolved };
 });
+
+// x- extension types (#244) are unregistered by design (docs/04-connector-contract.md §6), so
+// there's no static list to publish for them — this is the only way a caller can discover which
+// ones actually exist in the store, alongside the static TYPE_REGISTRY. The GLOB is a cheap SQL
+// prefilter only (uses idx_artifacts_type's range scan on the 'x-' prefix) — GLOB has no repeated
+// character-class quantifier, so 'x-?*' still passes something like "x-Dev-Note" or "x-foo_bar"
+// that isExtensionType()'s /^x-[a-z0-9-]+$/ would reject. The isExtensionType() filter below is
+// the exact gate, reusing the same write-side validator so this can never advertise a marker no
+// write path would accept — belt-and-suspenders should a non-conforming row ever exist (a legacy
+// row, a manual DB edit) despite every current write path already enforcing it.
+const listExtensionTypesStmt = db.prepare(
+  `SELECT type, COUNT(*) AS count FROM artifacts WHERE type GLOB 'x-?*' GROUP BY type ORDER BY type`
+);
+export const listObservedExtensionTypes = () => listExtensionTypesStmt.all().filter((t) => isExtensionType(t.type));
 
 // --- Shared helpers ---
 export const sha256 = (s) => createHash('sha256').update(s).digest('hex');

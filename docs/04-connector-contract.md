@@ -65,7 +65,7 @@ All endpoints require the standard `x-api-key` header. All bodies are JSON. Size
 | `POST /api/v1/ingest/batch` | Submit up to 100 artifacts in one call (EXIF backlogs, export imports) |
 | `POST /api/v1/exists` | Read-only: which of up to 100 `source_ids` are already stored for a `source` (skip-already-imported) |
 | `POST /api/v1/events` | Submit raw high-frequency events for sessionization |
-| `GET  /api/v1/ingest/types` | The current type registry (machine-readable) |
+| `GET  /api/v1/ingest/types` | The current type registry, plus `x-` extension types observed in the store (machine-readable) |
 | `GET  /api/v1/sources/:source/state` | Optional per-connector cursor/state blob (see §7) |
 | `PUT  /api/v1/sources/:source/state` | Store the cursor/state blob |
 
@@ -261,7 +261,7 @@ Registered artifact types (v1), each with planner policy `{default_searchable, d
 | `video` | true | true |
 | `contact` | true | false |
 | `post` | true | true |
-| `dev_session` | true | true |
+| `dev_session` | false | true |
 | `visit` | false | true |
 | `listening_session` | false | true |
 | `browsing_session` | false | true |
@@ -269,8 +269,11 @@ Registered artifact types (v1), each with planner policy `{default_searchable, d
 
 Ambient session types (`visit`, `listening_session`, `browsing_session`) default out of search per
 the §5 retrieval policy but are digest-eligible — they're exactly what a daily digest
-summarizes. `contact` is reference data, not a daily event, so it's not digest-eligible;
-`digest` itself is excluded from digest-eligibility to avoid recursive summarization.
+summarizes. `dev_session` joins this default-out set (#244) — a coding-session summary is
+dev-workflow noise for an ordinary personal recall, same treatment as the other ambient types;
+still fully searchable via an explicit `types:['dev_session']` filter. `contact` is reference
+data, not a daily event, so it's not digest-eligible; `digest` itself is excluded from
+digest-eligibility to avoid recursive summarization.
 `default_searchable` *is enforced* by `hybridSearch` (#121): a search with no `types` filter is
 restricted to the `default_searchable:true` set, so ambient session/visit artifacts never pollute
 ordinary recall — they surface only when their type is named explicitly (`types:['visit']`).
@@ -281,8 +284,10 @@ Registered event streams (v1): `music`, `browsing`, `location`, `terminal`.
 Rules:
 
 - Unregistered types must be prefixed `x-` (e.g., `x-dream-journal`). Accepted with a warning; the planner treats `x-` types as searchable-but-generic. If an `x-` type proves broadly useful, it gets promoted into the registry in a minor version — the `x-` name remains accepted as an alias forever. `src/ingest-types.js` exports `isRegisteredType()` / `isExtensionType()` for this check; accept-with-warning handling at ingest is a later issue.
-- The registry is machine-readable at `GET /api/v1/ingest/types` so connectors can self-check at startup.
+- The registry is machine-readable at `GET /api/v1/ingest/types` so connectors can self-check at startup. Since `x-` types are unregistered by design, there's no static list for them — the same endpoint's `extension_types` field (`[{type, count, default_searchable: false}]`) reports which ones actually exist in the store, derived from `artifacts` at read time (#244) — a `GLOB 'x-?*'` SQL prefilter (index-backed prefix scan) narrowed by an exact `isExtensionType()` JS filter, since GLOB alone can't express "one or more of `[a-z0-9-]`" and would let e.g. `x-Foo_Bar` through. The MCP `list_types` tool surfaces the same registry + extension_types for an MCP-only caller.
 - Types carry planner policy (default-searchable: yes/no; digest-eligible: yes/no) — one more reason the vocabulary is governed rather than free-form.
+- The MCP `store_memory` tool accepts an optional `type`: `"note"` (default) or an `x-` extension marker (#244) — **not** an arbitrary registered type, since `store_memory` only ever writes a freeform manual note (no `source_id`/`extra_json`/`raw_path`/`occurred_at`); letting a caller mint a `"contact"` or `"digest"` row through this path would produce a structurally-hollow artifact under a type that assumes real structure. A caller needing a different registered type, an upsert key, or structured `extra` still goes through `POST /api/v1/ingest`. `POST /api/remember` (the legacy REST note-store) is unchanged — always `type: 'note'`.
+- The write and discovery sides alone would leave an `x-` memory **write-only** — recoverable only by a known artifact id. So the caller-facing `types` filter on the MCP `search`/`timeline` tools and the REST `/api/search`/`/api/timeline` routes also accepts an `x-` extension type (not just the registered enum), letting an explicit `types: ["x-dev-note"]` read a marker back. The query planner's own type inference (`PlanSchema` in `src/search.js`) is unaffected — it still only ever infers a registered type from query text; only an explicit caller-supplied filter may name an `x-` type.
 
 ---
 
