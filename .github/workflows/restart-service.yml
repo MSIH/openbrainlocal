@@ -9,6 +9,9 @@ name: Restart LifeContext service
 on:
   workflow_dispatch:
 
+# The job restarts a local service and calls no GitHub API — it needs none of GITHUB_TOKEN's scopes.
+permissions: {}
+
 # Serialize dispatches so two restarts never overlap; don't cancel an in-flight restart.
 concurrency:
   group: restart-lifecontext
@@ -18,6 +21,9 @@ jobs:
   restart:
     name: restart LifeContext
     runs-on: [self-hosted, windows]
+    # Bounded internally (30s port poll + SCM stop/start timeouts); this caps a wedged job so it
+    # can't hold the self-hosted runner slot indefinitely.
+    timeout-minutes: 5
     steps:
       # No actions/checkout: nothing from the repo tree is used, and the runner's service
       # account needs only Service Control Manager rights on the LifeContext service.
