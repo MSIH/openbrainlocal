@@ -1,0 +1,61 @@
+name: Restart LifeContext service
+
+# Manual, on-demand restart of the LifeContext Windows service (WinSW id `LifeContext`).
+# Runs on a repo-level self-hosted runner ON the box — the service sits behind residential
+# Fios with no inbound exposure, so a GitHub-hosted runner can't reach it. No push trigger:
+# a restart is always a deliberate act (#240). Setup (runner registration + service-account
+# rights) is documented in docs/windows-service-winsw.md.
+
+on:
+  workflow_dispatch:
+
+# The job restarts a local service and calls no GitHub API — it needs none of GITHUB_TOKEN's scopes.
+permissions: {}
+
+# Serialize dispatches so two restarts never overlap; don't cancel an in-flight restart.
+concurrency:
+  group: restart-lifecontext
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    name: restart LifeContext
+    runs-on: [self-hosted, windows]
+    # Bounded internally (30s port poll + SCM stop/start timeouts); this caps a wedged job so it
+    # can't hold the self-hosted runner slot indefinitely.
+    timeout-minutes: 5
+    steps:
+      # No actions/checkout: nothing from the repo tree is used, and the runner's service
+      # account needs only Service Control Manager rights on the LifeContext service.
+      - name: Restart and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ServiceName   = 'LifeContext'
+          $ReadyTimeout  = 30            # seconds to wait for the port to accept connections
+          $PollInterval  = 2            # seconds between readiness polls
+          $Port          = if ($env:PORT) { [int]$env:PORT } else { 3000 }
+
+          Write-Host "Before: $((Get-Service $ServiceName).Status)"
+
+          Write-Host "Restarting $ServiceName ..."
+          Restart-Service $ServiceName -Force
+
+          $status = (Get-Service $ServiceName).Status
+          Write-Host "After: $status"
+          if ($status -ne 'Running') {
+            Write-Error "$ServiceName is '$status', expected 'Running'"
+            exit 1
+          }
+
+          Write-Host "Polling localhost:$Port for readiness (up to ${ReadyTimeout}s) ..."
+          $deadline = (Get-Date).AddSeconds($ReadyTimeout)
+          while ((Get-Date) -lt $deadline) {
+            if ((Test-NetConnection -ComputerName localhost -Port $Port -WarningAction SilentlyContinue).TcpTestSucceeded) {
+              Write-Host "Port $Port is accepting connections."
+              exit 0
+            }
+            Start-Sleep -Seconds $PollInterval
+          }
+          Write-Error "$ServiceName restarted but port $Port never opened within ${ReadyTimeout}s"
+          exit 1

@@ -137,6 +137,41 @@ process.on("SIGTERM", shutdown);
 
 ---
 
+## 6. Remote restart via GitHub Actions
+
+Bounce the service on demand from the GitHub Actions tab — no RDP session. The workflow
+(`.github/workflows/restart-service.yml`) is `workflow_dispatch`-only (a **Run workflow**
+button; no restart on push) and runs `Restart-Service LifeContext -Force`, then verifies the
+service is `Running` and the API port is accepting connections (#240).
+
+The box sits behind residential internet with no inbound exposure, so a GitHub-hosted runner
+can't reach it. The workflow therefore targets a **self-hosted runner installed on this
+machine** (`runs-on: [self-hosted, windows]`).
+
+### One-time setup
+
+1. **Register a repo-level self-hosted runner** for `MSIH/life-context` (a personal/User
+   account can't have org-scoped runners, so it must be repo-level). In GitHub:
+   *Settings → Actions → Runners → New self-hosted runner* (Windows x64), then run the shown
+   `config.cmd` on this box. Install it as a service so it survives reboots (`svc.cmd install`).
+   Give it the default `self-hosted` + `windows` labels (both are auto-applied on Windows).
+2. **Grant the runner's service account rights to restart the service.** `Restart-Service`
+   needs Service Control Manager start/stop permission on `LifeContext`. Simplest: run the
+   runner service as an account with those rights (e.g. an admin), or grant that account
+   explicit start/stop on the service via `sc.exe sdset LifeContext <SDDL>`. Without this the
+   restart step fails with an access-denied error.
+
+The runner is a **separate** service from `LifeContext`, so restarting `LifeContext` does not
+disturb the runner or the in-flight workflow.
+
+### Trigger
+
+Actions tab → **Restart LifeContext service** → **Run workflow** (branch `2.0`). The run turns
+red if the service doesn't return to `Running`, or if the port (`PORT`, default `3000`) never
+opens after the restart.
+
+---
+
 ## Alternative: node-windows
 
 If you'd rather keep everything in the Node ecosystem, **node-windows** does the same
