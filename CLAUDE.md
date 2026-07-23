@@ -40,7 +40,7 @@ docs/                    — design + setup docs (03 core design, 04 connector c
 | Interface | Endpoints / tools | Auth |
 |-----------|-------------------|------|
 | REST | `POST /api/{remember,recall,search,timeline,about_entity}`, `GET /api/artifact/:id` | `x-api-key` header |
-| MCP (Streamable HTTP) | `/mcp` — tools `store_memory` (optional `type`: registered or `x-` extension, default `note` — #244), `list_types` (registry + observed `x-` extension types — #244), `search_memories`, `search`, `timeline`, `about_entity`, `get_artifact` + entity curation (`merge_entities`, `propose_entity`, `list_proposed_entities`, `approve_proposed_entity`, `reject_proposed_entity`, `add_relationship`) | `x-api-key` header |
+| MCP (Streamable HTTP) | `/mcp` — tools `store_memory` (optional `type`: `note` or an `x-` extension only, default `note` — #244), `list_types` (registry + observed `x-` extension types — #244), `search_memories`, `search`/`timeline` (`types` also accepts an `x-` extension marker, so a `store_memory`-tagged marker can be read back — #244), `about_entity`, `get_artifact` + entity curation (`merge_entities`, `propose_entity`, `list_proposed_entities`, `approve_proposed_entity`, `reject_proposed_entity`, `add_relationship`) | `x-api-key` header |
 
 ## Run & Test
 ```bash

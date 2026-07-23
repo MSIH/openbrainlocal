@@ -44,20 +44,14 @@ if (!LIFECONTEXT_API_KEY || LIFECONTEXT_API_KEY === LIFECONTEXT_API_KEY_PLACEHOL
 }
 
 // --- CORE ASYNC UTILITIES (enrich-then-commit: embed BEFORE the transaction) ---
-// type defaults to 'note' (unchanged wire behavior for /api/remember); an MCP caller may pass a
-// registered type or an x- extension (#244) to keep dev/personal memories separable — validated
-// by TypeOrExtensionSchema at the store_memory tool boundary, not here (internal callers are trusted).
+// type defaults to 'note' (unchanged wire behavior for /api/remember); an MCP caller may pass
+// 'note' or an x- extension (#244) to keep dev/personal memories separable — validated by
+// StoreTypeSchema at the store_memory tool boundary, not here (internal callers are trusted).
 async function executeStore(content, type = 'note') {
   const vec = await embedToFloat32(content);
   // A manual note: source='manual', no source_id (each note is a distinct row).
   const { id } = storeArtifactTxn({ type, source: 'manual', content_hash: sha256(content), text_repr: content }, vec);
   return id;
-}
-
-// #244: the type registry (static) + observed x- extension types (dynamic, DB-derived) in one
-// shape, shared by GET /api/v1/ingest/types and the list_types MCP tool.
-function typesInfo() {
-  return { version: 'v1', types: TYPE_REGISTRY, extension_types: listObservedExtensionTypes() };
 }
 
 // Legacy recall shape: hybrid search over artifacts, mapped back to {content, created_at, distance}.
@@ -71,12 +65,23 @@ async function executeRecall(query, limit) {
 // --- SHARED VALIDATION SCHEMAS (REST + MCP use the same bounds) ---
 const ContentSchema = z.string().min(1, "Content cannot be empty");
 const LimitSchema = z.number().int().min(1).max(50).default(3);
-const TypeEnum = z.enum(ARTIFACT_TYPES);
-// A registered type or an x- extension marker (#244, mirrors ingest.js's IngestSchema.type) —
-// lets store_memory write dev/personal-isolating markers (e.g. "x-dev-note") through MCP.
+// A registered type or an x- extension marker (#244, mirrors ingest.js's IngestSchema.type) — the
+// caller-facing `types` filter on search/timeline, so a marker written via store_memory can also
+// be read back explicitly (the planner's OWN type inference in search.js stays registered-only).
 const TypeOrExtensionSchema = z.string().refine((t) => isRegisteredType(t) || isExtensionType(t), {
   message: 'type must be a registered type or an x- extension (see GET /api/v1/ingest/types or list_types)',
 });
+// store_memory writes only a freeform manual note — no source_id/extra_json/raw_path/occurred_at
+// (see executeStore) — a shape every OTHER registered type (photo, contact, digest, dev_session, …)
+// assumes it will have. Allowing those here would let an agent mint a structurally-hollow "contact"
+// or "digest" row that misleads about_entity / the timeline's digest substitution. So only 'note'
+// (the existing default) or an x- extension marker may be passed (#244).
+const StoreTypeSchema = z.union([
+  z.literal('note'),
+  z.string().refine(isExtensionType, {
+    message: 'type must be "note" or an x- extension (see GET /api/v1/ingest/types or list_types)',
+  }),
+]);
 const RememberSchema = z.object({ content: ContentSchema });
 const RecallSchema = z.object({ query: z.string().min(1, "Query cannot be empty"), limit: LimitSchema });
 // Geo-radius center (#68): a place name (resolved to a center point via the bundled gazetteer)
@@ -85,7 +90,11 @@ const NearSchema = z.union([z.string().trim().min(1), z.object({ lat: z.number()
 const RadiusSchema = z.number().positive();
 const SearchSchema = z.object({
   query: z.string().min(1, "Query cannot be empty"),
-  types: z.array(TypeEnum).optional(),
+  // #244: an explicit caller filter may name an x- extension type (e.g. "x-dev-note") to read
+  // back a marker that's deliberately excluded from default_searchable — the planner's OWN
+  // type inference (PlanSchema in search.js) stays registered-types-only; only an explicit
+  // caller may name one.
+  types: z.array(TypeOrExtensionSchema).optional(),
   time_range: z.object({ start: z.string(), end: z.string() }).partial().optional(),
   entities: z.array(z.string()).optional(),
   near: NearSchema.optional(),
@@ -98,10 +107,24 @@ const SearchSchema = z.object({
 });
 const TimelineSchema = z.object({
   start: z.string().min(1), end: z.string().min(1),
-  types: z.array(TypeEnum).optional(), limit: LimitSchema.optional(),
+  types: z.array(TypeOrExtensionSchema).optional(), limit: LimitSchema.optional(),
 });
 const AboutEntitySchema = z.object({ name: z.string().min(1), limit: LimitSchema.optional() });
 const GetArtifactSchema = z.object({ id: z.coerce.number().int().positive() });
+
+// #244: the type registry (static) + observed x- extension types (dynamic, DB-derived) in one
+// shape, shared by GET /api/v1/ingest/types and the list_types MCP tool. default_searchable:false
+// is stamped onto every extension entry (never stored — x- types are excluded from
+// SEARCHABLE_TYPES_JSON by definition, doc 04 §6) so a caller sees the consequence, not just the
+// name: writing under this type means it only comes back via an explicit types filter.
+function typesInfo() {
+  return {
+    version: 'v1',
+    types: TYPE_REGISTRY,
+    extension_types: listObservedExtensionTypes().map((t) => ({ ...t, default_searchable: false })),
+  };
+}
+
 // Entity merge + duplicate detection (#75) — the curation admin surface, distinct from the
 // connector ingest lane. keep_id === absorb_id is a 422 the app layer raises (mergeEntities),
 // not a zod .refine() — that error must map to 422, not the ZodError middleware's 400.
@@ -285,15 +308,19 @@ function buildMcpServer() {
       title: "Store a memory",
       description:
         "Save a single durable fact to the user's long-term memory for recall in future sessions. Use for " +
-        "preferences, relationships, decisions, and events — not for transient conversational filler.",
+        "preferences, relationships, decisions, and events — not for transient conversational filler. A freeform " +
+        "manual write (source='manual', no source_id/extra) — not a replacement for a connector's " +
+        "POST /api/v1/ingest, which is still what an upsert-keyed or structured-metadata write needs.",
       inputSchema: {
         content: ContentSchema.describe(
           "One self-contained fact to remember, phrased so it stands alone without surrounding context " +
           "(e.g. \"User's sister Sarah lives in Austin and is a pediatric nurse.\")."
         ),
-        type: TypeOrExtensionSchema.optional().describe(
-          "Artifact type to store as (default \"note\"). Use a registered type or an x- extension marker " +
-          "(e.g. \"x-dev-note\") to keep a memory out of default_searchable recall — see list_types for what exists."
+        type: StoreTypeSchema.optional().describe(
+          "Artifact type to store as: \"note\" (default) or an x- extension marker (e.g. \"x-dev-note\") to " +
+          "exclude this memory from untyped recall — it's still readable by naming the same type explicitly in " +
+          "search/timeline's `types` filter. Other registered types (photo, contact, digest, …) are rejected — " +
+          "this tool only writes a freeform manual note. See list_types for what exists."
         ),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -319,7 +346,7 @@ function buildMcpServer() {
       const { types, extension_types } = typesInfo();
       const lines = [
         ...types.map((t) => `- ${t.type}${t.default_searchable ? '' : ' (not default-searchable)'}`),
-        ...extension_types.map((t) => `- ${t.type} (x- extension, ${t.count} artifact${t.count === 1 ? '' : 's'})`),
+        ...extension_types.map((t) => `- ${t.type} (x- extension, not default-searchable, ${t.count} artifact${t.count === 1 ? '' : 's'})`),
       ];
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
@@ -357,7 +384,7 @@ function buildMcpServer() {
         "and fused (vector + keyword) ranking. Prefer this for anything richer than a plain note lookup.",
       inputSchema: {
         query: z.string().min(1).describe("Natural-language query, e.g. \"emails from Sarah about the trip last spring\"."),
-        types: z.array(TypeEnum).optional().describe(`Restrict to these artifact types: ${ARTIFACT_TYPES.join(", ")}.`),
+        types: z.array(TypeOrExtensionSchema).optional().describe(`Restrict to these artifact types: ${ARTIFACT_TYPES.join(", ")}, or an x- extension marker (e.g. "x-dev-note") to read back a store_memory-tagged marker — see list_types.`),
         time_range: z.object({ start: z.string(), end: z.string() }).partial().optional().describe("ISO date bounds {start,end} to constrain occurred_at."),
         entities: z.array(z.string()).optional().describe("People/places/orgs to require (resolved via the entity graph)."),
         near: NearSchema.optional().describe("Search near a place: a name (e.g. \"San Francisco\") or explicit {lat, lon}. Surfaces artifacts within radius_km by coordinate, catching nearby places the label text doesn't literally name."),
@@ -383,7 +410,7 @@ function buildMcpServer() {
       inputSchema: {
         start: z.string().min(1).describe("ISO start date/datetime (inclusive)."),
         end: z.string().min(1).describe("ISO end date/datetime (inclusive)."),
-        types: z.array(TypeEnum).optional().describe(`Restrict to these types: ${ARTIFACT_TYPES.join(", ")}.`),
+        types: z.array(TypeOrExtensionSchema).optional().describe(`Restrict to these types: ${ARTIFACT_TYPES.join(", ")}, or an x- extension marker.`),
         limit: LimitSchema.optional().describe("Max results (1-50, default 50)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -1027,4 +1054,4 @@ process.on('SIGTERM', shutdown);
 
 // Test seams (no runtime behavior): the app + its listener for an in-process HTTP smoke test,
 // and the constant-time auth comparator for a direct unit test. Not imported by any src/ module.
-export { app, serverInstance, secureCompare, executeStore };
+export { app, serverInstance, secureCompare, executeStore, StoreTypeSchema };

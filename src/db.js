@@ -650,9 +650,12 @@ export const upsertArtifactTxn = db.transaction((artifact, float32Vector, hints 
 
 // x- extension types (#244) are unregistered by design (docs/04-connector-contract.md §6), so
 // there's no static list to publish for them — this is the only way a caller can discover which
-// ones actually exist in the store, alongside the static TYPE_REGISTRY.
+// ones actually exist in the store, alongside the static TYPE_REGISTRY. GLOB (not LIKE) — SQLite's
+// LIKE is case-insensitive by default, but ingest-types.js's isExtensionType() (the write-side
+// gate) is a case-sensitive, lowercase-only pattern; GLOB matches that case-sensitivity so this
+// can never surface a row no write path would have accepted as an extension type.
 const listExtensionTypesStmt = db.prepare(
-  `SELECT type, COUNT(*) AS count FROM artifacts WHERE type LIKE 'x-%' GROUP BY type ORDER BY type`
+  `SELECT type, COUNT(*) AS count FROM artifacts WHERE type GLOB 'x-*' GROUP BY type ORDER BY type`
 );
 export const listObservedExtensionTypes = () => listExtensionTypesStmt.all();
 
