@@ -64,7 +64,12 @@ async function executeRecall(query, limit) {
 
 // --- SHARED VALIDATION SCHEMAS (REST + MCP use the same bounds) ---
 const ContentSchema = z.string().min(1, "Content cannot be empty");
-const LimitSchema = z.number().int().min(1).max(50).default(3);
+// Each tool's advertised default must match its actual JS fallback below (#242) — a shared
+// schema with one baked-in default lies to schema-driven clients about the other tools' defaults.
+const limitSchema = (def) => z.number().int().min(1).max(50).default(def);
+const LimitSchema = limitSchema(3);
+const TimelineLimitSchema = limitSchema(50);
+const AboutEntityLimitSchema = limitSchema(10);
 // A registered type or an x- extension marker (#244, mirrors ingest.js's IngestSchema.type) — the
 // caller-facing `types` filter on search/timeline, so a marker written via store_memory can also
 // be read back explicitly (the planner's OWN type inference in search.js stays registered-only).
@@ -107,9 +112,9 @@ const SearchSchema = z.object({
 });
 const TimelineSchema = z.object({
   start: z.string().min(1), end: z.string().min(1),
-  types: z.array(TypeOrExtensionSchema).optional(), limit: LimitSchema.optional(),
+  types: z.array(TypeOrExtensionSchema).optional(), limit: TimelineLimitSchema.optional(),
 });
-const AboutEntitySchema = z.object({ name: z.string().min(1), limit: LimitSchema.optional() });
+const AboutEntitySchema = z.object({ name: z.string().min(1), limit: AboutEntityLimitSchema.optional() });
 const GetArtifactSchema = z.object({ id: z.coerce.number().int().positive() });
 
 // #244: the type registry (static) + observed x- extension types (dynamic, DB-derived) in one
@@ -411,7 +416,7 @@ function buildMcpServer() {
         start: z.string().min(1).describe("ISO start date/datetime (inclusive)."),
         end: z.string().min(1).describe("ISO end date/datetime (inclusive)."),
         types: z.array(TypeOrExtensionSchema).optional().describe(`Restrict to these types: ${ARTIFACT_TYPES.join(", ")}, or an x- extension marker.`),
-        limit: LimitSchema.optional().describe("Max results (1-50, default 50)."),
+        limit: TimelineLimitSchema.optional().describe("Max results (1-50, default 50)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -429,7 +434,7 @@ function buildMcpServer() {
       description: "Resolve a person/place/org by name, email, or phone and return their profile plus recent linked artifacts.",
       inputSchema: {
         name: z.string().min(1).describe("Name, email, or phone of the entity, e.g. \"Sarah Jones\" or \"sarah.j@gmail.com\"."),
-        limit: LimitSchema.optional().describe("Max linked artifacts per entity (1-50, default 10)."),
+        limit: AboutEntityLimitSchema.optional().describe("Max linked artifacts per entity (1-50, default 10)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
