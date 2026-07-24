@@ -62,18 +62,19 @@ export const VECTOR_DIMENSION = int(process.env.VECTOR_DIMENSION, 1024);
 export const QUERY_MODEL = process.env.QUERY_MODEL || 'qwen2.5:3b';
 // Request timeout (ms) for the embedding/LLM gateway — a hung Ollama shouldn't block for the SDK's 10-min default.
 export const EMBED_TIMEOUT_MS = int(process.env.EMBED_TIMEOUT_MS, 60000);
-// Query-planner controls (#179). The planner is a small JSON call, but on a CPU-only host a
-// 3B model can take >10s — so fail over to pure-semantic FAST rather than stall every search.
-// QUERY_PLAN_TIMEOUT_MS bounds the single planner attempt (was a hardcoded 8000); a fast/GPU
-// host that answers within it still gets planned filters. QUERY_PLANNER_ENABLED=false skips the
-// LLM call entirely (search behaves like usePlanner:false — pure semantic + keyword, sub-second)
-// for a box where the planner never beats even a low timeout.
-export const QUERY_PLAN_TIMEOUT_MS = int(process.env.QUERY_PLAN_TIMEOUT_MS, 2500);
+// Query-planner controls (#179, defaults recalibrated #221). The planner is a small JSON call, but
+// on a CPU-only host — this project's expected deployment — a 3B model can take >10s, so the default
+// must not abandon a plan that would have succeeded. QUERY_PLAN_TIMEOUT_MS bounds the single planner
+// attempt; 20000ms is the CPU-host-safe default (a fast/GPU host answers well within it). The
+// fail-over-fast rationale still holds for a dead/unreachable planner — just bounded at 20s now.
+// QUERY_PLANNER_ENABLED=false skips the LLM call entirely (search behaves like usePlanner:false —
+// pure semantic + keyword, sub-second) for a box where the planner never beats even a low timeout.
+export const QUERY_PLAN_TIMEOUT_MS = int(process.env.QUERY_PLAN_TIMEOUT_MS, 20000);
 export const QUERY_PLANNER_ENABLED = bool(process.env.QUERY_PLANNER_ENABLED, true);
-// Cap on planner output tokens — the plan is a tiny JSON and generation time dominates on CPU,
-// so bounding it is the single biggest per-search win. Env-overridable but left out of
-// .env.example (an internal safety cap most installs never touch).
-export const QUERY_PLAN_MAX_TOKENS = int(process.env.QUERY_PLAN_MAX_TOKENS, 128);
+// Cap on planner output tokens — the plan is a tiny JSON and generation time dominates on CPU, so
+// bounding it is a big per-search win. 256 is the default (#221): 128 truncated real plans into
+// invalid JSON, which silently triggered the same fail-over to pure-semantic.
+export const QUERY_PLAN_MAX_TOKENS = int(process.env.QUERY_PLAN_MAX_TOKENS, 256);
 // Boot-time warm-up (#247): a cold Ollama load of QUERY_MODEL can alone exceed
 // QUERY_PLAN_TIMEOUT_MS, so every query-plan attempt after boot (or after an idle unload) times
 // out and silently degrades to pure-semantic. Ollama's OpenAI-compat /v1/chat/completions ignores
