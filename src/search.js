@@ -104,9 +104,12 @@ export async function warmUpQueryModel() {
     const resp = await fetch(`${nativeBase}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: QUERY_MODEL, prompt: '', keep_alive: QUERY_MODEL_KEEP_ALIVE }),
+      // stream:false so this resolves with one JSON body instead of Ollama's default NDJSON
+      // stream, which we'd otherwise never read — avoids leaving the response stream dangling.
+      body: JSON.stringify({ model: QUERY_MODEL, prompt: '', keep_alive: QUERY_MODEL_KEEP_ALIVE, stream: false }),
       signal: AbortSignal.timeout(QUERY_MODEL_WARMUP_TIMEOUT_MS),
     });
+    await resp.text(); // drain the body so the connection is released regardless of status
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     console.log(`query-plan: warmed up ${QUERY_MODEL} (keep_alive ${QUERY_MODEL_KEEP_ALIVE})`);
   } catch (err) {
