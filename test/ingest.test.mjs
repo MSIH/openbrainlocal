@@ -11,7 +11,7 @@ const { cleanup } = useTempDb();
 const fake = await startFakeOllama();
 process.env.OLLAMA_BASE_URL = fake.baseUrl;
 
-const { executeIngest, computeWarnings, IngestPayloadSchema } = await import('../src/ingest.js');
+const { executeIngest, computeWarnings, IngestPayloadSchema, ingestBatchItem } = await import('../src/ingest.js');
 const { db, getArtifactById } = await import('../src/db.js');
 
 after(async () => { db.close(); await fake.close(); cleanup(); });
@@ -61,4 +61,19 @@ test('executeIngest: core resolves place_label from raw lat/lon when none is sup
   });
   const a = getArtifactById(r.result.id);
   assert.ok(a.place_label && a.place_label.length > 0, 'a place_label was resolved from coordinates');
+});
+
+test('ingestBatchItem: an unreachable embedding gateway yields embedding_unavailable, not ingest_failed (#255)', async () => {
+  // Stop the fake Ollama so the next embedding call refuses the connection (ECONNREFUSED),
+  // mirroring a real Ollama-down repro. Safe to close again in `after` — node's
+  // server.close(callback) on an already-stopped server just invokes the callback with an
+  // error argument, which the helper's resolve-as-callback silently absorbs.
+  await fake.close();
+
+  // A brand-new source_id forces a re-embed (executeIngest always embeds on create).
+  const failed = await ingestBatchItem(
+    { source: 'ingest-gateway-down', source_id: '1', type: 'note', text_repr: 'unreachable' },
+    0,
+  );
+  assert.deepEqual(failed, { error: 'embedding_unavailable' });
 });

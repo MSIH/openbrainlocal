@@ -92,11 +92,13 @@ Design note: prefer **accept-with-warning** over rejection wherever data isn't d
 
 // 200 — per-item results, index-aligned with the request (results[i] ↔ artifacts[i])
 {
-  "summary": { "created": 2, "updated": 0, "failed": 1 },
+  "summary": { "created": 2, "updated": 0, "failed": 3 },
   "results": [
     { "id": 4821, "created": true, "resolved_entities": 1, "unresolved_aliases": 0 },
     { "id": 4822, "created": true, "resolved_entities": 0, "unresolved_aliases": 0, "warnings": ["…"] },
-    { "error": "validation", "issues": [ … ] }
+    { "error": "validation", "issues": [ … ] },
+    { "error": "embedding_unavailable" },
+    { "error": "ingest_failed" }
   ]
 }
 
@@ -105,6 +107,8 @@ Design note: prefer **accept-with-warning** over rejection wherever data isn't d
 ```
 
 The envelope schema validates only shape and count (1–100 items) — a malformed *item* is never an envelope-level 422; it becomes a `{error, issues?}` entry at its index instead, so 99 good artifacts in a batch of 100 are never held hostage by 1 bad one. The response is **always HTTP 200** once the envelope itself is well-formed, even when some items failed — the request succeeded; per-item status lives in the body (`summary` gives the quick read, so a connector doesn't have to count `results` itself). Batch is a backlog path (cron/one-shot backfills), processed sequentially, not a low-latency path — see doc `05-roadmap.md` Milestone 0.
+
+`embedding_unavailable` vs `ingest_failed` (#255): an item that needed a fresh embedding but the embedding gateway (Ollama) was unreachable or timed out gets `embedding_unavailable` — retry that item later, unchanged, once the gateway is back. Any other runtime failure (e.g. a DB-layer error) still gets the generic `ingest_failed` — don't blindly retry it without investigating; resending it unchanged will fail the same way. A metadata-only re-ingest (unchanged `text_repr`) never calls the embedder at all, so it succeeds normally even while the gateway is down.
 
 **Existence check (implemented, `POST /api/v1/exists`, #198).** Purely **read-only** — no upsert, no `ingest_log` row. It lets a connector skip the expensive enrich+ingest for artifacts core already has: the common trigger is a source whose local skip-state was lost or invalidated (e.g. a Google Takeout re-extract resets every file's mtime, so `photo-exif`'s mtime-keyed manifest misses on everything even though the library is fully imported). The check is by the exact upsert key `(source, source_id)`, so a Takeout-origin key (`gphotos:<hash>`) and a generic key (`<hash>`) are correctly treated as distinct. Validation failures are `422` (same funnel as `/ingest`); a connector built against a newer core must treat a `404` as "this core predates `/exists`" and fall back to processing everything, never a hard failure.
 

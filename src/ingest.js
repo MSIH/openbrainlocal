@@ -20,6 +20,7 @@
  */
 import express from 'express';
 import { z } from 'zod';
+import { APIConnectionError } from 'openai';
 
 import { upsertArtifactTxn, getArtifactBySource, existingSourceIds } from './db.js';
 import { embedToFloat32 } from './embeddings.js';
@@ -185,7 +186,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // the caller's index instead of aborting the loop, so item N never poisons items 1..N-1
 // (roadmap M0 deliverable 2 — one transaction per artifact; upsertArtifactTxn is itself a
 // db.transaction, so a thrown error there rolls back only this item's own write).
-async function ingestBatchItem(rawItem, index) {
+export async function ingestBatchItem(rawItem, index) {
   const parsed = IngestPayloadSchema.safeParse(rawItem);
   if (!parsed.success) return { error: 'validation', issues: parsed.error.issues };
   try {
@@ -196,8 +197,13 @@ async function ingestBatchItem(rawItem, index) {
     // (design-philosophy §4); the item is skipped, the loop continues. The client-facing body
     // stays generic — mirrors the app's own 500 posture (server.js's error funnel masks
     // internal errors behind "Internal server error"), so an embed/DB failure never leaks
-    // internal connection details (e.g. the Ollama URL) to an API-key holder.
+    // internal connection details (e.g. the Ollama URL) to an API-key holder. The one
+    // exception: an unreachable/timed-out embedding gateway gets its own code
+    // (`APIConnectionTimeoutError` extends `APIConnectionError`, so this one check covers
+    // both) — this is a "retry later" signal, not "this item is bad," and a connector can't
+    // tell those apart from an identical `ingest_failed` (#255).
     console.error(`ingest batch item ${index} failed`, err);
+    if (err instanceof APIConnectionError) return { error: 'embedding_unavailable' };
     return { error: 'ingest_failed' };
   }
 }
