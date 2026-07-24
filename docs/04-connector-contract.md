@@ -92,7 +92,7 @@ Design note: prefer **accept-with-warning** over rejection wherever data isn't d
 
 // 200 — per-item results, index-aligned with the request (results[i] ↔ artifacts[i])
 {
-  "summary": { "created": 2, "updated": 0, "failed": 1 },
+  "summary": { "created": 2, "updated": 0, "failed": 3 },
   "results": [
     { "id": 4821, "created": true, "resolved_entities": 1, "unresolved_aliases": 0 },
     { "id": 4822, "created": true, "resolved_entities": 0, "unresolved_aliases": 0, "warnings": ["…"] },
