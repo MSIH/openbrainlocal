@@ -62,8 +62,14 @@ function planSystemPrompt(today) {
   ].join('\n');
 }
 
+// Local calendar date (not UTC slice — an evening query must resolve "today" against
+// the local day, not tomorrow's UTC date; mirrors consolidate.js's localDate). Exported so a
+// test can assert its format/behavior directly, same as rrf.
+export const localDate = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
 async function parseQuery(query) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDate(new Date());
   try {
     const resp = await ai.chat.completions.create(
       {

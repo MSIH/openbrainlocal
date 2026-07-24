@@ -10,7 +10,7 @@ const { cleanup } = useTempDb();
 const fake = await startFakeOllama();
 process.env.OLLAMA_BASE_URL = fake.baseUrl;
 
-const { rrf, hybridSearch, timeline, aboutEntity, warmUpQueryModel } = await import('../src/search.js');
+const { rrf, hybridSearch, timeline, aboutEntity, warmUpQueryModel, localDate } = await import('../src/search.js');
 const { executeIngest } = await import('../src/ingest.js');
 const { db, insertEntityStmt, insertAliasStmt, normalizePhone } = await import('../src/db.js');
 
@@ -29,6 +29,14 @@ test('rrf: an id ranked by two arms outranks ids seen by only one', () => {
 test('rrf: empty input is safe', () => {
   assert.deepEqual(rrf([]), []);
   assert.deepEqual(rrf([[], []]), []);
+});
+
+test('localDate: formats from local calendar components, zero-padded, never a UTC ISO slice (#253)', () => {
+  // Construct via the local-component constructor (TZ-agnostic assertion): whatever the runner's
+  // timezone, localDate() must report those same y/m/d components back — proving it reads
+  // getFullYear/getMonth/getDate, not new Date().toISOString(), which would give the UTC day.
+  assert.equal(localDate(new Date(2026, 0, 5, 23, 30)), '2026-01-05');
+  assert.equal(localDate(new Date(2026, 10, 1, 0, 5)), '2026-11-01');
 });
 
 test('hybridSearch enforces default_searchable: a no-type search hides a visit; an explicit type surfaces it (#121)', async () => {
