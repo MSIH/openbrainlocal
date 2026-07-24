@@ -5,7 +5,15 @@
       "Bash(rm -rf:*)",
       "Bash(del:*)",
       "Bash(rmdir:*)",
-      "Bash(Remove-Item:*)"
+      "Bash(Remove-Item:*)",
+      "PowerShell(Remove-Item:*)",
+      "PowerShell(Remove-*)",
+      "PowerShell(rm:*)",
+      "PowerShell(rm -rf:*)",
+      "PowerShell(ri:*)",
+      "PowerShell(del:*)",
+      "PowerShell(rd:*)",
+      "PowerShell(rmdir:*)"
     ]
   },
   "hooks": {
@@ -72,6 +80,24 @@
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR merge event..." }
         ]
+      },
+      {
+        "matcher": "PowerShell(gh issue create*)",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture issue event..." }
+        ]
+      },
+      {
+        "matcher": "PowerShell(gh pr create*)",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR event..." }
+        ]
+      },
+      {
+        "matcher": "PowerShell(gh pr merge*)",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR:-$(pwd)}/connectors/gh-event-claude/index.js\"", "shell": "bash", "timeout": 30, "statusMessage": "Capture PR merge event..." }
+        ]
       }
     ],
     "PreToolUse": [
@@ -107,6 +133,24 @@
       },
       {
         "matcher": "mcp__github__create_pull_request",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre-pr-review-gate.sh", "shell": "bash", "statusMessage": "Pre-PR review gate..." }
+        ]
+      },
+      {
+        "matcher": "PowerShell(gh issue create*)",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/draft-issue-gate.sh", "shell": "bash", "statusMessage": "Draft-issue gate..." }
+        ]
+      },
+      {
+        "matcher": "PowerShell(git worktree add*)",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-gate.sh", "shell": "bash", "statusMessage": "Worktree confirmation gate..." }
+        ]
+      },
+      {
+        "matcher": "PowerShell(gh pr create*)",
         "hooks": [
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/pre-pr-review-gate.sh", "shell": "bash", "statusMessage": "Pre-PR review gate..." }
         ]
