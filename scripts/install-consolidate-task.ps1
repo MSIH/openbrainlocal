@@ -63,4 +63,10 @@ Write-Host "  action: $action"
 schtasks /Create /F /TN $TaskName /SC DAILY /ST $StartTime /RU $RunAs /TR $action
 if ($LASTEXITCODE -ne 0) { throw "schtasks /Create failed with exit code $LASTEXITCODE" }
 
+# PowerShell's native-argument marshaling can mangle a /TR value with nested quotes without
+# schtasks reporting an error -- echo the stored action back so a bad quote is caught here,
+# at install time, rather than discovered only when the digest silently never runs.
+Write-Host 'Stored action (verify this matches the command above):'
+schtasks /Query /TN $TaskName /V /FO LIST | Select-String '^Task To Run:'
+
 Write-Host "Installed. Output will append to: $logPath"
