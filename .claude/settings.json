@@ -9,6 +9,7 @@
       "PowerShell(Remove-Item:*)",
       "PowerShell(Remove-*)",
       "PowerShell(rm:*)",
+      "PowerShell(rm -rf:*)",
       "PowerShell(ri:*)",
       "PowerShell(del:*)",
       "PowerShell(rd:*)",
