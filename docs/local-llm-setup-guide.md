@@ -125,10 +125,11 @@ $env:OLLAMA_MAX_LOADED_MODELS = "2"
 The 780M is an iGPU (gfx1103) that AMD's ROCm does **not officially support**, so out of the box **Ollama on Windows runs on CPU**. For your use case that's mostly fine:
 
 - **Embeddings**: CPU is completely fine — milliseconds per memory at 0.6B size. Don't bother with GPU here.
-- **Query planner (`QUERY_MODEL`, `/api/search`)**: on CPU a 3B planner can take >10s, exceeding the
-  planner timeout so every search falls back to pure-semantic after a stall (#179). Fixes, cheapest first:
+- **Query planner (`QUERY_MODEL`, `/api/search`)**: on CPU a 3B planner is slow (often several seconds);
+  if a plan exceeds `QUERY_PLAN_TIMEOUT_MS` (default 20000ms) — an especially slow model, or a cold load —
+  that search falls back to pure-semantic after the stall (#179). Fixes, cheapest first:
   set `QUERY_PLANNER_ENABLED=false` (skip the planner — search stays sub-second, keyword+semantic only),
-  or use a smaller `QUERY_MODEL` (`qwen2.5:1.5b`/`0.5b`) that beats `QUERY_PLAN_TIMEOUT_MS` (default 2500ms).
+  or use a smaller `QUERY_MODEL` (`qwen2.5:1.5b`/`0.5b`) that plans well within `QUERY_PLAN_TIMEOUT_MS`.
   A GPU removes the issue outright. `recall`/`store` are unaffected (no planner).
   Note that `OLLAMA_KEEP_ALIVE` (Step 4) only helps *after* `QUERY_MODEL` has loaded once — it does
   nothing for the very first query after boot, or the first one after an idle unload. That cold load
