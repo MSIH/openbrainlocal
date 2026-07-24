@@ -130,6 +130,15 @@ The 780M is an iGPU (gfx1103) that AMD's ROCm does **not officially support**, s
   set `QUERY_PLANNER_ENABLED=false` (skip the planner — search stays sub-second, keyword+semantic only),
   or use a smaller `QUERY_MODEL` (`qwen2.5:1.5b`/`0.5b`) that beats `QUERY_PLAN_TIMEOUT_MS` (default 2500ms).
   A GPU removes the issue outright. `recall`/`store` are unaffected (no planner).
+  Note that `OLLAMA_KEEP_ALIVE` (Step 4) only helps *after* `QUERY_MODEL` has loaded once — it does
+  nothing for the very first query after boot, or the first one after an idle unload. That cold load
+  alone can exceed even a 20s `QUERY_PLAN_TIMEOUT_MS` (#247), which is what a repeated
+  `query-plan: LLM parse failed … Request timed out` in the server log means. The server now warms
+  `QUERY_MODEL` at boot (`warmUpQueryModel` in `src/search.js`) via Ollama's native `/api/generate` —
+  the OpenAI-compat endpoint ignores a per-request `keep_alive` (ollama/ollama#11458), so this hits
+  Ollama directly instead. Tune it with `QUERY_MODEL_KEEP_ALIVE` (default `30m`) and
+  `QUERY_MODEL_WARMUP_TIMEOUT_MS` (default `60000`) in `.env`; it's skipped entirely when
+  `QUERY_PLANNER_ENABLED=false`.
 - **Chat (8B)**: CPU gives usable-but-slow speeds. If you want faster:
 
 **Easiest GPU path — LM Studio (Vulkan):** LM Studio's Vulkan backend works with the 780M on Windows with zero hacks. Install from <https://lmstudio.ai>, load a Qwen3 8B GGUF, enable GPU offload, and turn on its local server (also OpenAI-compatible, port 1234). You can run LM Studio for chat and Ollama for embeddings side by side.

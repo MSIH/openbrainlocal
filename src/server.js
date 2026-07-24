@@ -33,7 +33,7 @@ import { accessLogMiddleware, pruneOldLogs, ensureCompressed, closeAccessLog } f
 import { db, storeArtifactTxn, sha256, listEntities, getEntityProfile, getEntity, createEntity, updateEntityAttrs, addAlias, removeAlias, removeRelation, setEntityPhotoFile, getContactPhotoRawPath, upsertEntityRelation, canonicalRelationType, resolveEntityIds, proposeEntity, listProposedEntities, approveProposedEntity, rejectProposedEntity, backfillDirectoryProposals, listObservedExtensionTypes, logEvent, normalizeName, normalizePhone } from './db.js';
 import { savePhotoBytes } from './contacts.js';
 import { embedToFloat32 } from './embeddings.js';
-import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos } from './search.js';
+import { hybridSearch, timeline, aboutEntity, getArtifactById, ARTIFACT_TYPES, mergeEntities, listProbableDuplicates, listContactPhotos, warmUpQueryModel } from './search.js';
 import { TYPE_REGISTRY, isRegisteredType, isExtensionType } from './ingest-types.js';
 import { buildIngestRouter } from './ingest.js';
 
@@ -1037,6 +1037,8 @@ const serverInstance = app.listen(PORT, () => {
   console.log(`🔒 Local Ollama-Powered Streamable HTTP Brain operating on port ${PORT} · db ${path.resolve(DB_PATH)}`);
   // UI state at a glance (#169): token-only, no open mount. The token value itself is never logged.
   console.log(UI_URL_TOKEN ? 'web UI: /<token>/ui/… (UI_URL_TOKEN set)' : 'web UI: disabled (set UI_URL_TOKEN)');
+  // Non-blocking (#247): logs its own success/failure, never delays listen().
+  void warmUpQueryModel();
 });
 
 // --- GRACEFUL SHUTDOWN ---

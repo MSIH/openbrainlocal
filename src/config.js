@@ -74,6 +74,15 @@ export const QUERY_PLANNER_ENABLED = bool(process.env.QUERY_PLANNER_ENABLED, tru
 // so bounding it is the single biggest per-search win. Env-overridable but left out of
 // .env.example (an internal safety cap most installs never touch).
 export const QUERY_PLAN_MAX_TOKENS = int(process.env.QUERY_PLAN_MAX_TOKENS, 128);
+// Boot-time warm-up (#247): a cold Ollama load of QUERY_MODEL can alone exceed
+// QUERY_PLAN_TIMEOUT_MS, so every query-plan attempt after boot (or after an idle unload) times
+// out and silently degrades to pure-semantic. Ollama's OpenAI-compat /v1/chat/completions ignores
+// a per-request keep_alive (ollama/ollama#11458), so warmUpQueryModel (search.js) instead hits the
+// native /api/generate endpoint, which does honor it. QUERY_MODEL_KEEP_ALIVE is the duration Ollama
+// keeps the model resident after that warm-up; QUERY_MODEL_WARMUP_TIMEOUT_MS bounds the one-shot
+// warm-up call itself (longer than QUERY_PLAN_TIMEOUT_MS — a cold load is expected to be slow).
+export const QUERY_MODEL_KEEP_ALIVE = process.env.QUERY_MODEL_KEEP_ALIVE || '30m';
+export const QUERY_MODEL_WARMUP_TIMEOUT_MS = int(process.env.QUERY_MODEL_WARMUP_TIMEOUT_MS, 60000);
 
 // --- Hybrid search tuning ---
 export const RRF_K = int(process.env.RRF_K, 60);          // reciprocal-rank-fusion constant
