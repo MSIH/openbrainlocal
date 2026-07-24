@@ -65,12 +65,17 @@ oldest-first with each `text_repr` clipped to `DIGEST_TEXT_CLIP` chars (`truncat
 
 ## Scheduling (config, not code)
 
-Nightly at 02:00, Windows Task Scheduler:
+Nightly at 02:00, Windows Task Scheduler — install/update the task with the committed
+installer script (idempotent: safe to re-run after moving the repo or changing the
+schedule), run once as Administrator on the box that hosts the live server:
 
 ```powershell
-schtasks /Create /TN "LifeContext Consolidate" /SC DAILY /ST 02:00 `
-  /TR "cmd /c cd /d C:\path\to\life-context && npm run consolidate" /RU SYSTEM
+powershell -File scripts\install-consolidate-task.ps1
+# or: powershell -File scripts\install-consolidate-task.ps1 -StartTime 03:30 -RunAs SYSTEM
 ```
+
+Runs as `SYSTEM` by default; `npm run consolidate`'s stdout/stderr append to
+`logs\consolidate-task.log` (Task Scheduler's own run history doesn't capture it).
 
 Or as an NSSM-wrapped service with its own schedule, per the roadmap's low-priority worker
 posture. macOS/Linux: a `launchd` plist or cron line (`0 2 * * * cd /path/to/life-context && npm run consolidate`).
