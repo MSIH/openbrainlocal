@@ -12,7 +12,7 @@ import { db, resolveEntityIds, resolveNameByPrefix, getEntity, getArtifactById, 
 import { ai, embedToFloat32 } from './embeddings.js';
 import { geocodePlace, haversineKm } from './geocode.js';
 import { normalizeUsState } from './us-states.js';
-import { QUERY_MODEL, QUERY_PLAN_TIMEOUT_MS, QUERY_PLANNER_ENABLED, QUERY_PLAN_MAX_TOKENS, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
+import { OLLAMA_BASE_URL, QUERY_MODEL, QUERY_PLAN_TIMEOUT_MS, QUERY_PLANNER_ENABLED, QUERY_PLAN_MAX_TOKENS, QUERY_MODEL_KEEP_ALIVE, QUERY_MODEL_WARMUP_TIMEOUT_MS, RRF_K, KNN_OVERFETCH, KNN_MIN, KNN_MAX, DIGEST_TIMELINE_DAYS, GEO_RADIUS_DEFAULT_KM, GEO_RADIUS_MAX_KM } from './config.js';
 import { ARTIFACT_TYPES, TYPE_REGISTRY } from './ingest-types.js';
 
 // Re-exported so the planner prompt below, the plan-schema filter, and every existing
@@ -89,6 +89,32 @@ async function parseQuery(query) {
     console.error('query-plan: LLM parse failed, using pure-semantic fallback:', err.message);
   }
   return fallbackPlan(query);
+}
+
+// Boot-time warm-up (#247): preloads QUERY_MODEL via Ollama's native /api/generate (an empty
+// prompt loads the model without generating tokens) so the first real query-plan call doesn't
+// pay a cold-load that alone can exceed QUERY_PLAN_TIMEOUT_MS. The OpenAI-compat endpoint the
+// rest of this module uses ignores a per-request keep_alive (ollama/ollama#11458), so this goes
+// straight to the native API, which does honor it. Fire-and-forget from server.js at boot; never
+// throws — same "search never fails just because Ollama is offline" contract as parseQuery.
+export async function warmUpQueryModel() {
+  if (!QUERY_PLANNER_ENABLED) return;
+  const nativeBase = OLLAMA_BASE_URL.replace(/\/v1\/?$/, '');
+  try {
+    const resp = await fetch(`${nativeBase}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // stream:false so this resolves with one JSON body instead of Ollama's default NDJSON
+      // stream, which we'd otherwise never read — avoids leaving the response stream dangling.
+      body: JSON.stringify({ model: QUERY_MODEL, prompt: '', keep_alive: QUERY_MODEL_KEEP_ALIVE, stream: false }),
+      signal: AbortSignal.timeout(QUERY_MODEL_WARMUP_TIMEOUT_MS),
+    });
+    await resp.text(); // drain the body so the connection is released regardless of status
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    console.log(`query-plan: warmed up ${QUERY_MODEL} (keep_alive ${QUERY_MODEL_KEEP_ALIVE})`);
+  } catch (err) {
+    console.error('query-plan: warm-up failed (planner will cold-load on first query):', err.message);
+  }
 }
 
 // --- Statements ---

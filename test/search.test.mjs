@@ -10,7 +10,7 @@ const { cleanup } = useTempDb();
 const fake = await startFakeOllama();
 process.env.OLLAMA_BASE_URL = fake.baseUrl;
 
-const { rrf, hybridSearch, timeline, aboutEntity } = await import('../src/search.js');
+const { rrf, hybridSearch, timeline, aboutEntity, warmUpQueryModel } = await import('../src/search.js');
 const { executeIngest } = await import('../src/ingest.js');
 const { db, insertEntityStmt, insertAliasStmt, normalizePhone } = await import('../src/db.js');
 
@@ -107,4 +107,14 @@ test('timeline + about_entity annotate handles with the resolved contact name (#
   const about = aboutEntity('Marta Reyes');
   const linked = about.entities[0].artifacts.find((a) => a.source_id === 'msg-149');
   assert.equal(linked.display_text, 'Message from Marta Reyes (+13105550188): "dinner at 7?"');
+});
+
+test('warmUpQueryModel: hits the native /api/generate endpoint with the query model, keep_alive, and a non-streamed request (#247)', async () => {
+  const before = fake.counts.generate;
+  await warmUpQueryModel();
+  assert.equal(fake.counts.generate, before + 1, 'exactly one warm-up call is made');
+  const body = fake.getLastGenerateBody();
+  assert.equal(body.prompt, '', 'an empty prompt preloads the model without generating tokens');
+  assert.equal(body.stream, false, 'a streamed reply would otherwise never be drained');
+  assert.ok(body.model && body.keep_alive, 'model and keep_alive are both forwarded');
 });
