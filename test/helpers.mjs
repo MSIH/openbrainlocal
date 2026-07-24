@@ -29,6 +29,7 @@ export function useTempDb() {
 // engine — the connector tests take the same mock-HTTP-server approach. Serves:
 //   POST /v1/embeddings         -> a deterministic VECTOR_DIMENSION-length vector
 //   POST /v1/chat/completions   -> a fixed pure-semantic plan (the planner's happy path)
+//   POST /api/generate          -> Ollama's native endpoint (warmUpQueryModel, #247)
 // `counts` tracks calls so a test can assert re-embed-only-on-text-change. Set OLLAMA_BASE_URL
 // to the returned baseUrl BEFORE importing embeddings.js (or anything that imports it).
 // The empty pure-semantic plan the fake planner returns by default (mirrors search.js's fallback);
@@ -36,10 +37,12 @@ export function useTempDb() {
 const EMPTY_PLAN = { types: [], entities: [], place: null, near: null, time_start: null, time_end: null, geo_required: false, sort: 'relevance', semantic: '' };
 
 export async function startFakeOllama() {
-  const counts = { embed: 0, chat: 0 };
+  const counts = { embed: 0, chat: 0, generate: 0 };
   // The chat (planner) response is mutable so a test can make the planner emit filters and assert
   // they're applied; default is the empty pure-semantic plan (unchanged for existing callers).
-  const state = { chatPlan: { ...EMPTY_PLAN } };
+  // lastGenerateBody captures the parsed body of the most recent /api/generate call (#247) so a
+  // test can assert warmUpQueryModel sent the right model/keep_alive/stream fields.
+  const state = { chatPlan: { ...EMPTY_PLAN }, lastGenerateBody: null };
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -68,6 +71,10 @@ export async function startFakeOllama() {
       } else if (req.url.endsWith('/chat/completions')) {
         counts.chat++;
         res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(state.chatPlan) } }] }));
+      } else if (req.url.endsWith('/api/generate')) {
+        counts.generate++;
+        try { state.lastGenerateBody = JSON.parse(body || '{}'); } catch { state.lastGenerateBody = null; }
+        res.end(JSON.stringify({ done: true }));
       } else {
         res.statusCode = 404;
         res.end('{}');
@@ -81,6 +88,7 @@ export async function startFakeOllama() {
     counts,
     // Override the planner's returned plan (merged over the empty default) for a single assertion.
     setChatPlan: (plan) => { state.chatPlan = { ...EMPTY_PLAN, ...plan }; },
+    getLastGenerateBody: () => state.lastGenerateBody,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }

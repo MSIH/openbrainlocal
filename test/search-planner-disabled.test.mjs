@@ -12,7 +12,7 @@ const fake = await startFakeOllama();
 process.env.OLLAMA_BASE_URL = fake.baseUrl;
 process.env.QUERY_PLANNER_ENABLED = 'false';
 
-const { hybridSearch } = await import('../src/search.js');
+const { hybridSearch, warmUpQueryModel } = await import('../src/search.js');
 const { executeIngest } = await import('../src/ingest.js');
 const { db } = await import('../src/db.js');
 
@@ -26,4 +26,10 @@ test('QUERY_PLANNER_ENABLED=false: search makes no planner LLM call and still re
   const rows = await hybridSearch('kayak sunset bay', { limit: 5 });
   assert.equal(fake.counts.chat, before, 'no planner chat call is made with the planner disabled');
   assert.ok(rows.some((r) => r.source_id === 'n-1'), 'the pure-semantic path still returns the matching note');
+});
+
+test('QUERY_PLANNER_ENABLED=false: warmUpQueryModel makes no /api/generate call either (#247)', async () => {
+  const before = fake.counts.generate;
+  await warmUpQueryModel();
+  assert.equal(fake.counts.generate, before, 'nothing to warm up when the planner is disabled');
 });
